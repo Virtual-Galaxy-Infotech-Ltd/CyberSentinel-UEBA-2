@@ -35,6 +35,7 @@ WD_LOG="$FORENSIC_DIR/watchdog.log"
 STALE_SECS=240          # >4 missed 60s heartbeats = stalled
 FEED_FRESH_SECS=300     # feed considered "arriving" if mtime younger than this
 MIN_RESTART_GAP=900     # never auto-restart more than once / 15 min
+CONFIRM_SECS=240        # re-check this long after forensics before restarting
 
 mkdir -p "$FORENSIC_DIR"
 now="$(date +%s)"
@@ -114,11 +115,21 @@ snap="$FORENSIC_DIR/stall_$(date +%Y%m%d_%H%M%S).log"
     grep -E "^(VmRSS|VmSize|VmSwap|Threads|FDSize):" "/proc/$EPID/status" 2>/dev/null
     echo "open fds : $(ls /proc/$EPID/fd 2>/dev/null | wc -l)"
     echo "--- per-thread state (D = uninterruptible IO wait, R = running) ---"
+    # Cap with a counter, NOT `| head -40`. Under `set -euo pipefail` (line 25)
+    # head closes the pipe after 40 of the engine's 120 threads, the loop dies of
+    # SIGPIPE, the pipeline reports 141, and set -e then aborts this whole script
+    # — before the SIGUSR1 stack dump below, before the RESTART log line, and
+    # before the `systemctl restart` at the very end. That is why 57 stall
+    # snapshots were captured containing no stacks at all, and why the restart
+    # silently stopped happening.
+    _n=0
     for t in /proc/$EPID/task/*; do
       [ -d "$t" ] || continue
+      _n=$((_n+1))
+      if [ "$_n" -gt 40 ]; then echo "  ... ($(ls /proc/$EPID/task 2>/dev/null | wc -l) threads total)"; break; fi
       printf "  tid=%s %-18s %s\n" "$(basename "$t")" \
-        "$(cat "$t/comm" 2>/dev/null)" "$(awk '{print $3}' "$t/stat" 2>/dev/null)"
-    done 2>/dev/null | head -40
+        "$(cat "$t/comm" 2>/dev/null)" "$(awk '{print $3}' "$t/stat" 2>/dev/null)" || true
+    done 2>/dev/null
 
     # Ask the engine what every thread is executing. Armed by
     # install_stack_dumper() in ueba_engine.py; harmless if absent.
@@ -143,9 +154,35 @@ snap="$FORENSIC_DIR/stall_$(date +%Y%m%d_%H%M%S).log"
   uptime
   echo "--- top by RSS ---"
   ps -eo rss,pcpu,user,comm --sort=-rss 2>/dev/null | head -6
-} >"$snap" 2>&1
+} >"$snap" 2>&1 || true
+# `|| true` is deliberate. Collecting diagnostics is best-effort; the restart is
+# not. Without it any failure inside that block takes the script down with it and
+# the wedged engine is simply left wedged — which is exactly what happened.
+
+# --- confirmation window: did it recover while we collected forensics? ---
+# These stalls are transient. One on 2026-09-29 froze for ~420s with the main
+# thread on-CPU (not blocked on IO or a lock) and then resumed by itself, with no
+# restart at all. STALE_SECS is 240, so the watchdog fires well inside that
+# window: restarting there kills a process that was about to recover and throws
+# away a warm 100-model autoencoder cache for nothing.
+#
+# Forensics are already on disk above, so the diagnosis is not lost either way.
+# Only an engine that is STILL frozen after the confirmation window is restarted.
+sleep "$CONFIRM_SECS"
+now2="$(date +%s)"
+last2="$(grep -a 'Stats |' "$ENGINE_LOG" 2>/dev/null | tail -1 || true)"
+proc2="$(printf '%s' "$last2" | grep -oE 'processed: [0-9]+' | grep -oE '[0-9]+' || echo -1)"
+hb2_ts="$(printf '%s' "$last2" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' || true)"
+hb2_epoch="$(date -d "$hb2_ts" +%s 2>/dev/null || echo 0)"
+hb2_age=$(( now2 - hb2_epoch ))
+
+if [ "$proc2" != "$processed" ] || [ "$hb2_age" -lt "$STALE_SECS" ]; then
+  log "RECOVERED unaided after ~${hb_age}s (processed ${processed}->${proc2}, heartbeat now ${hb2_age}s) — NOT restarting. Snapshot: $snap"
+  echo "$proc2" >"$STATE"
+  exit 0
+fi
 
 echo "$now" >"$STAMP_RESTART"
-log "RESTART (heartbeat ${hb_age}s old, processed frozen @${processed}) — snapshot: $snap"
+log "RESTART (heartbeat ${hb2_age}s old, processed still frozen @${processed} after ${CONFIRM_SECS}s confirmation) — snapshot: $snap"
 systemctl restart ueba-engine
 log "restart issued; new active-state: $(systemctl is-active ueba-engine)"
