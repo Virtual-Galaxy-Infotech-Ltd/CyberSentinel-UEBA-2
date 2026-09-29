@@ -1,0 +1,234 @@
+paths:
+  enriched_input: /root/NEW_DRIVE/aditya_ueba/enriched.jsonl
+  ueba_output: /root/NEW_DRIVE/aditya_ueba/ueba_alerts.jsonl
+  training_data: /root/NEW_DRIVE/aditya_ueba/data/combined_training.jsonl
+  features_h5: /root/NEW_DRIVE/aditya_ueba/data/features.h5
+  profile_db: profiles/user_profiles.db
+  models_dir: models_staging/
+  isolation_forest: models_staging/isolation_forest.pkl
+  scaler: models_staging/scaler.pkl
+  autoencoder_dir: models_staging/autoencoders/
+  global_autoencoder: models_staging/autoencoders/global.pt
+  faiss_index: vector_db_staging/faiss.index
+  faiss_metadata: vector_db_staging/metadata.jsonl
+  state_file: .state/ueba.state
+  log_file: logs/ueba_engine.log
+  trainer_log: logs/ueba_trainer.log
+  preprocessor_log: logs/ueba_preprocessor.log
+  fp_patterns_file: /root/NEW_DRIVE/aditya_ueba/fp_patterns.json
+preprocessing:
+  chunk_size: 50000
+  min_events_per_user: 2000
+  feature_fields:
+    temporal:
+    - enrich.temporal.hour
+    - enrich.temporal.day_of_week
+    - enrich.temporal.is_weekend
+    - enrich.temporal.is_business_hours
+    - enrich.temporal.is_night_shift
+    flags:
+    - enrich.flags.is_auth_event
+    - enrich.flags.is_network_event
+    - enrich.flags.is_file_event
+    - enrich.flags.is_process_event
+    anomalies:
+    - enrich.anomalies.is_brute_force
+    - enrich.anomalies.is_port_scan
+    - enrich.anomalies.is_tor
+    - enrich.anomalies.is_malicious_ip
+    - enrich.anomalies.is_impossible_travel
+    - enrich.anomalies.is_lateral_movement
+    - enrich.anomalies.is_data_exfiltration
+    - enrich.anomalies.is_after_hours
+    - enrich.anomalies.is_high_frequency
+    counters:
+    - enrich.counters.src_ip_5m
+    - enrich.counters.src_ip_1h
+    - enrich.counters.user_1h
+    - enrich.counters.host_1h
+    behavioral:
+    - enrich.behavioral.unique_destinations_1h
+    - enrich.behavioral.unique_ports_1h
+    - enrich.behavioral.recent_failures_5m
+    geo:
+    - enrich.geo.distance_km
+    - enrich.geo.cross_border
+    - enrich.geo.cross_continent
+    risk:
+    - enrich.risk_score
+    - rule.level
+    network:
+    - enrich.network_intel.is_cloud_provider
+    categorical:
+      event_category:
+        field: event_category
+        mapping:
+          auth: 0
+          network: 1
+          process: 2
+          file: 3
+          dns: 4
+          web: 5
+          malware: 6
+          cloud: 7
+          policy: 8
+          system: 9
+          unknown: 10
+      event_outcome:
+        field: event_outcome
+        mapping:
+          success: 0
+          failure: 1
+          unknown: 2
+      traffic_direction:
+        field: enrich.classification.traffic_direction
+        mapping:
+          inbound: 0
+          outbound: 1
+          internal: 2
+          unknown: 3
+  feature_dim: 35
+  null_fill_value: 0.0
+isolation_forest:
+  contamination: 0.005
+  n_estimators: 200
+  max_samples: auto
+  n_jobs: -1
+  random_state: 42
+  training_sample_size: 500000
+  thresholds:
+    suspicious: -0.5
+    anomalous: -0.55
+    highly_anomalous: -0.6
+autoencoder:
+  architecture:
+    input_dim: 35
+    hidden_dims:
+    - 24
+    - 12
+    activation: relu
+    dropout: 0.1
+  training:
+    epochs: 30
+    batch_size: 4096
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    val_split: 0.2
+    early_stopping_patience: 5
+    scheduler_step: 10
+    scheduler_gamma: 0.5
+  threshold_percentile: 95
+  device: cuda
+  inference_device: cpu
+  num_workers: 4
+clusterer:
+  min_cluster_size: 5
+  min_samples: 3
+  metric: euclidean
+  run_interval_seconds: 900
+  buffer_size: 1000
+  min_persistence: 0.3
+score_fusion:
+  isolation_forest_weight: 0.5
+  autoencoder_weight: 0.5
+  alert_threshold: 0.75
+  verdicts:
+  - min: 0.75
+    max: 0.85
+    label: suspicious
+    confidence: low
+  - min: 0.85
+    max: 0.93
+    label: anomalous
+    confidence: medium
+  - min: 0.93
+    max: 1.0
+    label: highly_anomalous
+    confidence: high
+rag:
+  inference_device: cpu
+  top_k: 5
+  min_similarity: 0.6
+  max_index_size: 7000000
+  index_build_fraction: 0.8
+  embedding_fields:
+  - event_category
+  - event_outcome
+  - enrich.temporal.hour
+  - enrich.temporal.is_business_hours
+  - enrich.anomalies.is_brute_force
+  - enrich.anomalies.is_impossible_travel
+  - enrich.anomalies.is_tor
+  - enrich.risk_score
+  - enrich.geo.cross_continent
+profile_store:
+  baseline_window_days: 30
+  update_interval_seconds: 60
+  tracked_fields:
+  - typical_hours
+  - typical_countries
+  - avg_risk_score
+  - avg_events_per_hour
+  - typical_agents
+  - first_seen
+  - last_seen
+  - total_events
+dashboard:
+  agent_sync:
+    enabled: false
+  host: 0.0.0.0
+  port: 3026
+  alerts_file: /root/NEW_DRIVE/aditya_ueba/ueba_alerts.jsonl
+  agents_registry: /root/NEW_DRIVE/aditya_ueba/agents.json
+  false_positives_file: /root/NEW_DRIVE/aditya_ueba/false_positives.json
+  max_alerts: 500000
+  max_feed_alerts: 500000
+  cache_ttl_secs: 10
+  ai_analyst:
+    enabled: true
+    model: claude-sonnet-4-6
+    max_tokens: 1000
+    timeout_secs: 20
+streaming:
+  poll_interval_ms: 100
+  state_save_interval: 1000
+  max_partial_buffer_bytes: 1048576
+  max_loaded_user_models: 100
+logging:
+  level: INFO
+  max_bytes: 10485760
+  backup_count: 5
+  format: '%(asctime)s  %(levelname)-8s  %(name)-20s  %(message)s'
+output:
+  pretty_print: false
+  include_feature_vector: false
+  include_raw_scores: true
+  preserve_original: all
+noise_suppression:
+  signature_ids:
+  - '113202'
+  - '81619'
+  - '81633'
+  - '81634'
+  - '81644'
+  - '81620'
+  - '81621'
+  - '60107'
+  - '61602'
+  - '61643'
+  suppress_zero_risk_network: true
+  suppress_ipv6_multicast: true
+  suppress_source_ips:
+  - 164.52.194.98
+  suppress_hostnames_as_users:
+  - cybersentinel-manager
+  - cybersentinel-manage
+  - Centos7Trial
+identity_resolution:
+  enabled: true
+  mappings:
+    RootSeeker: RootSeeker\Sujal
+    sujalthakur2003@outl: RootSeeker\Sujal
+    LAPTOP-08MIT8SI: LAPTOP-08MIT8SI\Asus
+    LAPTOP-08MIT8SI\Asu: LAPTOP-08MIT8SI\Asus
+    cybersentinel-manage: cybersentinel-manager

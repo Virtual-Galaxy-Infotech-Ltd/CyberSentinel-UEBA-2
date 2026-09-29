@@ -1,0 +1,1266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CyberSentinel UEBA</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Barlow+Condensed:wght@400;500;600;700;800&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet">
+<script>
+/* perf-lite: lighter render path for weak GPUs — drops backdrop-blur (the big
+   GPU cost) for near-opaque panels. Auto-on for genuinely low-end hardware;
+   force with ?lite=1 (persists), clear with ?lite=0. Runs before paint. */
+(function () {
+  try {
+    var q = location.search || '';
+    if (/[?&]lite=1(&|$)/.test(q)) localStorage.setItem('cs-perf-lite', '1');
+    else if (/[?&]lite=0(&|$)/.test(q)) localStorage.removeItem('cs-perf-lite');
+    var forced = localStorage.getItem('cs-perf-lite') === '1';
+    var weak = (navigator.deviceMemory && navigator.deviceMemory <= 2) ||
+               (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2);
+    if (forced || weak) document.documentElement.classList.add('perf-lite');
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+<!-- Liquid-glass refraction filters (iOS 26 style). Displaces the backdrop with
+     fractal noise so glass surfaces bend/ripple the content behind them.
+     Referenced by liquid-glass.css via backdrop-filter: url(#lg-refract...). -->
+<svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true">
+  <defs>
+    <filter id="lg-refract" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.011 0.013" numOctaves="2" seed="7" result="n"/>
+      <feGaussianBlur in="n" stdDeviation="1.3" result="nb"/>
+      <feDisplacementMap in="SourceGraphic" in2="nb" scale="42" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="lg-refract-soft" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.014 0.016" numOctaves="2" seed="4" result="n"/>
+      <feGaussianBlur in="n" stdDeviation="1.1" result="nb"/>
+      <feDisplacementMap in="SourceGraphic" in2="nb" scale="22" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
+</svg>
+
+<div id="toast-container"></div>
+
+<header>
+  <div class="logo">
+    <img class="logo-lockup" src="/cybersentinel-ueba-v2.png" alt="CyberSentinel — User and Entity Behavioral Analysis"/>
+  </div>
+  <div class="threat-ticker"><span class="ticker-live-label">◈ LIVE</span><div class="ticker-scroll-area"><span class="ticker-inner" id="ticker-text">Initializing threat feed...</span></div></div>
+  <div class="header-right">
+    <button id="refresh-btn" onclick="manualRefresh()">⟳ REFRESH</button>
+    <!-- Theme Toggle -->
+    <button class="theme-toggle" id="theme-toggle-btn" title="Toggle light / dark theme">
+      <span class="toggle-icon" id="theme-icon">🌙</span>
+      <div class="toggle-track" id="toggle-track"></div>
+      <span class="toggle-label" id="theme-label">DARK</span>
+    </button>
+    <div class="status-pill">
+      <div class="status-dot"></div>
+      <span>ENGINE LIVE</span>
+    </div>
+    <div class="last-update" id="last-update">Not loaded yet</div>
+  </div>
+</header>
+
+<div class="app-shell" id="app-shell">
+
+  <!-- ── Collapsible icon sidebar ── -->
+  <aside class="sidebar" id="sidebar">
+    <button class="sidebar-toggle" id="sidebar-toggle" type="button"
+            title="Pin / collapse menu" aria-label="Pin or collapse the navigation menu" aria-expanded="false">
+      <span class="sidebar-toggle-icon" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </span>
+    </button>
+    <nav class="side-nav" aria-label="Primary">
+      <div class="tab active" data-tab="overview"        title="Overview">
+        <span class="tab-icon" aria-hidden="true">▚</span><span class="tab-label">Overview</span></div>
+      <div class="tab" data-tab="incidents"              title="Incidents">
+        <span class="tab-icon" aria-hidden="true">⚠</span><span class="tab-label">Incidents</span><span class="nav-pill" id="inc-badge">0</span></div>
+      <div class="tab" data-tab="feed"                   title="Alert Feed">
+        <span class="tab-icon" aria-hidden="true">≣</span><span class="tab-label">Alert Feed</span></div>
+      <div class="tab" data-tab="users"                  title="User Risk">
+        <span class="tab-icon" aria-hidden="true">⦿</span><span class="tab-label">User Risk</span></div>
+      <div class="tab" data-tab="campaigns"              title="Campaigns">
+        <span class="tab-icon" aria-hidden="true">⧉</span><span class="tab-label">Campaigns</span></div>
+      <div class="tab" data-tab="endpoints"              title="Endpoints">
+        <span class="tab-icon" aria-hidden="true">◫</span><span class="tab-label">Endpoints</span></div>
+      <div class="tab" data-tab="false-positives"        title="False Positives">
+        <span class="tab-icon" aria-hidden="true">⚑</span><span class="tab-label">False Positives</span><span class="nav-pill" id="fp-nav-badge">0</span></div>
+      <div class="tab" data-tab="alerting"               title="Alerting">
+        <span class="tab-icon" aria-hidden="true">◈</span><span class="tab-label">Alerting</span><span class="nav-pill" id="ntf-nav-badge">0</span></div>
+      <div class="tab" data-tab="reports"                title="Reports">
+        <span class="tab-icon" aria-hidden="true">▤</span><span class="tab-label">Reports</span></div>
+      <div class="tab" data-tab="watchlist"              title="Watch List">
+        <span class="tab-icon" aria-hidden="true">◎</span><span class="tab-label">Watch List</span><span class="nav-pill" id="wl-nav-badge">0</span></div>
+      <div class="tab" data-tab="threatmap"              title="Threat Map">
+        <span class="tab-icon" aria-hidden="true">◍</span><span class="tab-label">Threat Map</span><span class="tm-live-pill">● LIVE</span></div>
+    </nav>
+  </aside>
+
+  <div class="app-main">
+
+    <!-- Time-window bar (lifted out of the old horizontal nav) -->
+    <div class="content-topbar">
+      <div class="tl-nav-bar">
+        <span class="tl-label">WINDOW</span>
+        <button class="tl-btn" data-hours="24">24H</button>
+        <button class="tl-btn" data-hours="72">3D</button>
+        <button class="tl-btn" data-hours="168">7D</button>
+        <button class="tl-btn" data-hours="720">30D</button>
+        <button class="tl-btn" data-hours="1440">60D</button>
+        <button class="tl-btn" data-hours="2160">90D</button>
+        <button class="tl-btn active" data-hours="0">ALL</button>
+        <span class="tl-showing" id="tl-showing"></span>
+      </div>
+    </div>
+
+<main>
+
+  <!-- OVERVIEW -->
+  <div class="page active" id="page-overview">
+
+    <!-- ══ ROW A: Unified Alert Metrics Banner ══ -->
+    <div class="unified-banner-header">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+        <path d="M11 2L3 5.5V10C3 14 6.5 17.7 11 19C15.5 17.7 19 14 19 10V5.5L11 2Z" stroke="#9b5de5" stroke-width="1.5" fill="none"/>
+        <circle cx="11" cy="11" r="3" fill="#9b5de5" opacity="0.8"/>
+      </svg>
+      <span class="banner-heading-title">UEBA</span>
+      <span style="font-family:var(--mono2);font-size:13px;color:var(--purple);letter-spacing:2px;opacity:0.7">BEHAVIOURAL ANALYTICS ENGINE</span>
+      <span class="banner-heading-sub" id="last-update-banner"></span>
+    </div>
+    <div class="unified-banner" id="stats-grid">
+      <!-- Stat: Highly Anomalous -->
+      <div class="banner-stat red" data-nav="feed" data-filter="highly_anomalous">
+        <div class="banner-stat-label">HIGHLY ANOMALOUS</div>
+        <div class="banner-stat-value" id="s-highly">—</div>
+        <div class="banner-stat-sub">critical threats</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Stat: Anomalous -->
+      <div class="banner-stat orange" data-nav="feed" data-filter="anomalous">
+        <div class="banner-stat-label">ANOMALOUS</div>
+        <div class="banner-stat-value" id="s-anomalous">—</div>
+        <div class="banner-stat-sub">high risk events</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Stat: Suspicious -->
+      <div class="banner-stat yellow" data-nav="feed" data-filter="suspicious">
+        <div class="banner-stat-label">SUSPICIOUS</div>
+        <div class="banner-stat-value" id="s-suspicious">—</div>
+        <div class="banner-stat-sub">medium risk</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Stat: Total Alerts -->
+      <div class="banner-stat blue" data-nav="feed" data-filter="all">
+        <div class="banner-stat-label">TOTAL ALERTS</div>
+        <div class="banner-stat-value" id="s-total">—</div>
+        <div class="banner-stat-sub" id="s-1h">— in last hour</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Stat: Campaigns -->
+      <div class="banner-stat green" data-nav="campaigns" data-filter="">
+        <div class="banner-stat-label">CAMPAIGNS</div>
+        <div class="banner-stat-value" id="dm-campaigns">—</div>
+        <div class="banner-stat-sub">attack clusters</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Stat: Unique Users -->
+      <div class="banner-stat purple" data-nav="users" data-filter="">
+        <div class="banner-stat-label">UNIQUE USERS</div>
+        <div class="banner-stat-value" id="dm-users-count">—</div>
+        <div class="banner-stat-sub">with anomalies</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Stat: Critical Rate -->
+      <div class="banner-stat red2" data-nav="feed" data-filter="highly_anomalous">
+        <div class="banner-stat-label">CRITICAL RATE</div>
+        <div class="banner-stat-value" id="dm-critical-pct">—</div>
+        <div class="banner-stat-sub">highly anomalous</div>
+      </div>
+      <div class="banner-divider"></div>
+      <!-- Right: Top reasons mini list -->
+      <div class="banner-reasons">
+        <div class="banner-reasons-title"><span id="s-users" style="color:var(--purple);font-size:18px;font-family:var(--mono)">—</span> <span style="font-size:13px;color:var(--text3);letter-spacing:1px">USERS AT RISK</span></div>
+        <div class="reasons-list" id="reasons-list"></div>
+      </div>
+    </div>
+
+    <!-- ══ ROW B: Risk Gauge + Radar + Timeline (3-col) ══ -->
+    <div class="row-gauge-radar-timeline">
+
+      <!-- Gauge Panel -->
+      <div class="panel" style="display:flex;flex-direction:column;">
+        <div class="panel-header">
+          <span class="panel-title">⬡ Behavioural Risk Meter</span>
+          <span id="risk-gauge-agent-label" style="font-family:var(--mono2);font-size:12px;color:var(--accent);letter-spacing:1px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);padding:2px 7px;border-radius:3px;">GLOBAL</span>
+        </div>
+        <div style="padding:14px 16px;display:flex;flex-direction:column;align-items:center;gap:0;flex:1;">
+          <!-- Gauge canvas — explicit aspect ratio keeps the top "50" tick label inside the canvas -->
+          <canvas id="risk-gauge" style="width:100%;max-width:280px;aspect-ratio:280/170;display:block;"></canvas>
+          <!-- Score value -->
+          <div style="text-align:center;margin-top:-4px;">
+            <div id="risk-score-val" style="font-family:var(--mono);font-size:44px;line-height:1;font-weight:700;color:var(--green)">—</div>
+            <div style="font-family:var(--mono2);font-size:12px;color:var(--text3);margin-top:3px;letter-spacing:2px">RISK SCORE / 100</div>
+          </div>
+          <!-- Verdict pill -->
+          <div id="risk-label-pill" class="risk-pill risk-low" style="margin-top:10px;font-size:14px;padding:5px 20px;letter-spacing:1.5px;">Calculating...</div>
+          <!-- Zone legend -->
+          <div style="width:100%;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+            <div style="font-family:var(--mono2);font-size:12px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px;text-align:center;">RISK ZONE REFERENCE</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;">
+              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(6,214,160,0.06);border:1px solid rgba(6,214,160,0.2);border-radius:4px;">
+                <div style="width:8px;height:8px;border-radius:50%;background:#06d6a0;flex-shrink:0;"></div>
+                <div><div style="font-family:var(--mono2);font-size:12px;color:#06d6a0;font-weight:600;">LOW</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">0 – 24</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,209,102,0.06);border:1px solid rgba(255,209,102,0.2);border-radius:4px;">
+                <div style="width:8px;height:8px;border-radius:50%;background:#ffd166;flex-shrink:0;"></div>
+                <div><div style="font-family:var(--mono2);font-size:12px;color:#ffd166;font-weight:600;">MODERATE</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">25 – 49</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,140,66,0.06);border:1px solid rgba(255,140,66,0.2);border-radius:4px;">
+                <div style="width:8px;height:8px;border-radius:50%;background:#ff8c42;flex-shrink:0;"></div>
+                <div><div style="font-family:var(--mono2);font-size:12px;color:#ff8c42;font-weight:600;">HIGH</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">50 – 74</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,59,92,0.06);border:1px solid rgba(255,59,92,0.2);border-radius:4px;">
+                <div style="width:8px;height:8px;border-radius:50%;background:#ff3b5c;flex-shrink:0;"></div>
+                <div><div style="font-family:var(--mono2);font-size:12px;color:#ff3b5c;font-weight:600;">CRITICAL</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">75 – 100</div></div>
+              </div>
+            </div>
+            <!-- Score breakdown -->
+            <div style="margin-top:10px;padding:8px;background:rgba(0,0,0,0.2);border-radius:4px;border:1px solid var(--border);">
+              <div style="font-family:var(--mono2);font-size:11px;color:var(--text3);letter-spacing:1px;margin-bottom:6px;">SCORE COMPOSITION</div>
+              <div id="gauge-score-breakdown" style="display:flex;flex-direction:column;gap:4px;">
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12px;">
+                  <span style="color:var(--text2);">Critical rate (×60)</span>
+                  <span id="gauge-crit-contrib" style="color:var(--red);">—</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12px;">
+                  <span style="color:var(--text2);">Anomalous rate (×20)</span>
+                  <span id="gauge-anom-contrib" style="color:var(--orange);">—</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12px;">
+                  <span style="color:var(--text2);">Max score (×15)</span>
+                  <span id="gauge-max-contrib" style="color:var(--accent);">—</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Radar Panel -->
+      <div class="panel" style="display:flex;flex-direction:column;">
+        <div class="panel-header"><span class="panel-title">⬡ Security Activity Pattern</span></div>
+        <div style="padding:8px;display:flex;align-items:center;justify-content:center;flex:1;min-height:340px;overflow:visible;">
+          <canvas id="radar-chart" style="width:100%;height:100%;display:block;"></canvas>
+        </div>
+      </div>
+
+      <!-- Timeline Panel -->
+      <div class="panel" style="display:flex;flex-direction:column;">
+        <div class="panel-header">
+          <span class="panel-title">↗ Alert Timeline</span>
+          <span class="panel-badge" id="timeline-range">Loading...</span>
+        </div>
+        <div style="padding:12px 16px;flex:1;min-height:280px;display:flex;flex-direction:column;">
+          <canvas id="timeline-chart" style="width:100%;flex:1;display:block;min-height:220px;"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ ROW C: Recent Alerts + Top Risk Users + Endpoints ══ -->
+    <div class="overview-3col">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-header-left">
+            <span class="panel-title">Recent Alerts</span>
+            <span class="info-btn" title="">i
+              <div class="info-tooltip">
+                <div class="info-tooltip-title">Score Parameters</div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Scale</span><span class="info-tooltip-val tv-cyan">0.0 – 1.0</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Highly Anomalous</span><span class="info-tooltip-val tv-red">≥ 0.90</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Critical</span><span class="info-tooltip-val tv-red">≥ 0.85</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Anomalous</span><span class="info-tooltip-val tv-orange">0.70 – 0.89</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Suspicious</span><span class="info-tooltip-val tv-yellow">0.50 – 0.69</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Normal</span><span class="info-tooltip-val tv-green">0.00 – 0.49</span></div>
+                <div class="info-tooltip-note">Score is a normalised behavioural deviation index computed by the UEBA isolation forest model.</div>
+              </div>
+            </span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-family:var(--mono2);font-size:12px;color:var(--text3);letter-spacing:1px">CLICK TO INVESTIGATE →</span>
+            <span class="panel-badge" id="ov-badge">0</span>
+          </div>
+        </div>
+        <div class="feed-table-wrap" style="max-height:280px;">
+          <table id="overview-table">
+            <thead><tr><th>Time</th><th>User</th><th>Verdict</th><th>Score</th><th>Signature</th></tr></thead>
+            <tbody id="overview-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-header-left">
+            <span class="panel-title">Top Risk Users</span>
+            <span class="info-btn" title="">i
+              <div class="info-tooltip">
+                <div class="info-tooltip-title">Risk Index Parameters</div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Scale</span><span class="info-tooltip-val tv-cyan">0.0 – 1.0</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Critical Risk</span><span class="info-tooltip-val tv-red">≥ 0.90</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">High Risk</span><span class="info-tooltip-val tv-orange">0.70 – 0.89</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Medium Risk</span><span class="info-tooltip-val tv-yellow">0.50 – 0.69</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Low Risk</span><span class="info-tooltip-val tv-green">0.00 – 0.49</span></div>
+                <div class="info-tooltip-note">Risk index is a weighted aggregate of alert frequency, severity, and recency across all sessions for that user.</div>
+              </div>
+            </span>
+          </div>
+        </div>
+        <div id="overview-users"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-header-left">
+            <span class="panel-title">Endpoints</span>
+            <span class="info-btn" title="">i
+              <div class="info-tooltip">
+                <div class="info-tooltip-title">Endpoint Alert Counts</div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Badge (right)</span><span class="info-tooltip-val tv-cyan">Total alerts</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Critical label</span><span class="info-tooltip-val tv-red">Score ≥ 0.85</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Anomalous</span><span class="info-tooltip-val tv-orange">Score ≥ 0.70</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Suspicious</span><span class="info-tooltip-val tv-yellow">Score ≥ 0.50</span></div>
+                <div class="info-tooltip-note">Endpoints are ranked by total alert count. Click an endpoint to drill into its individual alert timeline.</div>
+              </div>
+            </span>
+          </div>
+          <span class="panel-badge" id="ov-agents-badge">0</span>
+        </div>
+        <div id="overview-agents" style="max-height:280px;overflow-y:auto;"></div>
+      </div>
+    </div>
+
+    <!-- ══ ROW D: Score Distribution + Hourly Activity Heatmap ══ -->
+    <div class="row-dist-heatmap">
+      <!-- Score Distribution histogram -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">⬡ Alert Score Distribution</span>
+          <span class="panel-badge" id="score-dist-badge">0</span>
+        </div>
+        <div style="padding:14px;" id="score-dist-body">
+          <div class="loading"><div class="spinner"></div></div>
+        </div>
+      </div>
+      <!-- Hourly activity heatmap -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">⬡ Hourly Alert Heatmap</span>
+          <span style="font-family:var(--mono2);font-size:12px;color:var(--text3);">Alert density by day × hour</span>
+        </div>
+        <div style="padding:14px;" id="heatmap-body">
+          <div class="loading"><div class="spinner"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ ROW E: AI Security Analyst ══ -->
+    <div class="panel" id="ai-analyst-panel" style="margin-bottom:12px;">
+      <div class="panel-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M9 1L2 4.5V9C2 12.5 5 15.7 9 17C13 15.7 16 12.5 16 9V4.5L9 1Z" stroke="#00d4ff" stroke-width="1.5" fill="none"/>
+            <circle cx="9" cy="9" r="2.5" fill="#00d4ff" opacity="0.8"/>
+          </svg>
+          <span class="panel-title">AI Security Analyst</span>
+          <span class="ai-live-badge">LIVE</span>
+        </div>
+        <span style="font-family:var(--mono2);font-size:13px;color:var(--text3)" id="ai-timestamp">—</span>
+      </div>
+      <div style="padding:20px;" id="ai-analyst-body">
+        <div class="loading"><div class="spinner"></div>Generating behavioural analysis report...</div>
+      </div>
+    </div>
+
+    <!-- ══ ROW E: TOP SIGNATURES + RECOMMENDED ACTIONS ══ -->
+    <div class="row-sigs-actions">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">⬦ Top Rule Descriptions</span>
+          <span class="panel-badge" id="top-sigs-badge">0</span>
+        </div>
+        <div style="padding:14px;" id="top-sigs-body">
+          <div class="loading"><div class="spinner"></div></div>
+        </div>
+      </div>
+      <div class="panel" id="rec-actions-panel">
+        <div class="panel-header">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="color:var(--yellow);">⚠</span>
+            <span class="panel-title">Recommended Security Actions</span>
+          </div>
+          <span id="rec-priority-pill" class="rec-priority normal">Priority: NORMAL</span>
+        </div>
+        <div style="padding:0;" id="rec-actions-body">
+          <div class="loading"><div class="spinner"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ ROW F: MITRE ATT&CK Coverage + Engine Health ══ -->
+    <div class="row-mitre-health">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-header-left">
+            <span class="panel-title">⌬ MITRE ATT&amp;CK Coverage</span>
+            <span class="info-btn" title="">i
+              <div class="info-tooltip">
+                <div class="info-tooltip-title">MITRE Heatmap</div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Rows</span><span class="info-tooltip-val tv-cyan">Tactic (kill-chain order)</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Cells</span><span class="info-tooltip-val tv-cyan">Technique (color = volume)</span></div>
+                <div class="info-tooltip-note">Click any technique to drill into the Alert Feed filtered to that tactic.</div>
+              </div>
+            </span>
+          </div>
+          <span class="panel-badge" id="mitre-matrix-badge">0</span>
+        </div>
+        <div id="mitre-matrix-body" class="mitre-matrix-body">
+          <div class="loading"><div class="spinner"></div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-header-left">
+            <span class="panel-title">◉ Engine Health</span>
+            <span class="info-btn" title="">i
+              <div class="info-tooltip">
+                <div class="info-tooltip-title">Engine Health</div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Live</span><span class="info-tooltip-val tv-green">SSE connected</span></div>
+                <div class="info-tooltip-row"><span class="info-tooltip-key">Alert rate</span><span class="info-tooltip-val tv-cyan">last 1h / 24h</span></div>
+                <div class="info-tooltip-note">Server-side metrics from /api/health. Refreshed every 60s alongside the polling reconciliation.</div>
+              </div>
+            </span>
+          </div>
+          <span class="panel-badge" id="health-badge">—</span>
+        </div>
+        <div id="health-body" class="health-body">
+          <div class="loading"><div class="spinner"></div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- FEED -->
+  <div class="page" id="page-feed">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Live Alert Feed</span>
+        <span class="panel-badge" id="feed-badge">0</span>
+      </div>
+      <div class="feed-filters">
+        <button class="filter-btn active" data-filter="all">ALL</button>
+        <button class="filter-btn f-red" data-filter="highly_anomalous">HIGHLY ANOMALOUS</button>
+        <button class="filter-btn f-orange" data-filter="anomalous">ANOMALOUS</button>
+        <button class="filter-btn f-yellow" data-filter="suspicious">SUSPICIOUS</button>
+        <label class="fp-toggle" title="Show alerts marked as false positive, inline, with strike-through">
+          <input type="checkbox" id="fp-toggle-cb"/>
+          <span>Show FPs</span>
+        </label>
+      </div>
+
+      <!-- ── Phase 4: search + MITRE + severity + export ── -->
+      <div class="feed-toolbar">
+        <div class="feed-search">
+          <span class="feed-search-icon" aria-hidden="true">⌕</span>
+          <label for="feed-search-input" class="visually-hidden">Search alerts</label>
+          <input id="feed-search-input" type="search" placeholder="Search user, host, signature, reason, campaign, event id…" autocomplete="off" aria-label="Search alerts"/>
+          <button class="feed-search-clear" id="feed-search-clear" title="Clear search" aria-label="Clear search">✕</button>
+        </div>
+
+        <button class="export-btn" id="deep-search-btn" title="Search the full raw and enriched record — threat intel, geolocation, process, HTTP/DNS, evidence and the original event. Shift+Enter in the search box does the same.">⌕ Raw data</button>
+
+        <div class="deep-banner" id="deep-banner" style="display:none"></div>
+
+        <div class="mitre-dropdown" id="mitre-dropdown">
+          <button class="mitre-btn" id="mitre-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="mitre-pop">
+            <span class="mitre-btn-label">MITRE</span>
+            <span class="mitre-btn-count" id="mitre-btn-count">All</span>
+            <span class="mitre-btn-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="mitre-pop" id="mitre-pop" role="dialog" aria-label="MITRE tactic filter" hidden>
+            <div class="mitre-pop-header">
+              <span>MITRE tactics</span>
+              <div class="mitre-pop-header-actions">
+                <button id="mitre-clear-btn" type="button">Clear</button>
+                <button id="mitre-pop-close" type="button" aria-label="Close" title="Close">✕</button>
+              </div>
+            </div>
+            <div class="mitre-pop-body" id="mitre-pop-body"><!-- populated dynamically --></div>
+          </div>
+        </div>
+
+        <label class="severity-select">
+          <span class="severity-label">Severity</span>
+          <select id="severity-select">
+            <option value="0">All</option>
+            <option value="10">≥ 10</option>
+            <option value="12">≥ 12</option>
+            <option value="14">≥ 14</option>
+          </select>
+        </label>
+
+        <div class="toolbar-spacer"></div>
+
+        <button class="export-btn" id="export-csv-btn" title="Export the current filtered view as CSV">⬇ CSV</button>
+        <button class="export-btn" id="export-json-btn" title="Export the current filtered view as JSON">⬇ JSON</button>
+        <button class="export-btn" id="export-xml-btn" title="Export the current filtered view as XML">⬇ XML</button>
+        <button class="export-btn" id="export-xlsx-btn" title="Export the current filtered view as an Excel workbook">⬇ Excel</button>
+        <button class="export-btn" id="export-pdf-btn" title="Export the current filtered view as a PDF">⬇ PDF</button>
+      </div>
+
+      <div class="feed-table-wrap">
+        <table id="feed-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>User</th><th>Host</th><th>Verdict</th>
+              <th>Score</th><th>Reasons</th><th>Campaign</th><th>Signature</th>
+            </tr>
+          </thead>
+          <tbody id="feed-tbody"></tbody>
+        </table>
+      </div>
+      <div class="feed-footer" id="feed-footer"></div>
+    </div>
+  </div>
+
+  <!-- USERS -->
+  <div class="page" id="page-users">
+
+    <!-- User detail drilldown (populated when an analyst clicks a leaderboard row) -->
+    <div class="panel" id="user-detail-panel" hidden>
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title" id="user-detail-title">—</span>
+          <span class="panel-badge" id="user-detail-badge" style="display:none">0</span>
+        </div>
+        <button id="user-detail-close" class="user-detail-close" title="Close drilldown">✕</button>
+      </div>
+      <div id="user-detail-body">
+        <div class="loading"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">User Risk Leaderboard</span>
+        <span class="panel-badge" id="users-badge">0</span>
+      </div>
+      <div class="leaderboard">
+        <div class="user-row header-row">
+          <span>#</span><span>User</span><span>Risk Index</span>
+          <span>Alerts</span><span>Max Score</span><span>Top Reason</span><span>Last Seen</span>
+        </div>
+        <div id="users-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CAMPAIGNS -->
+  <!-- INCIDENTS -->
+  <div class="page" id="page-incidents">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Entity Incidents</span>
+        <span class="panel-badge" id="inc-badge2">0</span>
+        <span style="margin-left:auto;font-family:var(--mono2);font-size:13.5px;color:var(--text3)">
+          Rollup window
+          <select id="inc-window" onchange="window.__setIncidentWindow(this.value)"
+                  style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin-left:4px;font-family:var(--mono2);font-size:13.5px">
+            <option value="15">15 min</option>
+            <option value="30">30 min</option>
+            <option value="60" selected>1 hour</option>
+            <option value="240">4 hours</option>
+            <option value="1440">1 day</option>
+          </select>
+        </span>
+      </div>
+      <div id="incidents-list"></div>
+    </div>
+  </div>
+
+  <!-- CAMPAIGNS -->
+  <div class="page" id="page-campaigns">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Campaign Timeline</span>
+        <span class="panel-badge" id="camp-badge">0</span>
+      </div>
+      <div id="campaigns-list"></div>
+    </div>
+  </div>
+
+  <!-- ENDPOINTS -->
+  <div class="page" id="page-endpoints">
+    <div class="endpoints-layout">
+      <div class="panel" style="align-self:start;">
+        <div class="panel-header">
+          <span class="panel-title">Endpoints</span>
+          <span class="panel-badge" id="agents-badge">0</span>
+        </div>
+        <div id="agents-list" style="max-height:700px;overflow-y:auto;"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title" id="agent-detail-title">SELECT AN ENDPOINT</span>
+          <span class="panel-badge" id="agent-detail-badge" style="display:none">0</span>
+        </div>
+        <div id="agent-detail-body">
+          <div class="empty-state">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+              <rect x="8" y="12" width="32" height="24" rx="3" stroke="#3d5a72" stroke-width="1.5" fill="none"/>
+              <path d="M16 36v4M32 36v4M12 40h24" stroke="#3d5a72" stroke-width="1.5" stroke-linecap="round"/>
+              <circle cx="24" cy="24" r="5" stroke="#3d5a72" stroke-width="1.5" fill="none"/>
+            </svg>
+            <p>Click an endpoint to view its alerts</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FALSE POSITIVES -->
+  <div class="page" id="page-false-positives">
+
+    <!-- Pattern FPs — fingerprint-based auto-suppression rules -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">⌁ Auto-Suppression Patterns</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">FP Patterns</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Match</span><span class="info-tooltip-val tv-cyan">rule description (case-insensitive)</span></div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Storage</span><span class="info-tooltip-val tv-cyan">fp_patterns.json</span></div>
+              <div class="info-tooltip-note">Patterns auto-suppress only NEW alerts (received after the pattern was created) whose rule description matches — regardless of user or host. Past alerts stay visible. Remove a pattern to stop suppressing future ones.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="fp-pat-badge">0</span>
+      </div>
+      <div class="feed-table-wrap">
+        <table id="fp-pat-table">
+          <thead>
+            <tr>
+              <th>Rule Description</th><th>Reason</th>
+              <th>Matched</th><th>Created</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="fp-pat-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Per-event FPs — alerts marked individually -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">⚑ False Positives</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">False Positives</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Source</span><span class="info-tooltip-val tv-cyan">Analyst-flagged</span></div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Storage</span><span class="info-tooltip-val tv-cyan">false_positives.json</span></div>
+              <div class="info-tooltip-note">FP-marked alerts are excluded from the feed, stats, risk gauge, user/agent metrics, and campaign clusters. Use Restore to put one back into circulation.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="fp-tab-badge">0</span>
+      </div>
+      <div class="feed-table-wrap">
+        <table id="fp-table">
+          <thead>
+            <tr>
+              <th>Marked</th><th>Alert Time</th><th>User</th><th>Host</th>
+              <th>Verdict</th><th>Score</th><th>Signature</th><th>Reason</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="fp-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Alerting (device registry + notification rules) ── -->
+  <div class="page" id="page-alerting">
+
+    <!-- Device registry (RFP 10) -->
+    <div class="panel" style="margin-bottom:12px;">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">▦ Device Registry</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">Device Registry</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Storage</span><span class="info-tooltip-val tv-cyan">devices.json</span></div>
+              <div class="info-tooltip-note">Label devices and assign a priority so notification rules can alert by priority rather than by name. The device name must match the host name as it appears on alerts.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="dev-badge">0</span>
+      </div>
+      <div class="wl-form">
+        <input id="dev-name" class="wl-input" type="text" placeholder="Device / host name" style="flex:1 1 180px" autocomplete="off">
+        <input id="dev-label" class="wl-input" type="text" placeholder="Label (e.g. Domain Controller)" style="flex:1 1 200px" autocomplete="off">
+        <select id="dev-priority" class="wl-input" style="min-width:120px">
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium" selected>Medium</option>
+          <option value="low">Low</option>
+        </select>
+        <input id="dev-owner" class="wl-input" type="text" placeholder="Owner (optional)" style="flex:1 1 140px" autocomplete="off">
+        <input id="dev-notes" class="wl-input" type="text" placeholder="Notes (optional)" style="flex:1 1 160px" autocomplete="off">
+        <button id="dev-save-btn" class="export-btn wl-add-btn">＋ Register</button>
+      </div>
+      <div class="feed-table-wrap">
+        <table id="dev-table">
+          <thead><tr><th>Device</th><th>Label</th><th>Priority</th><th>Owner</th><th>Notes</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="dev-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Notification rules (RFP 15) -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">◈ Notification Rules</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">Notification Rules</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Channels</span><span class="info-tooltip-val tv-cyan">email · webhook</span></div>
+              <div class="info-tooltip-note">A rule fires when an alert satisfies every condition set on it; unset conditions are ignored. Throttling is mandatory — a repeat-suppression window per entity, and an hourly ceiling — because an unthrottled rule on this volume is an inbox outage.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="ntf-badge">0</span>
+      </div>
+
+      <div class="wl-form" style="border-bottom:none;padding-bottom:6px">
+        <input id="ntf-name" class="wl-input" type="text" placeholder="Rule name" style="flex:1 1 200px" autocomplete="off">
+        <input id="ntf-score" class="wl-input" type="number" step="0.01" min="0" max="1" placeholder="Min score" style="width:110px" title="Fire only at or above this fused score. Leave blank for any score.">
+        <input id="ntf-emails" class="wl-input" type="text" placeholder="Email recipients (comma separated)" style="flex:2 1 240px" autocomplete="off">
+        <input id="ntf-webhook" class="wl-input" type="text" placeholder="Webhook URL (optional)" style="flex:2 1 220px" autocomplete="off">
+        <input id="ntf-throttle" class="wl-input" type="number" min="0" value="15" style="width:92px" title="Repeat-suppression window in minutes, per entity">
+        <input id="ntf-cap" class="wl-input" type="number" min="1" value="20" style="width:92px" title="Maximum notifications per hour for this rule">
+        <button id="ntf-save-btn" class="export-btn wl-add-btn">＋ Create rule</button>
+      </div>
+      <div class="ntf-cond">
+        <div class="ntf-cond-group">
+          <span class="ntf-cond-label">Verdict</span>
+          <span id="ntf-verdicts">
+            <label class="rp-check"><input type="checkbox" value="suspicious"> Suspicious</label>
+            <label class="rp-check"><input type="checkbox" value="anomalous"> Anomalous</label>
+            <label class="rp-check"><input type="checkbox" value="highly_anomalous"> Highly anomalous</label>
+          </span>
+        </div>
+        <div class="ntf-cond-group">
+          <span class="ntf-cond-label">Device priority</span>
+          <span id="ntf-priorities">
+            <label class="rp-check"><input type="checkbox" value="critical"> Critical</label>
+            <label class="rp-check"><input type="checkbox" value="high"> High</label>
+            <label class="rp-check"><input type="checkbox" value="medium"> Medium</label>
+            <label class="rp-check"><input type="checkbox" value="low"> Low</label>
+          </span>
+        </div>
+        <div class="ntf-cond-group">
+          <span class="ntf-cond-label">Other</span>
+          <label class="rp-check"><input type="checkbox" id="ntf-watchonly"> Watch-listed entities only</label>
+        </div>
+      </div>
+      <div class="rp-desc" id="ntf-note"></div>
+      <div class="feed-table-wrap">
+        <table id="ntf-table">
+          <thead><tr><th>Rule</th><th>Fires when</th><th>Channels</th><th>Throttle</th><th>Activity</th><th>Status</th><th></th></tr></thead>
+          <tbody id="ntf-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Reports (generate, customise, schedule) ── -->
+  <div class="page" id="page-reports">
+
+    <!-- 1. Generate now -->
+    <div class="panel" style="margin-bottom:12px;">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">▤ Generate a Report</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">Reports</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Built in</span><span class="info-tooltip-val tv-cyan">analyst / management / audit / threat</span></div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Formats</span><span class="info-tooltip-val tv-cyan">PDF, Excel, CSV, HTML, JSON, XML</span></div>
+              <div class="info-tooltip-note">Reports describe the same window the dashboard shows, and exclude alerts suppressed as false positives. Generating one reads the whole period, so a wide window takes a few seconds.</div>
+            </div>
+          </span>
+        </div>
+      </div>
+      <div class="wl-form">
+        <select id="rp-report" class="wl-input" style="flex:2 1 280px"></select>
+        <select id="rp-period" class="wl-input" style="min-width:160px"></select>
+        <select id="rp-format" class="wl-input" style="min-width:110px"></select>
+        <button id="rp-generate-btn" class="export-btn wl-add-btn">⬇ Generate</button>
+      </div>
+      <div class="rp-desc" id="rp-desc"></div>
+    </div>
+
+    <!-- 2. Custom reports -->
+    <div class="panel" style="margin-bottom:12px;">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">✎ Custom Reports</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">Custom Reports</div>
+              <div class="info-tooltip-note">Compose a report from the same sections the built-in reports are built from. Saved reports appear in the generate list above and can be scheduled like any other.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="rp-custom-badge">0</span>
+      </div>
+      <div class="wl-form" style="border-bottom:none;padding-bottom:4px">
+        <input id="rp-custom-name" class="wl-input" type="text" placeholder="Report name" style="flex:1 1 200px" autocomplete="off">
+        <input id="rp-custom-desc" class="wl-input" type="text" placeholder="Description (optional)" style="flex:2 1 260px" autocomplete="off">
+        <select id="rp-custom-period" class="wl-input" style="min-width:150px">
+          <option value="24">Last 24 hours</option>
+          <option value="72">Last 3 days</option>
+          <option value="168" selected>Last 7 days</option>
+          <option value="720">Last 30 days</option>
+          <option value="2160">Last 90 days</option>
+          <option value="0">All retained data</option>
+        </select>
+        <select id="rp-custom-format" class="wl-input" style="min-width:100px">
+          <option value="pdf">PDF</option><option value="xlsx">Excel</option>
+          <option value="csv">CSV</option><option value="html">HTML</option>
+          <option value="json">JSON</option><option value="xml">XML</option>
+        </select>
+        <button id="rp-custom-save-btn" class="export-btn wl-add-btn">＋ Save report</button>
+      </div>
+      <div class="rp-sections" id="rp-sections"></div>
+      <div class="feed-table-wrap">
+        <table id="rp-custom-table">
+          <thead><tr><th>Name</th><th>Contents</th><th>Description</th><th>Created</th><th></th></tr></thead>
+          <tbody id="rp-custom-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 3. Schedules -->
+    <div class="panel" style="margin-bottom:12px;">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">⏱ Scheduled Reports</span>
+        </div>
+        <span class="panel-badge" id="rp-sched-badge">0</span>
+      </div>
+      <div class="wl-form">
+        <input id="rp-sched-name" class="wl-input" type="text" placeholder="Schedule name (optional)" style="flex:1 1 180px" autocomplete="off">
+        <select id="rp-sched-report" class="wl-input" style="flex:1 1 200px"></select>
+        <select id="rp-sched-interval" class="wl-input" style="min-width:110px">
+          <option value="daily" selected>Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="hourly">Hourly</option>
+        </select>
+        <input id="rp-sched-at" class="wl-input" type="time" value="08:00" style="min-width:110px">
+        <select id="rp-sched-period" class="wl-input" style="min-width:150px">
+          <option value="24" selected>Cover 24 hours</option>
+          <option value="168">Cover 7 days</option>
+          <option value="720">Cover 30 days</option>
+        </select>
+        <select id="rp-sched-format" class="wl-input" style="min-width:100px">
+          <option value="pdf">PDF</option><option value="xlsx">Excel</option>
+          <option value="csv">CSV</option><option value="html">HTML</option>
+        </select>
+        <input id="rp-sched-to" class="wl-input" type="text" placeholder="Email recipients (comma separated)" style="flex:2 1 240px" autocomplete="off">
+        <button id="rp-sched-save-btn" class="export-btn wl-add-btn">＋ Schedule</button>
+      </div>
+      <div class="rp-desc" id="rp-tz"></div>
+      <div class="feed-table-wrap">
+        <table id="rp-sched-table">
+          <thead><tr><th>Name</th><th>Report</th><th>When</th><th>Delivery</th><th>Last run</th><th>Next run</th><th></th></tr></thead>
+          <tbody id="rp-sched-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 4. History -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-header-left"><span class="panel-title">⌸ Recent Reports</span></div>
+      </div>
+      <div class="feed-table-wrap">
+        <table id="rp-hist-table">
+          <thead><tr><th>Generated</th><th>Report</th><th>Format</th><th>By</th><th>Size</th><th></th></tr></thead>
+          <tbody id="rp-hist-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Watch List (entities under elevated scrutiny) ── -->
+  <div class="page" id="page-watchlist">
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">◎ Watch List</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">Watch List</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Entities</span><span class="info-tooltip-val tv-cyan">user / host / IP</span></div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Storage</span><span class="info-tooltip-val tv-cyan">watchlist.json</span></div>
+              <div class="info-tooltip-note">A watched entity's anomaly score gets a small additive boost, applied before the alert threshold — so its borderline activity surfaces and its anomalous activity escalates a tier. Routine activity stays silent: the boost is deliberately too small to alert on everything. The engine picks up changes on the next event, with no restart.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="wl-badge">0</span>
+      </div>
+
+      <div class="wl-form">
+        <select id="wl-type" class="wl-input wl-input-type" title="What kind of entity to watch">
+          <option value="user">User</option>
+          <option value="host">Host</option>
+          <option value="ip">IP</option>
+        </select>
+        <input id="wl-value" class="wl-input wl-input-value" type="text"
+               placeholder="Username, hostname or IP address" autocomplete="off" />
+        <input id="wl-reason" class="wl-input wl-input-reason" type="text"
+               placeholder="Reason (e.g. offboarding in progress)" autocomplete="off" />
+        <input id="wl-boost" class="wl-input wl-input-boost" type="number"
+               step="0.05" min="0" max="0.5" placeholder="+0.10"
+               title="Score boost. Leave blank for the default. Higher values surface more of this entity's activity — and produce more alerts." />
+        <button id="wl-add-btn" class="export-btn wl-add-btn">＋ Watch</button>
+      </div>
+
+      <div class="feed-table-wrap">
+        <table id="wl-table">
+          <thead>
+            <tr>
+              <th>Type</th><th>Entity</th><th>Reason</th>
+              <th>Boost</th><th>Added by</th><th>Added</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="wl-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Threat Map (live firewall geoIP globe) ── -->
+  <div class="page" id="page-threatmap">
+    <div class="tm-wrap">
+      <div class="tm-globe-col">
+        <div class="tm-viewtoggle" role="group" aria-label="Map view">
+          <button class="tm-viewbtn active" data-view="3d" title="3D globe view">◍ 3D</button>
+          <button class="tm-viewbtn" data-view="2d" title="2D flat map view">▭ 2D</button>
+        </div>
+        <div id="threatmap-globe" class="tm-globe"></div>
+        <div id="threatmap-flat" class="tm-flat"></div>
+        <div id="tm-tooltip" class="tm-tooltip"></div>
+        <div class="tm-filters">
+          <button class="tm-filt tm-cat-outgoing" data-cat="outgoing" title="Traffic leaving the server (DC → external)">
+            <i></i>Outgoing from server <b id="tmf-outgoing">0</b></button>
+          <button class="tm-filt tm-cat-incoming_threat" data-cat="incoming_threat" title="Blocked / failed inbound attacks (external → DC)">
+            <i></i>Incoming threat <b id="tmf-incoming_threat">0</b></button>
+          <button class="tm-filt tm-cat-normal_incoming" data-cat="normal_incoming" title="Allowed inbound traffic (external → DC)">
+            <i></i>Normal incoming <b id="tmf-normal_incoming">0</b></button>
+          <button class="tm-filt tm-cat-external_conn" data-cat="external_conn" title="VPN / session connections">
+            <i></i>External connection <b id="tmf-external_conn">0</b></button>
+          <span class="tm-filt-dc"><i></i>Datacenter</span>
+        </div>
+        <div id="tm-offline" class="tm-offline">
+          <div class="tm-offline-box">
+            <div class="tm-offline-icon">🌐</div>
+            <div class="tm-offline-title">GeoIP database unavailable</div>
+            <div class="tm-offline-sub">The live map needs a local MaxMind GeoLite2-City DB on the server.</div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="tm-side">
+        <div class="tm-panel">
+          <div class="tm-side-title">⬡ Live Firewall Attacks</div>
+          <div class="tm-stats">
+            <div class="tm-stat"><b id="tm-stat-events">0</b><span>EVENTS / WINDOW</span></div>
+            <div class="tm-stat"><b id="tm-stat-mapped">0</b><span>GEO-MAPPED</span></div>
+            <div class="tm-stat"><b id="tm-stat-ips">0</b><span>UNIQUE SOURCE IPs</span></div>
+            <div class="tm-stat"><b id="tm-stat-countries">0</b><span>COUNTRIES</span></div>
+          </div>
+        </div>
+
+        <div class="tm-panel tm-grow">
+          <div class="tm-side-title">↗ Top Source Countries</div>
+          <div id="tm-countries" class="tm-countries"></div>
+        </div>
+
+        <div class="tm-panel">
+          <div class="tm-side-title">⚑ Top Firewall Signatures</div>
+          <div id="tm-sigs" class="tm-sigs"></div>
+        </div>
+
+        <div class="tm-panel tm-grow">
+          <div class="tm-side-title">⟜ Live Attack Stream</div>
+          <div id="tm-ticker" class="tm-ticker"></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+</main>
+  </div><!-- /.app-main -->
+</div><!-- /.app-shell -->
+
+<!-- ── Site Footer ── -->
+<footer class="site-footer">
+  <!-- Left: logo + divider + product name -->
+  <div class="footer-left">
+    <img src="/vglogo_white.png" alt="Virtual Galaxy Infotech Pvt. Ltd." class="footer-vgipl-logo" />
+  </div>
+
+  <!-- Center: copyright -->
+  <div class="footer-center">
+    © <span id="footer-year"></span> CyberSentinel UEBA. All Rights Reserved.
+  </div>
+
+  <!-- Right: version + links -->
+  <div class="footer-right">
+    <span class="footer-version">Version 1.0</span>
+    <div class="footer-divider"></div>
+    <a class="footer-link" href="#" onclick="openFooterPage('support'); return false;">Support</a>
+    <div class="footer-divider"></div>
+    <a class="footer-link" href="#" onclick="openFooterPage('privacy'); return false;">Privacy Policy</a>
+  </div>
+</footer>
+<div class="fp-overlay" id="fp-support">
+  <div class="fp-modal">
+    <div class="fp-header">
+      <span class="fp-title">⚙ Support</span>
+      <button class="fp-close" onclick="closeFooterPage('support')">✕</button>
+    </div>
+    <div class="fp-body">
+      <div class="fp-section">
+        <div class="fp-section-title">Contact Support</div>
+        <div class="fp-contact-grid">
+          <div class="fp-contact-card">
+            <div class="label">Email</div>
+            <div class="value">support@vgipl.com</div>
+          </div>
+          <div class="fp-contact-card">
+            <div class="label">Phone</div>
+            <div class="value">+91 77980 26888</div>
+          </div>
+          <div class="fp-contact-card">
+            <div class="label">Support Hours</div>
+            <div class="value">Mon – Fri, 9:00 AM – 6:00 PM IST</div>
+          </div>
+          <div class="fp-contact-card">
+            <div class="label">Response Time</div>
+            <div class="value">Within 24 business hours</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Getting Started</div>
+        <p>Welcome to CyberSentinel UEBA. This section should contain onboarding guides, quickstart documentation, and links to video tutorials.</p>
+        <ul>
+          <li>Installation &amp; deployment guide</li>
+          <li>Agent configuration instructions</li>
+          <li>Dashboard walkthrough</li>
+          <li>Alert triage best practices</li>
+          <li>API integration guide</li>
+        </ul>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Frequently Asked Questions</div>
+        <p><strong style="color:var(--text)">Q: How do I add a new agent?</strong></p>
+        <p>Agents are discovered automatically. Deploy the monitoring agent on the endpoint and enrol it with your manager — the platform periodically reads the manager's agent inventory and the new endpoint appears in the <em style="color:var(--accent)">Endpoints</em> tab within about a minute. No manual entry in the dashboard is required.</p>
+        <p><strong style="color:var(--text)">Q: What does a "highly anomalous" verdict mean?</strong></p>
+        <p>Every event is scored from 0 to 1 by the three-layer engine (isolation forest, per-user autoencoders, and the FAISS similarity model). A score of <strong style="color:var(--text)">0.75 or above</strong> raises an alert, and the verdict escalates <em>suspicious → anomalous → highly anomalous</em> as the score climbs. "Highly anomalous" is the top band: a strong deviation from that user's normal baseline across several signals — these should be triaged promptly.</p>
+        <p><strong style="color:var(--text)">Q: How often does the dashboard refresh?</strong></p>
+        <p>New alerts stream in live over a persistent connection (Server-Sent Events); the aggregate panels (risk meter, user/agent metrics, campaigns) reconcile every 60 seconds. Use the manual <em style="color:var(--accent)">Refresh</em> control to force an immediate pull, and the timeline buttons (24H default) to change the window.</p>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Report a Bug</div>
+        <p>To report a bug or request a feature, please contact your Virtual Galaxy account manager or email the support address above with the subject line <em style="color:var(--accent)">"CyberSentinel Bug Report"</em>.</p>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">About</div>
+        <p>CyberSentinel UEBA is developed and maintained by <strong style="color:var(--text)">Virtual Galaxy Infotech Pvt. Ltd.</strong> — Maximizing Opportunities through intelligent cybersecurity solutions.</p>
+        <p>Version 1.0 &nbsp;|&nbsp; Build: <span style="color:var(--accent);font-family:var(--mono2)">2026-PROD</span></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Privacy Policy Modal ── -->
+<div class="fp-overlay" id="fp-privacy">
+  <div class="fp-modal">
+    <div class="fp-header">
+      <span class="fp-title">🔒 Privacy Policy</span>
+      <button class="fp-close" onclick="closeFooterPage('privacy')">✕</button>
+    </div>
+    <div class="fp-body">
+      <div class="fp-section">
+        <div class="fp-section-title">Overview</div>
+        <p>This Privacy Policy describes how <strong style="color:var(--text)">Virtual Galaxy Infotech Pvt. Ltd.</strong> ("we", "us", or "our") collects, uses, and protects information in connection with the CyberSentinel UEBA platform.</p>
+        <p>Last updated: <span style="color:var(--accent)">January 2026</span> &nbsp;|&nbsp; Effective date: <span style="color:var(--accent)">January 2026</span></p>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Information We Collect</div>
+        <p>The CyberSentinel UEBA platform processes the following categories of data from your environment:</p>
+        <ul>
+          <li>User activity logs and behavioural telemetry from monitored endpoints</li>
+          <li>Authentication events, logon/logoff records, and access patterns</li>
+          <li>Network connection metadata (source IP, destination, protocol)</li>
+          <li>Process execution and file access events from agents</li>
+          <li>Dashboard administrator account information</li>
+        </ul>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">How We Use Your Data</div>
+        <p>Data collected by the platform is used exclusively for the following purposes:</p>
+        <ul>
+          <li>Detecting anomalous and potentially malicious user behaviour</li>
+          <li>Generating risk scores, verdicts, and security alerts</li>
+          <li>Producing audit trails and compliance reports</li>
+          <li>Improving detection algorithms and platform performance</li>
+        </ul>
+        <p>We do not sell, rent, or share your data with third parties for marketing or advertising purposes.</p>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Data Retention</div>
+        <p>Data is retained only as long as it is needed for detection, investigation, and audit. All retention windows are configurable per deployment; the defaults are:</p>
+        <ul>
+          <li>Alert records: archived daily and retained for <strong style="color:var(--text)">120 days</strong>, then automatically purged (configurable).</li>
+          <li>Raw event logs: held in a rolling buffer and flushed every <strong style="color:var(--text)">~3 days</strong> or once a size cap is reached (configurable).</li>
+          <li>User risk profiles &amp; behavioural models: retained while the associated endpoint/agent remains active, and pruned when it is decommissioned.</li>
+        </ul>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Data Security</div>
+        <p>All data processed by CyberSentinel UEBA stays within your organisation's own infrastructure — it is never transmitted to Virtual Galaxy or any third party. IP geolocation is performed entirely on-premises against a local database, with no external lookups. Data is protected by your environment's encryption in transit and at rest and by role-based access controls on the dashboard. CyberSentinel UEBA is developed and maintained by an <strong style="color:var(--text)">ISO 9001:2015</strong>, <strong style="color:var(--text)">ISO/IEC 27001:2013</strong> (information security management) and <strong style="color:var(--text)">ISO/IEC 20000-1:2018</strong> (IT service management) certified organisation.</p>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Your Rights</div>
+        <p>Depending on your jurisdiction, you may have rights regarding your personal data including access, correction, deletion, and portability. To exercise these rights, contact us at:</p>
+        <div class="fp-contact-grid">
+          <div class="fp-contact-card">
+            <div class="label">Data Protection Contact</div>
+            <div class="value">privacy@vgipl.com</div>
+          </div>
+          <div class="fp-contact-card">
+            <div class="label">Registered Address</div>
+            <div class="value">Virtual Galaxy Infotech Ltd., 3 Central Excise Colony, Behind Mahatme Eye Bank, Chhatrapati Square, Ring Road, Nagpur, Maharashtra 440015, India</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-title">Changes to This Policy</div>
+        <p>We may update this Privacy Policy from time to time. Any changes will be reflected with a revised "Last updated" date above. Continued use of the platform constitutes acceptance of the updated policy.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<script type="module" src="/src/main.js"></script>
+<script>
+/* KPI count-up + change-flash (2026-08-17). Self-contained; watches the
+   banner values and animates any number the app writes. Pairs with the
+   .fx-bump / fxGlow CSS in liquid-glass.css. */
+(function () {
+  var GRID_ID = 'stats-grid', DUR = 1000;
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var raf = window.requestAnimationFrame || function (cb) { return setTimeout(function () { cb(Date.now()); }, 16); };
+  var ease = function (t) { return 1 - Math.pow(1 - t, 3); };           // easeOutCubic
+  var disp = new WeakMap(), target = new WeakMap(), seen = new WeakSet();
+  var grid, observer;
+  var OBS = { childList: true, characterData: true, subtree: true };
+
+  function parse(str) {
+    if (str == null) return null;
+    var m = String(str).trim().match(/^([^\d+\-]*)([+\-]?[\d,]*\.?\d+)(.*)$/);
+    if (!m) return null;
+    var raw = m[2].replace(/,/g, ''), num = parseFloat(raw);
+    if (!isFinite(num)) return null;
+    var d = raw.split('.')[1];
+    return { num: num, prefix: m[1], suffix: m[3], dec: d ? d.length : 0 };
+  }
+  function fmt(n, info) {
+    var neg = n < 0; n = Math.abs(n);
+    var p = n.toFixed(info.dec).split('.');
+    p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return (neg ? '-' : '') + info.prefix + p.join('.') + info.suffix;
+  }
+  function commit(el, text) {            // write without re-triggering the observer
+    observer.disconnect();
+    el.textContent = text;
+    observer.takeRecords();
+    observer.observe(grid, OBS);
+  }
+  function bump(el) {
+    var tile = el.closest('.banner-stat'); if (!tile) return;
+    tile.classList.remove('fx-bump'); void tile.offsetWidth; tile.classList.add('fx-bump');
+    setTimeout(function () { tile.classList.remove('fx-bump'); }, 760);
+  }
+  function run(el, info) {
+    var to = info.num, flash = seen.has(el); seen.add(el);
+    target.set(el, to);
+    var from = disp.has(el) ? disp.get(el) : 0;
+    if (reduce || from === to) { commit(el, fmt(to, info)); disp.set(el, to); if (flash) bump(el); return; }
+    if (flash) bump(el);
+    var start = null;
+    (function step(ts) {
+      if (target.get(el) !== to) return;                 // superseded by a newer value
+      if (start === null) start = ts;
+      var p = Math.min(1, (ts - start) / DUR), v = from + (to - from) * ease(p);
+      commit(el, fmt(v, info)); disp.set(el, p < 1 ? v : to);
+      if (p < 1) raf(step);
+    })(0);
+  }
+  function scan() {
+    var els = grid.querySelectorAll('.banner-stat-value');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.childElementCount > 0) continue;   // app rendered markup here — don't touch it
+      var info = parse(el.textContent);
+      if (!info || target.get(el) === info.num) continue;
+      run(el, info);
+    }
+  }
+  function boot() {
+    grid = document.getElementById(GRID_ID); if (!grid) return;
+    observer = new MutationObserver(scan);
+    observer.observe(grid, OBS);
+    scan();                                               // pick up anything already rendered
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+</script>
+</body>
+</html>

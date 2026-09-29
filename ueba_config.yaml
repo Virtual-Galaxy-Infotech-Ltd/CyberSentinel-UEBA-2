@@ -1,0 +1,522 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberSentinel UEBA Engine — Configuration (164.52.194.98)
+# ueba_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  enriched_input:       "/root/NEW_DRIVE/aditya_ueba/enriched.jsonl"
+  ueba_output:          "/root/NEW_DRIVE/aditya_ueba/ueba_alerts.jsonl"
+  training_data:        "/root/NEW_DRIVE/aditya_ueba/data/combined_training.jsonl"
+  features_h5:          "/root/NEW_DRIVE/aditya_ueba/data/features.h5"
+  profile_db:           "profiles/user_profiles.db"
+  models_dir:           "models/"
+  isolation_forest:     "models/isolation_forest.pkl"
+  scaler:               "models/scaler.pkl"
+  autoencoder_dir:      "models/autoencoders/"
+  global_autoencoder:   "models/autoencoders/global.pt"
+  faiss_index:          "vector_db/faiss.index"
+  faiss_metadata:       "vector_db/metadata.jsonl"
+  state_file:           ".state/ueba.state"
+  log_file:             "logs/ueba_engine.log"
+  trainer_log:          "logs/ueba_trainer.log"
+  preprocessor_log:     "logs/ueba_preprocessor.log"
+  # Engine reads this file on each event (mtime-tracked, no restart needed).
+  # Written by the dashboard whenever an analyst marks an alert as FP.
+  # Must point at the same file the dashboard writes (`dashboard.false_positives_file`'s sibling).
+  fp_patterns_file:     "/root/NEW_DRIVE/aditya_ueba/fp_patterns.json"
+  # Analyst watch lists (RFP point 1). Same contract as fp_patterns_file: the
+  # dashboard writes it via /api/watchlist, the engine mtime-reloads it on each
+  # event. Watched users/hosts/IPs get a small additive score boost applied
+  # before the alert threshold, so their borderline activity surfaces.
+  # See ueba_watchlist.py for why that boost is deliberately small.
+  watchlist_file:       "/root/NEW_DRIVE/aditya_ueba/watchlist.json"
+
+
+# ── Preprocessing ─────────────────────────────────────────────────────────────
+preprocessing:
+  chunk_size: 50000
+  min_events_per_user: 2000
+
+  feature_fields:
+    temporal:
+      - "enrich.temporal.hour"
+      - "enrich.temporal.day_of_week"
+      - "enrich.temporal.is_weekend"
+      - "enrich.temporal.is_business_hours"
+      - "enrich.temporal.is_night_shift"
+
+    flags:
+      - "enrich.flags.is_auth_event"
+      - "enrich.flags.is_network_event"
+      - "enrich.flags.is_file_event"
+      - "enrich.flags.is_process_event"
+
+    anomalies:
+      - "enrich.anomalies.is_brute_force"
+      - "enrich.anomalies.is_port_scan"
+      - "enrich.anomalies.is_tor"
+      - "enrich.anomalies.is_malicious_ip"
+      - "enrich.anomalies.is_impossible_travel"
+      - "enrich.anomalies.is_lateral_movement"
+      - "enrich.anomalies.is_data_exfiltration"
+      - "enrich.anomalies.is_after_hours"
+      - "enrich.anomalies.is_high_frequency"
+
+    counters:
+      - "enrich.counters.src_ip_5m"
+      - "enrich.counters.src_ip_1h"
+      - "enrich.counters.user_1h"
+      - "enrich.counters.host_1h"
+
+    behavioral:
+      - "enrich.behavioral.unique_destinations_1h"
+      - "enrich.behavioral.unique_ports_1h"
+      - "enrich.behavioral.recent_failures_5m"
+
+    geo:
+      - "enrich.geo.distance_km"
+      - "enrich.geo.cross_border"
+      - "enrich.geo.cross_continent"
+
+    risk:
+      - "enrich.risk_score"
+      - "rule.level"
+
+    network:
+      - "enrich.network_intel.is_cloud_provider"
+
+    categorical:
+      event_category:
+        field: "event_category"
+        mapping:
+          auth:     0
+          network:  1
+          process:  2
+          file:     3
+          dns:      4
+          web:      5
+          malware:  6
+          cloud:    7
+          policy:   8
+          system:   9
+          unknown:  10
+
+      event_outcome:
+        field: "event_outcome"
+        mapping:
+          success:  0
+          failure:  1
+          unknown:  2
+
+      traffic_direction:
+        field: "enrich.classification.traffic_direction"
+        mapping:
+          inbound:   0
+          outbound:  1
+          internal:  2
+          unknown:   3
+
+  feature_dim: 35
+  null_fill_value: 0.0
+
+
+# ── Isolation Forest ──────────────────────────────────────────────────────────
+isolation_forest:
+  contamination: 0.005
+  n_estimators: 200
+  max_samples: "auto"
+  n_jobs: -1
+  random_state: 42
+  training_sample_size: 500000
+
+  thresholds:
+    suspicious:       -0.50
+    anomalous:        -0.55
+    highly_anomalous: -0.60
+
+
+# ── Autoencoder ───────────────────────────────────────────────────────────────
+autoencoder:
+  architecture:
+    input_dim:   35
+    hidden_dims: [24, 12]
+    activation:  "relu"
+    dropout:     0.1
+
+  training:
+    epochs:           30
+    batch_size:       4096
+    learning_rate:    0.001
+    weight_decay:     0.0001
+    val_split:        0.2
+    early_stopping_patience: 5
+    scheduler_step:   10
+    scheduler_gamma:  0.5
+
+  threshold_percentile: 95
+  device: "cuda"            # trainer device — full retrain on GPU
+  inference_device: "cpu"   # streaming engine — CPU AE inference frees GPU SMs for FAISS + co-tenants
+  num_workers: 4
+
+
+# ── HDBSCAN Clusterer ─────────────────────────────────────────────────────────
+clusterer:
+  min_cluster_size: 5
+  min_samples: 3
+  metric: "euclidean"
+  run_interval_seconds: 900   # was 300; each pass rewrites the whole alerts file
+                              # (campaign_id patch) → raise to cut dashboard cache
+                              # invalidations + I/O load on the backlogged engine
+  buffer_size: 1000
+  min_persistence: 0.3
+
+
+# ── Score Fusion ──────────────────────────────────────────────────────────────
+score_fusion:
+  isolation_forest_weight: 0.5
+  autoencoder_weight: 0.5
+
+  alert_threshold: 0.75
+
+  verdicts:
+    - min: 0.75
+      max: 0.85
+      label: "suspicious"
+      confidence: "low"
+    - min: 0.85
+      max: 0.93
+      label: "anomalous"
+      confidence: "medium"
+    - min: 0.93
+      max: 1.00
+      label: "highly_anomalous"
+      confidence: "high"
+
+
+# ── RAG (Semantic Retrieval) ──────────────────────────────────────────────────
+rag:
+  inference_device: cpu          # RAG FAISS index device; cpu frees the shared GPU (set cuda to use GPU)
+  top_k: 5
+  min_similarity: 0.60
+  max_index_size: 7000000        # runtime ceiling — add_to_index() refuses beyond this
+  index_build_fraction: 0.8      # trainer seeds the index to 80% of the ceiling,
+                                 # leaving headroom so runtime adds can grow it
+
+  embedding_fields:
+    - "event_category"
+    - "event_outcome"
+    - "enrich.temporal.hour"
+    - "enrich.temporal.is_business_hours"
+    - "enrich.anomalies.is_brute_force"
+    - "enrich.anomalies.is_impossible_travel"
+    - "enrich.anomalies.is_tor"
+    - "enrich.risk_score"
+    - "enrich.geo.cross_continent"
+
+
+# ── User Profile Store (SQLite) ───────────────────────────────────────────────
+profile_store:
+  # Must stay equal to TRAINING_RETENTION_DAYS in ueba_weekly_retrain.sh. The
+  # autoencoders/IF are trained on that window, while this is the window the
+  # per-user deviation feature (vector index 34) is measured over — if they
+  # disagree, every entity is scored against a baseline built from a different
+  # span of history than the model learned. Lowered 30 -> 21 on 2026-09-16
+  # alongside the training window; see that file for the disk-pressure reason.
+  baseline_window_days: 21
+
+  # How the rolling window is applied (RFP 22).
+  #
+  #   events — the original behaviour. A fixed-alpha EWMA whose window is
+  #            measured in EVENTS, not time: a busy server's baseline turns over
+  #            in minutes while a once-a-week account's spans months. In this
+  #            mode `baseline_window_days` above is NOT read by anything.
+  #
+  #   time   — a true rolling period. Statistics are decayed by elapsed time
+  #            before each event is folded in, so the effective memory is
+  #            `baseline_window_days` of wall clock for every entity, and
+  #            categorical values (countries, agents) age out instead of being
+  #            remembered forever.
+  #
+  # SWITCHING REQUIRES A RETRAIN. It changes the distribution of feature [34],
+  # which the Isolation Forest and the autoencoders were fitted against; running
+  # live traffic through models trained on the other definition is worse than
+  # either mode on its own. Change this, then run ueba_weekly_retrain.sh.
+  baseline_mode: events
+  legacy_alpha: 0.01          # only used when baseline_mode is "events"
+
+  update_interval_seconds: 60
+  tracked_fields:
+    - typical_hours
+    - typical_countries
+    - avg_risk_score
+    - avg_events_per_hour
+    - typical_agents
+    - first_seen
+    - last_seen
+    - total_events
+
+
+# ── Dashboard API Server ──────────────────────────────────────────────────────
+dashboard:
+  # agent-sync disabled 2026-08-06: target soc@localhost:2222 was the
+  # 222->98 reverse tunnel, decommissioned in the SIEM 222->23 migration
+  # (spammed the log with SSH auth failures every poll). Re-enable only
+  # after repointing ssh_host at the current Wazuh manager with a key.
+  agent_sync:
+    enabled:        false
+  host:             "0.0.0.0"
+  port:             3026
+  alerts_file:      "/root/NEW_DRIVE/aditya_ueba/ueba_alerts.jsonl"
+  agents_registry:  "/root/NEW_DRIVE/aditya_ueba/agents.json"
+  # Where the SOC analyst's false-positive flags are persisted. JSON array
+  # of {event_id, reason, marked_at}. Rewritten atomically on every mutation.
+  false_positives_file: "/root/NEW_DRIVE/aditya_ueba/false_positives.json"
+  max_alerts:       500000       # max lines read from the live alerts file per request
+  max_feed_alerts:  2000000       # cap per timeline-windowed request (live+archives);
+    # Raised from 500000 on 2026-09-09. At 500k the wide windows were
+    # silently truncated — 60D showed 495,480 of 1,202,114 (59% missing) and
+    # 90D/ALL 72% — so every KPI, user and campaign count on those views was
+    # understated. Measured cost of covering all 1.79M: RSS 3.71 -> 3.75 GB
+    # (the window snapshot is references to alerts the archive cache already
+    # holds), aggregation per window 3.9s -> 14.1s. CPU only, and bounded by
+    # the warmer cadence. The feed TABLE is capped separately by feed_row_cap
+    # (5000 rows), so payload size is unaffected. If the banner starts saying
+    # 'most recent 2,000,000 of ...' again, raise this or shorten history_days.
+                                 # evidence is lazy-loaded per row so this stays light
+  cache_ttl_secs:   10           # re-read alerts file if older than this
+
+  # AI Security Analyst proxy — Anthropic API key from ANTHROPIC_API_KEY env var.
+  # If unset, the dashboard falls back to a locally-generated summary.
+  ai_analyst:
+    # DISABLED 2026-09-21 for data sovereignty.
+    #
+    # When enabled this POSTs alert context to https://api.anthropic.com — i.e.
+    # SOC event data leaves the premises. That is incompatible with the SLDC
+    # tender requirement that "the entire Event, Alerts and other information
+    # pertaining to the Organization's SOC must remain within Organization
+    # premises only" (RFP point 67), and with on-prem bank deployments generally.
+    #
+    # The endpoint checks this flag BEFORE building any request, so with it off
+    # nothing is sent and the UI falls back to its built-in local summary.
+    #
+    # Do NOT re-enable on a customer install without written approval. If an
+    # AI analyst is wanted on-prem, point it at a locally hosted model instead
+    # of an external API.
+    enabled:        false
+    model:          "claude-sonnet-4-6"   # latest mid-tier Claude
+    max_tokens:     1000
+    timeout_secs:   20
+
+  # ── Device registry and proactive alerting (RFP 10, 15) ─────────────────────
+  # Administrators label devices and assign a priority; notification rules then
+  # alert by score, verdict, device priority, device label, MITRE tactic or
+  # watch-list membership, over email and/or webhook.
+  #
+  # Throttling is deliberately conservative. This platform raises tens of
+  # thousands of alerts a week, and an unthrottled rule is an inbox outage — at
+  # which point the operator mutes the channel and the feature is worth less
+  # than nothing. Every rule carries a repeat-suppression window and an hourly
+  # ceiling; the defaults are 15 minutes and 20 per hour.
+  notify:
+    enabled: true
+    devices_file: "/root/NEW_DRIVE/aditya_ueba/devices.json"
+    rules_file:   "/root/NEW_DRIVE/aditya_ueba/notify_rules.json"
+    state_file:   "/root/NEW_DRIVE/aditya_ueba/.state/notify.state"
+    # How often the dispatcher checks for newly emitted alerts.
+    poll_secs: 15
+    # Email uses the same SMTP settings as reporting, below. With no SMTP host
+    # configured, email rules are stored but cannot deliver; webhook rules are
+    # unaffected.
+
+  # ── Reporting (RFP 34-40, 62) ───────────────────────────────────────────────
+  # Out-of-the-box, custom and scheduled reports. Implemented in ueba_reports.py
+  # (what a report contains), ueba_report_render.py (PDF/Excel/CSV/HTML/XML) and
+  # ueba_report_store.py (saving, scheduling, email delivery).
+  reporting:
+    enabled: true
+    output_dir:       "/root/NEW_DRIVE/aditya_ueba/reports"
+    definitions_file: "/root/NEW_DRIVE/aditya_ueba/report_definitions.json"
+    schedules_file:   "/root/NEW_DRIVE/aditya_ueba/report_schedules.json"
+    history_file:     "/root/NEW_DRIVE/aditya_ueba/report_history.json"
+    default_hours: 168          # the period a report covers when none is given
+    # Generating a report over a very wide window reads the whole window into
+    # memory. This caps what the REPORT endpoints will load, independently of
+    # the dashboard's own feed cap, so an analyst asking for "all time" as PDF
+    # cannot put the dashboard under memory pressure for everyone else.
+    max_window_alerts: 400000
+    # Set false to turn off the background scheduler while leaving on-demand
+    # report generation working.
+    scheduler_enabled: true
+
+    # Email delivery (point 39). Leave `host` empty and delivery is simply
+    # disabled: reports still generate and are downloadable, and any schedule
+    # with recipients records "smtp not configured" instead of silently doing
+    # nothing.
+    smtp:
+      host:         ""
+      port:         587
+      starttls:     true
+      ssl:          false
+      username:     ""
+      # PREFER password_env. This file sits on a shared box and is read by
+      # several teams; a plaintext password here is a credential leak waiting to
+      # happen. Name an environment variable instead and set it in the systemd
+      # unit, which is not world-readable.
+      password_env: "UEBA_SMTP_PASSWORD"
+      password:     ""
+      from_addr:    "ueba@cybersentinel.local"
+      timeout_secs: 30
+
+
+# ── Authentication / SSO ──────────────────────────────────────────────────────
+# The dashboard shipped with no authentication at all: open CORS, bound to
+# 0.0.0.0:3026, every endpoint anonymous. This block is the first half of
+# closing that. Implemented in ueba_auth.py.
+#
+# ROLLOUT ORDER — do not skip step 3:
+#   1. enabled: true, enforce: false   ← where we are now. Endpoints exist and
+#      sessions can be minted, but nothing is gated. Zero risk to the SOC.
+#   2. Have the SIEM team mint a test assertion against the contract below and
+#      confirm GET /api/sso/ping reports ready=true, then complete one real
+#      round-trip through /auth/sso.
+#   3. Only then set enforce: true. Doing it earlier locks analysts out of a
+#      live dashboard — the server refuses to start in that state on purpose.
+auth:
+  enabled:            true
+  enforce:            false          # Turned on 2026-09-09 and verified working
+                                     # (gate + full login round trip), then turned
+                                     # back off the same day: the SIEM does not yet
+                                     # redirect analysts to /auth/sso#token=..., so
+                                     # the only way in was a hand-minted link from
+                                     # ./ueba_login_link.sh — not workable for a SOC.
+                                     # Flip to true once the SIEM sends real users
+                                     # through, and restart ueba-dashboard.
+
+  # ── Token contract handed to the SIEM team ──
+  # We define these; their minter must match exactly or verification fails.
+  # Only HS256 is implemented. Setting RS256 raises at startup rather than
+  # silently degrading — that path is blocked on their cert PEM (needs
+  # IP:103.252.168.197 in the SAN), a confirmed JWKS URL and SIEM host.
+  algorithm:          "HS256"
+  issuer:             "cybersentinel-siem"    # verified against the `iss` claim
+  # Accepted `aud` values. A list is allowed: PyJWT accepts the token if its
+  # `aud` matches ANY entry, so this honours both names without ever weakening
+  # the audience check itself.
+  #   - cybersentinel-ueba : what the SIEM actually mints (confirmed 2026-09-09
+  #     from a real csadmin login attempt in the rejection log)
+  #   - ueba-dashboard     : the name in the original contract we handed them;
+  #     kept so anything already built against it keeps working
+  # Once the SIEM confirms one canonical value, drop the other.
+  audience:
+    - "cybersentinel-ueba"
+    - "ueba-dashboard"
+  secret_env:         "UEBA_SSO_SECRET"       # read from the environment, never from this file
+  leeway_secs:        60                      # clock-skew tolerance
+  max_token_age_secs: 300                     # reject a stale assertion even if its exp is generous
+
+  # Required claims: iss, aud, exp, iat, sub.
+  # Optional: jti (strongly recommended — it is what makes an assertion
+  # single-use), preferred_username, email, name, and the role claim below.
+
+  # ── Sessions ──
+  session_ttl_secs:   28800          # 8h absolute lifetime
+  session_idle_secs:  3600           # revoked after 1h idle
+  cookie_name:        "ueba_session"
+  cookie_secure:      false          # set true the moment this is behind TLS
+  cookie_samesite:    "Lax"
+  auth_db:            "/root/NEW_DRIVE/aditya_ueba/profiles/ueba_auth.db"
+
+  # ── Roles ──
+  # Ordered viewer < analyst < admin; a route gated on "analyst" admits admin.
+  # An unmapped SIEM group falls through to default_role rather than being
+  # refused, so adding a group upstream cannot lock its members out.
+  allow_jit:          true           # provision a valid-but-unseen subject on first login
+  default_role:       "viewer"
+  role_claim:         "roles"        # list[str], or a space/comma-joined string
+  role_map:
+    ueba-admin:       admin
+    soc-lead:         admin
+    soc-analyst:      analyst
+    soc-viewer:       viewer
+
+  # Never gated, even with enforce on. /api/health must stay open — the
+  # engine watchdog probes it every 2 minutes with no credential.
+  public_paths:
+    - "/api/health"
+    - "/api/sso/ping"
+    - "/auth/sso"
+    - "/api/auth/sso/exchange"
+
+  # Origin allowlist. Empty keeps the historical wide-open CORS. Populate it
+  # when enabling enforcement: wildcard origin plus a session cookie is what
+  # lets any page an analyst visits read the alert feed.
+  cors_origins: []
+
+# ── Streaming Engine ──────────────────────────────────────────────────────────
+streaming:
+  poll_interval_ms: 100
+  state_save_interval: 1000
+  # Isolation Forest batching (2026-08-27). sklearn score_samples() carries a
+  # large fixed per-call cost, so we score up to if_batch_size events per call
+  # instead of one. read_chunk_bytes must be big enough to yield a real batch:
+  # enriched lines average ~5.4 KB, so the old 64 KB chunk held only ~12 events.
+  if_batch_size: 128
+  read_chunk_bytes: 1048576
+  max_partial_buffer_bytes: 1048576
+  max_loaded_user_models: 100
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  max_bytes: 10485760
+  backup_count: 5
+  format: "%(asctime)s  %(levelname)-8s  %(name)-20s  %(message)s"
+
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output:
+  pretty_print: false
+  include_feature_vector: false
+  include_raw_scores: true
+  preserve_original: "all"
+
+
+# ── Noise Suppression ─────────────────────────────────────────────────────────
+noise_suppression:
+  signature_ids:
+    - "113202"   # MikroTik: L2TP tunnel authenticated (normal VPN login)
+    - "81619"    # Fortigate: Multiple high traffic events from same source
+    - "81633"    # Fortigate: Multiple IDS events from same source
+    - "81634"    # Fortigate: Multiple IDS events from same destination
+    - "81644"    # Fortigate: Multiple policy violations from same source
+    - "81620"    # Fortigate: Multiple high traffic events from same destination
+    - "81621"    # Fortigate: Multiple high traffic events to same port
+    - "60107"    # Failed attempt to perform a privileged operation (chrome.exe SocSRV_15)
+    - "61602"    # Windows Sysmon error event (DC noise — kernel/Sysmon channel hiccups)
+    - "61643"    # Multiple Sysmon error events (DC noise — meta-rule on 61602)
+  suppress_zero_risk_network: true
+  suppress_ipv6_multicast: true
+  suppress_source_ips:
+    - "164.52.194.98"   # engine server — reverse tunnel + rsync traffic
+  suppress_hostnames_as_users:
+    - "cybersentinel-manager"
+    - "cybersentinel-manage"
+    - "Centos7Trial"
+
+
+# ── Identity Resolution ───────────────────────────────────────────────────────
+identity_resolution:
+  enabled: true
+  mappings:
+    # RootSeeker / Sujal — same person, 3 different formats
+    "RootSeeker":                  "RootSeeker\\Sujal"
+    "sujalthakur2003@outl":        "RootSeeker\\Sujal"
+
+    # LAPTOP-08MIT8SI — truncated vs full username
+    "LAPTOP-08MIT8SI":             "LAPTOP-08MIT8SI\\Asus"
+    "LAPTOP-08MIT8SI\\Asu":        "LAPTOP-08MIT8SI\\Asus"
+
+    # cybersentinel-manager — truncated hostname
+    "cybersentinel-manage":        "cybersentinel-manager"

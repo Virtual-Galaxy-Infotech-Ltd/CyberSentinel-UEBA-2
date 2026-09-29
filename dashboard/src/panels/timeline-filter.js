@@ -1,0 +1,127 @@
+// Time-window filter (24H / 3D / 7D / 30D / 60D / 90D / ALL).
+// Rebuilds feedData / usersData / agentsData from the immutable `all*` arrays
+// then re-renders every dependent panel + chart.
+
+import { state } from "../state.js";
+import { renderFeed } from "./feed.js";
+import { renderUsers, renderOverviewUsers } from "./users.js";
+import { renderAgents, renderOverviewAgents } from "./agents.js";
+import { updateGauge } from "../charts/gauge.js";
+import { drawTimeline } from "../charts/timeline.js";
+import { renderScoreDist } from "../charts/scoredist.js";
+import { renderHeatmap } from "../charts/heatmap.js";
+import { renderTopSigs } from "../charts/topsigs.js";
+
+export function applyTimelineFilter() {
+  const hours = state.timelineHours;
+  const label =
+    {
+      0: "ALL TIME",
+      24: "LAST 24H",
+      72: "LAST 3 DAYS",
+      168: "LAST 7 DAYS",
+      720: "LAST 30 DAYS",
+      1440: "LAST 60 DAYS",
+      2160: "LAST 90 DAYS",
+    }[hours] || "";
+  const showingEl = document.getElementById("tl-showing");
+  if (showingEl) {
+    // When the selected window holds more alerts than the server cap, say so —
+    // the feed/charts reflect the most-recent N, not silently-dropped history.
+    const st = state.lastStats;
+    showingEl.textContent =
+      st && st.window_capped
+        ? `${label} · most recent ${st.window_cap.toLocaleString()} of ${st.window_total.toLocaleString()}`
+        : label;
+  }
+
+  if (hours === 0) {
+    state.feedData   = state.allFeedData;
+    state.usersData  = state.allUsersData;
+    state.agentsData = state.allAgentsData;
+  } else {
+    const cutoff = new Date(Date.now() - hours * 3600000);
+    state.feedData = state.allFeedData.filter((a) => {
+      try {
+        return new Date(a.processed_at || a.event_time) >= cutoff;
+      } catch {
+        return true;
+      }
+    });
+    const uMap = {};
+    state.feedData.forEach((a) => {
+      const u = a.user || "unknown";
+      if (!uMap[u])
+        uMap[u] = { user: u, alert_count: 0, max_score: 0, verdicts: {}, hosts: [], top_reason: "", last_seen: "", risk_index: 0 };
+      uMap[u].alert_count++;
+      uMap[u].max_score = Math.max(uMap[u].max_score, a.score || 0);
+      if (a.host && !uMap[u].hosts.includes(a.host)) uMap[u].hosts.push(a.host);
+      if (!uMap[u].last_seen || a.processed_at > uMap[u].last_seen) uMap[u].last_seen = a.processed_at;
+      const v = a.verdict || "";
+      uMap[u].verdicts[v] = (uMap[u].verdicts[v] || 0) + 1;
+      if (a.reasons && a.reasons[0]) uMap[u].top_reason = a.reasons[0];
+    });
+    state.usersData = Object.values(uMap)
+      .map((u) => {
+        const ha = u.verdicts["highly_anomalous"] || 0;
+        u.risk_index = parseFloat(
+          (u.max_score * 0.5 + (u.alert_count / 100) * 0.3 + (ha / Math.max(u.alert_count, 1)) * 0.2).toFixed(3)
+        );
+        u.top_verdict = Object.entries(u.verdicts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+        u.highly_anomalous = ha;
+        return u;
+      })
+      .filter((u) => u.user !== "unknown")
+      .sort((a, b) => b.risk_index - a.risk_index);
+
+    const aMap = {};
+    state.feedData.forEach((a) => {
+      const h = a.host || "";
+      if (!h) return;
+      if (!aMap[h])
+        aMap[h] = { agent: h, ip: a.host_ip || "", alert_count: 0, max_score: 0, highly_anomalous: 0, anomalous: 0, suspicious: 0, last_seen: "" };
+      aMap[h].alert_count++;
+      aMap[h].max_score = Math.max(aMap[h].max_score, a.score || 0);
+      if (a.verdict === "highly_anomalous") aMap[h].highly_anomalous++;
+      else if (a.verdict === "anomalous")    aMap[h].anomalous++;
+      else if (a.verdict === "suspicious")   aMap[h].suspicious++;
+      if (!aMap[h].last_seen || a.processed_at > aMap[h].last_seen) aMap[h].last_seen = a.processed_at;
+    });
+    // Endpoints are a fixed fleet (the Wazuh registry), not derived from the
+    // window. Show ALL of them even when windowed: start from the full
+    // registry-backed list and overlay this window's counts (quiet endpoints
+    // keep alert_count 0), then append any in-window hosts not in the registry.
+    const known = new Set();
+    state.agentsData = (state.allAgentsData || []).map((base) => {
+      known.add(base.agent);
+      const w = aMap[base.agent];
+      return w
+        ? { ...base, ip: base.ip || w.ip, alert_count: w.alert_count,
+            max_score: w.max_score, highly_anomalous: w.highly_anomalous,
+            anomalous: w.anomalous, suspicious: w.suspicious,
+            last_seen: w.last_seen }
+        : { ...base, alert_count: 0, max_score: 0, highly_anomalous: 0,
+            anomalous: 0, suspicious: 0 };
+    });
+    Object.values(aMap).forEach((w) => {
+      if (!known.has(w.agent)) state.agentsData.push(w);
+    });
+    state.agentsData.sort(
+      (a, b) => b.highly_anomalous - a.highly_anomalous || b.max_score - a.max_score
+    );
+  }
+
+  renderFeed();
+  renderUsers();
+  renderOverviewUsers();
+  renderAgents();
+  renderOverviewAgents();
+
+  if (state.lastStats) {
+    updateGauge(state.lastStats, state.feedData);
+    drawTimeline(state.feedData);
+    renderScoreDist(state.feedData);
+    renderHeatmap(state.feedData);
+    renderTopSigs(state.feedData);
+  }
+}
