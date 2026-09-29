@@ -94,6 +94,8 @@
         <span class="tab-icon" aria-hidden="true">⚑</span><span class="tab-label">False Positives</span><span class="nav-pill" id="fp-nav-badge">0</span></div>
       <div class="tab" data-tab="alerting" data-cap="notify.edit"               title="Alerting">
         <span class="tab-icon" aria-hidden="true">◈</span><span class="tab-label">Alerting</span><span class="nav-pill" id="ntf-nav-badge">0</span></div>
+      <div class="tab" data-tab="settings"               title="Settings">
+        <span class="tab-icon" aria-hidden="true">⚙</span><span class="tab-label">Settings</span></div>
       <div class="tab" data-tab="reports"                title="Reports">
         <span class="tab-icon" aria-hidden="true">▤</span><span class="tab-label">Reports</span></div>
       <div class="tab" data-tab="watchlist"              title="Watch List">
@@ -964,6 +966,52 @@
   </div>
 
   <!-- ── Threat Map (live firewall geoIP globe) ── -->
+  <div class="page" id="page-settings">
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">MY ACCOUNT</div>
+      </div>
+      <div id="set-me"></div>
+    </div>
+
+    <!-- Admin only. data-cap hides it without the capability; every endpoint it
+         calls is independently @require_role("admin") on the server. -->
+    <div class="panel" data-cap="users.manage">
+      <div class="panel-header">
+        <div class="panel-title">USER MANAGEMENT</div>
+        <span class="panel-badge" id="set-users-badge">0</span>
+      </div>
+
+      <div class="wl-form">
+        <input id="set-new-user" class="wl-input" type="text" placeholder="Username" autocomplete="off" style="flex:1 1 160px">
+        <input id="set-new-pass" class="wl-input" type="password" placeholder="Password (min 12 characters)" autocomplete="new-password" style="flex:1 1 220px">
+        <select id="set-new-role" class="wl-input" style="min-width:120px">
+          <option value="viewer">Viewer</option>
+          <option value="analyst">Analyst</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button id="set-new-btn" class="export-btn wl-add-btn">＋ Create account</button>
+      </div>
+      <div class="set-note">
+        <b>Viewer</b> reads and exports. <b>Analyst</b> also triages — watch lists,
+        false positives, generating reports. <b>Admin</b> also configures devices,
+        notification rules, scheduled delivery and sees the audit trail.
+      </div>
+
+      <div class="feed-table-wrap">
+        <table id="set-users-table">
+          <thead>
+            <tr>
+              <th>User</th><th>Type</th><th>Role</th><th>Active</th>
+              <th>Password</th><th>Last login</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="set-users-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <div class="page" id="page-threatmap">
     <div class="tm-wrap">
       <div class="tm-globe-col">

@@ -3691,3 +3691,65 @@ body[data-role="viewer"]  .role-chip,
 body[data-role="analyst"] .role-chip,
 body[data-role="admin"]   .role-chip { display: inline-block; }
 body[data-role="admin"]   .role-chip { border-color: var(--accent); color: var(--accent); }
+
+/* ── Settings page ────────────────────────────────────────────────────────── */
+.set-kv {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 16px; padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono2); font-size: 13.5px;
+}
+.set-kv span { color: var(--text2); }
+.set-kv b    { color: var(--text); }
+.set-sub {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--text2);
+  margin: 16px 0 8px;
+}
+.set-note {
+  font-family: var(--mono2); font-size: 12.5px; line-height: 1.6;
+  color: var(--text2); margin-top: 10px;
+}
+.set-note code {
+  font-family: var(--mono2); font-size: 12px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; color: var(--accent);
+}
+#set-users-table select.set-role { min-width: 108px; padding: 3px 6px; }
+
+/* ── Login gate ───────────────────────────────────────────────────────────── */
+/* Only ever shown when the server is enforcing AND nobody is signed in. */
+#login-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 20000;
+  align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at 50% 35%, #06121f 0%, #01030a 70%, #000 100%);
+}
+#login-overlay.show { display: flex; }
+/* Hide the app behind the gate so no stale data is readable through it. */
+body.login-gated > *:not(#login-overlay) { filter: blur(3px); pointer-events: none; }
+
+.login-card {
+  width: min(380px, calc(100vw - 48px));
+  padding: 28px 26px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+}
+.login-brand {
+  font-family: var(--mono); font-size: 22px; letter-spacing: 1px;
+  color: var(--text2); margin-bottom: 4px;
+}
+.login-brand b { color: var(--accent); }
+.login-sub {
+  font-family: var(--mono2); font-size: 13px; color: var(--text2);
+  margin-bottom: 18px;
+}
+#login-form { display: flex; flex-direction: column; gap: 10px; }
+#login-form .wl-input { width: 100%; }
+#login-form button { margin-top: 4px; }
+.login-error {
+  font-family: var(--mono2); font-size: 12.5px; line-height: 1.5;
+  color: var(--red); min-height: 18px;
+}

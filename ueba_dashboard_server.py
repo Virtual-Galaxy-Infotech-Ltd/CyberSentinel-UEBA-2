@@ -2836,6 +2836,7 @@ CAPABILITIES = {
     "devices.edit":     "admin",
     "notify.edit":      "admin",
     "audit.view":       "admin",
+    "users.manage":     "admin",
 }
 
 
@@ -4416,7 +4417,7 @@ def legacy_index():
 #   3. Otherwise, 404.
 SPA_TAB_PATHS = {"overview", "feed", "users", "campaigns", "endpoints",
                  "false-positives", "watchlist", "reports", "alerting", "threatmap",
-                 "incidents", "auth"}
+                 "incidents", "auth", "settings"}
 
 @app.route("/<path:subpath>")
 def spa_fallback(subpath):
