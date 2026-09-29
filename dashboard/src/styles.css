@@ -3655,3 +3655,39 @@ a.fp-btn-inline { text-decoration: none; display: inline-block; }
   color: var(--text2); font-size: 11.5px; padding: 3px 9px; font-family: inherit;
 }
 .deep-exit:hover { color: var(--text); border-color: var(--accent2); }
+
+
+/* ── Role-based access control (RFP 23) ───────────────────────────────────────
+   The server gates every mutating route and returns 403 on its own; these rules
+   only stop the UI offering an action that would be refused. Applied as body
+   classes from /api/auth/capabilities so that rows rendered later — feed rows,
+   watch-list rows, schedule rows — are covered without re-running a DOM pass
+   after every repaint.
+
+   While auth.enforce is off the server reports every capability as true, none
+   of these classes is set, and the UI is unchanged. */
+body.nocap-export [data-cap="export"],
+body.nocap-watchlist-edit [data-cap="watchlist.edit"],
+body.nocap-fp-edit [data-cap="fp.edit"],
+body.nocap-reports-generate [data-cap="reports.generate"],
+body.nocap-reports-custom [data-cap="reports.custom"],
+body.nocap-ai-analyze [data-cap="ai.analyze"],
+body.nocap-reports-schedule [data-cap="reports.schedule"],
+body.nocap-devices-edit [data-cap="devices.edit"],
+body.nocap-notify-edit [data-cap="notify.edit"],
+body.nocap-audit-view [data-cap="audit.view"] {
+  display: none !important;
+}
+
+/* Role chip in the header, shown only once enforcement is actually on. */
+.role-chip {
+  display: none;
+  font-family: var(--mono2); font-size: 11px; letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border2); color: var(--text2);
+}
+body[data-role="viewer"]  .role-chip,
+body[data-role="analyst"] .role-chip,
+body[data-role="admin"]   .role-chip { display: inline-block; }
+body[data-role="admin"]   .role-chip { border-color: var(--accent); color: var(--accent); }

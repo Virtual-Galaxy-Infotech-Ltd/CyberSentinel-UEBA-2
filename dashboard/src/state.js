@@ -24,6 +24,10 @@ function restoreTimelineHours() {
 }
 
 export const state = {
+  // RBAC (RFP 23). role is the effective role, or "admin" while
+  // auth.enforce is off — there is no authenticated user to ask then.
+  role: null,
+  rbacEnforcing: false,
   feedFilter: "all",
   feedData: [],
   // Deep search (RFP 26) — results from /api/search/deep, which scans the

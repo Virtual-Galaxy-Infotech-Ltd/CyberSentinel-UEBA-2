@@ -464,6 +464,15 @@ def current_user() -> dict | None:
     return user
 
 
+def is_enforcing() -> bool:
+    """True when auth.enforce is on, i.e. when roles actually gate anything.
+
+    Callers outside this module need this to answer "is RBAC live?" without
+    reaching into _cfg(). While it is False every gate is deliberately a no-op.
+    """
+    return bool(_cfg().get("enforce"))
+
+
 def role_at_least(user: dict | None, minimum: str) -> bool:
     if not user:
         return False

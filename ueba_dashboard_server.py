@@ -2810,6 +2810,95 @@ def _current_username():
     return None
 
 
+# ── Role-based access control (RFP 23) ───────────────────────────────────────
+#
+# One table drives both halves of RBAC: the server gates routes with it, and the
+# browser asks for the same table to decide what to show. Keeping a single source
+# of truth is the point — a UI that hides a button the API still allows (or vice
+# versa) is worse than no RBAC at all, because it looks enforced and is not.
+#
+# Tiers, by what the action actually does:
+#   viewer  — reads. Exporting is here on purpose: it reformats data the viewer
+#             can already see on screen, and changes no state.
+#   analyst — day-to-day triage that writes state: watch lists, false positives,
+#             generating and keeping reports.
+#   admin   — configuration and oversight: who gets alerted, which devices matter,
+#             scheduled delivery that leaves the building by email, and the audit
+#             trail of everyone else's actions.
+CAPABILITIES = {
+    "export":           "viewer",
+    "watchlist.edit":   "analyst",
+    "fp.edit":          "analyst",
+    "reports.generate": "analyst",
+    "reports.custom":   "analyst",
+    "ai.analyze":       "analyst",
+    "reports.schedule": "admin",
+    "devices.edit":     "admin",
+    "notify.edit":      "admin",
+    "audit.view":       "admin",
+}
+
+
+def _rbac_enforcing():
+    """True only when the auth module is present AND auth.enforce is on."""
+    if not AUTH_MODULE_AVAILABLE:
+        return False
+    try:
+        return ueba_auth.is_enforcing()
+    except Exception:
+        return False
+
+
+def _require_cap(cap):
+    """Gate a route on a capability from the table above.
+
+    Delegates to ueba_auth.require_role, which is a no-op while auth.enforce is
+    off. That is what makes it safe to decorate every route now and flip the
+    flag later: nothing changes for analysts until the cutover is deliberate.
+    """
+    minimum = CAPABILITIES[cap]
+    if AUTH_MODULE_AVAILABLE:
+        return ueba_auth.require_role(minimum)
+
+    def _passthrough(fn):
+        return fn
+    return _passthrough
+
+
+def _capability_map():
+    """{capability: allowed} for the caller — what the UI should offer."""
+    # Not enforcing means everyone can do everything, so say so rather than
+    # inventing a role. The UI then renders exactly as it does today.
+    if not _rbac_enforcing():
+        return {c: True for c in CAPABILITIES}
+    try:
+        user = ueba_auth.current_user()
+    except Exception:
+        user = None
+    return {c: ueba_auth.role_at_least(user, m) for c, m in CAPABILITIES.items()}
+
+
+@app.route("/api/auth/capabilities")
+def api_auth_capabilities():
+    """What the current caller may do. Drives which controls the SPA renders."""
+    role = None
+    if AUTH_MODULE_AVAILABLE:
+        try:
+            role = (ueba_auth.current_user() or {}).get("role")
+        except Exception:
+            role = None
+    enforcing = _rbac_enforcing()
+    return jsonify({
+        "enforcing":    enforcing,
+        # While enforcement is off there is no authenticated user; report the
+        # effective role so the UI has something honest to display.
+        "role":         role or (None if enforcing else "admin"),
+        "capabilities": _capability_map(),
+        "levels":       dict(CAPABILITIES),
+        "roles":        list(ueba_auth.ROLES) if AUTH_MODULE_AVAILABLE else [],
+    })
+
+
 def _resolve_report(report_id):
     """(sections, title, base_id) for a built-in or saved custom report."""
     if report_id in ueba_reports.REPORTS:
@@ -2849,6 +2938,7 @@ def api_reports_catalogue():
 
 
 @app.route("/api/reports/generate", methods=["POST"])
+@_require_cap("reports.generate")
 def api_reports_generate():
     """Generate a report now and return the file inline."""
     if not _reports_ready():
@@ -2976,6 +3066,7 @@ def api_reports_download_original(art_id):
 
 
 @app.route("/api/reports/history/<art_id>", methods=["DELETE"])
+@_require_cap("reports.generate")
 def api_reports_history_delete(art_id):
     """Delete one generated report. Audited like any other mutating action."""
     if not _reports_ready():
@@ -3011,6 +3102,7 @@ _EXPORT_MAX_COLS = 60
 
 
 @app.route("/api/export", methods=["POST"])
+@_require_cap("export")
 def api_export():
     if not REPORTS_AVAILABLE:
         return jsonify({"ok": False,
@@ -3097,6 +3189,7 @@ def api_reports_custom_list():
 
 
 @app.route("/api/reports/custom", methods=["POST"])
+@_require_cap("reports.custom")
 def api_reports_custom_save():
     if not _reports_ready():
         return _reports_unavailable()
@@ -3116,6 +3209,7 @@ def api_reports_custom_save():
 
 
 @app.route("/api/reports/custom/<did>", methods=["DELETE"])
+@_require_cap("reports.custom")
 def api_reports_custom_delete(did):
     if not _reports_ready():
         return _reports_unavailable()
@@ -3137,6 +3231,7 @@ def api_reports_schedules_list():
 
 
 @app.route("/api/reports/schedules", methods=["POST"])
+@_require_cap("reports.schedule")
 def api_reports_schedule_save():
     if not _reports_ready():
         return _reports_unavailable()
@@ -3164,6 +3259,7 @@ def api_reports_schedule_save():
 
 
 @app.route("/api/reports/schedules/<sid>", methods=["DELETE"])
+@_require_cap("reports.schedule")
 def api_reports_schedule_delete(sid):
     if not _reports_ready():
         return _reports_unavailable()
@@ -3173,6 +3269,7 @@ def api_reports_schedule_delete(sid):
 
 
 @app.route("/api/reports/schedules/<sid>/run", methods=["POST"])
+@_require_cap("reports.schedule")
 def api_reports_schedule_run(sid):
     """Run one schedule immediately — the way an administrator proves a
     schedule works without waiting a day for it to fire."""
@@ -3259,6 +3356,7 @@ def api_devices_list():
 
 
 @app.route("/api/devices", methods=["POST"])
+@_require_cap("devices.edit")
 def api_devices_save():
     if not _notify_ready():
         return _notify_unavailable()
@@ -3276,6 +3374,7 @@ def api_devices_save():
 
 
 @app.route("/api/devices/<path:name>", methods=["DELETE"])
+@_require_cap("devices.edit")
 def api_devices_delete(name):
     if not _notify_ready():
         return _notify_unavailable()
@@ -3300,6 +3399,7 @@ def api_notify_rules_list():
 
 
 @app.route("/api/notify/rules", methods=["POST"])
+@_require_cap("notify.edit")
 def api_notify_rule_save():
     if not _notify_ready():
         return _notify_unavailable()
@@ -3329,6 +3429,7 @@ def api_notify_rule_save():
 
 
 @app.route("/api/notify/rules/<rid>", methods=["DELETE"])
+@_require_cap("notify.edit")
 def api_notify_rule_delete(rid):
     if not _notify_ready():
         return _notify_unavailable()
@@ -3338,6 +3439,7 @@ def api_notify_rule_delete(rid):
 
 
 @app.route("/api/notify/rules/<rid>/test", methods=["POST"])
+@_require_cap("notify.edit")
 def api_notify_rule_test(rid):
     """Fire a rule against the most recent matching alert.
 
@@ -3430,6 +3532,7 @@ def api_watchlist_list():
 
 
 @app.route("/api/watchlist", methods=["POST"])
+@_require_cap("watchlist.edit")
 def api_watchlist_add():
     if not WATCHLIST_AVAILABLE:
         return _watchlist_unavailable()
@@ -3463,6 +3566,7 @@ def api_watchlist_add():
 
 
 @app.route("/api/watchlist/<eid>", methods=["DELETE"])
+@_require_cap("watchlist.edit")
 def api_watchlist_remove(eid):
     if not WATCHLIST_AVAILABLE:
         return _watchlist_unavailable()
@@ -3476,6 +3580,7 @@ def api_watchlist_remove(eid):
 
 
 @app.route("/api/audit")
+@_require_cap("audit.view")
 def api_audit():
     """Most-recent audit entries, newest first.
 
@@ -3516,6 +3621,7 @@ def api_audit():
 
 
 @app.route("/api/false-positive", methods=["POST"])
+@_require_cap("fp.edit")
 def mark_false_positive():
     """Mark a single alert as FP. Also auto-creates a suppression pattern
     derived from the alert's (signature_id, user, agent) fingerprint so future
@@ -3552,6 +3658,7 @@ def mark_false_positive():
 
 
 @app.route("/api/false-positive/<path:event_id>", methods=["DELETE"])
+@_require_cap("fp.edit")
 def unmark_false_positive(event_id):
     """Restore an FP-marked alert AND tear down the auto-suppression pattern
     that was created when it was marked. The mark and the pattern are created
@@ -3592,6 +3699,7 @@ def _event_ids_in_campaign(campaign_id: str) -> list[str]:
 
 
 @app.route("/api/false-positive/campaign/<path:campaign_id>", methods=["POST"])
+@_require_cap("fp.edit")
 def mark_campaign_false_positive(campaign_id):
     """Mark every alert in a campaign as FP. Also auto-creates one pattern per
     unique rule description within the campaign so the suppression follows
@@ -3636,6 +3744,7 @@ def mark_campaign_false_positive(campaign_id):
 
 
 @app.route("/api/false-positive/campaign/<path:campaign_id>", methods=["DELETE"])
+@_require_cap("fp.edit")
 def unmark_campaign_false_positive(campaign_id):
     """Restore every alert in a campaign AND drop the auto-suppression
     patterns that were created when the campaign was marked. Mirrors the
@@ -3714,6 +3823,7 @@ def list_fp_patterns():
 
 
 @app.route("/api/false-positive-pattern", methods=["POST"])
+@_require_cap("fp.edit")
 def mark_fp_pattern():
     """Add a new FP pattern directly. Body: {rule_description, reason}."""
     body = request.get_json(silent=True) or {}
@@ -3732,6 +3842,7 @@ def mark_fp_pattern():
 
 
 @app.route("/api/false-positive-pattern/<pat_id>", methods=["DELETE"])
+@_require_cap("fp.edit")
 def unmark_fp_pattern(pat_id):
     with _fp_pat_lock:
         before = len(_fp_patterns)
@@ -3908,6 +4019,7 @@ def stream_alerts():
 
 # ── AI Security Analyst proxy ────────────────────────────────────────────────
 @app.route("/api/ai-analyze", methods=["POST"])
+@_require_cap("ai.analyze")
 def ai_analyze():
     """Proxy the AI Security Analyst prompt to Anthropic with a server-side key.
 

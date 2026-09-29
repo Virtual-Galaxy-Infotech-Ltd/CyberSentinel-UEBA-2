@@ -114,7 +114,7 @@ async function loadHistory() {
         <a class="fp-btn-inline" href="/api/reports/download/${encodeURIComponent(e.id)}"
            title="Download as generated (${esc(e.format)})">Download</a>
         ${altFormatButtons(e)}
-        <button class="fp-btn-inline" onclick="deleteReport('${esc(e.id)}','${esc(e.title || e.report_id)}')">Delete</button>
+        <button class="fp-btn-inline" data-cap="reports.generate" onclick="deleteReport('${esc(e.id)}','${esc(e.title || e.report_id)}')">Delete</button>
       </td>
     </tr>`).join("");
 }
@@ -311,7 +311,7 @@ function renderCustomList() {
       <td class="wl-dim">${esc((c.sections || []).length)} sections · ${esc(c.format || "pdf")}</td>
       <td class="wl-dim">${esc(c.description || "—")}</td>
       <td class="wl-dim">${esc(c.created_by || "—")} · ${fmtWhen(c.created_at)}</td>
-      <td><button class="fp-btn-inline" onclick="deleteCustomReport('${esc(c.id)}','${esc(c.name)}')">Delete</button></td>
+      <td><button class="fp-btn-inline" data-cap="reports.custom" onclick="deleteCustomReport('${esc(c.id)}','${esc(c.name)}')">Delete</button></td>
     </tr>`).join("");
 }
 
@@ -395,8 +395,8 @@ function renderSchedules() {
       <td class="wl-dim">${s.last_status ? esc(s.last_status) : "not run yet"}</td>
       <td class="wl-dim">${fmtWhen(s.next_run)}</td>
       <td style="white-space:nowrap">
-        <button class="fp-btn-inline" onclick="runScheduleNow('${esc(s.id)}')">Run now</button>
-        <button class="fp-btn-inline" onclick="deleteSchedule('${esc(s.id)}','${esc(s.name || title)}')">Delete</button>
+        <button class="fp-btn-inline" data-cap="reports.schedule" onclick="runScheduleNow('${esc(s.id)}')">Run now</button>
+        <button class="fp-btn-inline" data-cap="reports.schedule" onclick="deleteSchedule('${esc(s.id)}','${esc(s.name || title)}')">Delete</button>
       </td>
     </tr>`;
   }).join("");

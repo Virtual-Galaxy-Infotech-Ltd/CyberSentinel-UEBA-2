@@ -49,6 +49,9 @@
   </div>
   <div class="threat-ticker"><span class="ticker-live-label">◈ LIVE</span><div class="ticker-scroll-area"><span class="ticker-inner" id="ticker-text">Initializing threat feed...</span></div></div>
   <div class="header-right">
+    <!-- Effective role. Hidden by CSS until auth.enforce is on, since before
+         the cutover there is no authenticated user and the label would lie. -->
+    <span class="role-chip" id="role-chip" title="Your role in UEBA"></span>
     <button id="refresh-btn" onclick="manualRefresh()">⟳ REFRESH</button>
     <!-- Theme Toggle -->
     <button class="theme-toggle" id="theme-toggle-btn" title="Toggle light / dark theme">
@@ -89,7 +92,7 @@
         <span class="tab-icon" aria-hidden="true">◫</span><span class="tab-label">Endpoints</span></div>
       <div class="tab" data-tab="false-positives"        title="False Positives">
         <span class="tab-icon" aria-hidden="true">⚑</span><span class="tab-label">False Positives</span><span class="nav-pill" id="fp-nav-badge">0</span></div>
-      <div class="tab" data-tab="alerting"               title="Alerting">
+      <div class="tab" data-tab="alerting" data-cap="notify.edit"               title="Alerting">
         <span class="tab-icon" aria-hidden="true">◈</span><span class="tab-label">Alerting</span><span class="nav-pill" id="ntf-nav-badge">0</span></div>
       <div class="tab" data-tab="reports"                title="Reports">
         <span class="tab-icon" aria-hidden="true">▤</span><span class="tab-label">Reports</span></div>
@@ -712,7 +715,7 @@
         </div>
         <span class="panel-badge" id="dev-badge">0</span>
       </div>
-      <div class="wl-form">
+      <div class="wl-form" data-cap="devices.edit">
         <input id="dev-name" class="wl-input" type="text" placeholder="Device / host name" style="flex:1 1 180px" autocomplete="off">
         <input id="dev-label" class="wl-input" type="text" placeholder="Label (e.g. Domain Controller)" style="flex:1 1 200px" autocomplete="off">
         <select id="dev-priority" class="wl-input" style="min-width:120px">
@@ -749,7 +752,7 @@
         <span class="panel-badge" id="ntf-badge">0</span>
       </div>
 
-      <div class="wl-form" style="border-bottom:none;padding-bottom:6px">
+      <div class="wl-form" data-cap="notify.edit" style="border-bottom:none;padding-bottom:6px">
         <input id="ntf-name" class="wl-input" type="text" placeholder="Rule name" style="flex:1 1 200px" autocomplete="off">
         <input id="ntf-score" class="wl-input" type="number" step="0.01" min="0" max="1" placeholder="Min score" style="width:110px" title="Fire only at or above this fused score. Leave blank for any score.">
         <input id="ntf-emails" class="wl-input" type="text" placeholder="Email recipients (comma separated)" style="flex:2 1 240px" autocomplete="off">
@@ -809,7 +812,7 @@
           </span>
         </div>
       </div>
-      <div class="wl-form">
+      <div class="wl-form" data-cap="reports.generate">
         <select id="rp-report" class="wl-input" style="flex:2 1 280px"></select>
         <select id="rp-period" class="wl-input" style="min-width:160px"></select>
         <select id="rp-format" class="wl-input" style="min-width:110px"></select>
@@ -832,7 +835,7 @@
         </div>
         <span class="panel-badge" id="rp-custom-badge">0</span>
       </div>
-      <div class="wl-form" style="border-bottom:none;padding-bottom:4px">
+      <div class="wl-form" data-cap="reports.custom" style="border-bottom:none;padding-bottom:4px">
         <input id="rp-custom-name" class="wl-input" type="text" placeholder="Report name" style="flex:1 1 200px" autocomplete="off">
         <input id="rp-custom-desc" class="wl-input" type="text" placeholder="Description (optional)" style="flex:2 1 260px" autocomplete="off">
         <select id="rp-custom-period" class="wl-input" style="min-width:150px">
@@ -867,7 +870,7 @@
         </div>
         <span class="panel-badge" id="rp-sched-badge">0</span>
       </div>
-      <div class="wl-form">
+      <div class="wl-form" data-cap="reports.schedule">
         <input id="rp-sched-name" class="wl-input" type="text" placeholder="Schedule name (optional)" style="flex:1 1 180px" autocomplete="off">
         <select id="rp-sched-report" class="wl-input" style="flex:1 1 200px"></select>
         <select id="rp-sched-interval" class="wl-input" style="min-width:110px">
@@ -930,7 +933,7 @@
         <span class="panel-badge" id="wl-badge">0</span>
       </div>
 
-      <div class="wl-form">
+      <div class="wl-form" data-cap="watchlist.edit">
         <select id="wl-type" class="wl-input wl-input-type" title="What kind of entity to watch">
           <option value="user">User</option>
           <option value="host">Host</option>

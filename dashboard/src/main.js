@@ -18,6 +18,7 @@ import { showSkeletons } from "./ui/skeleton.js";
 import { initTheme } from "./ui/theme.js";
 import { initFooter, openFooterPage, closeFooterPage } from "./ui/footer.js";
 import { initInfoTooltip } from "./ui/info-tooltip.js";
+import { initCapabilities } from "./ui/capabilities.js";
 import { initTabs } from "./ui/tabs.js";
 import { initShortcuts } from "./ui/shortcuts.js";
 import { initThreatMap } from "./panels/threatmap.js";
@@ -145,6 +146,7 @@ Object.assign(window, {
 
 // ── Init subsystems (order matters for theme + footer DOM access) ────────────
 initTheme();
+initCapabilities();   // RFP 23 — hides controls the current role cannot use
 initFooter();
 initInfoTooltip();
 initRouter();  // must run before initTabs so the initial URL drives tab state

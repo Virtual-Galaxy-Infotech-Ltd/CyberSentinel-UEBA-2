@@ -67,7 +67,7 @@ export function buildEvidencePanel(ev, alertId, colSpan, eventId, signatureDesc)
       <div class="fp-form-title">Mark this alert as a false positive</div>
       <div class="fp-form-row">
         <input id="fp-reason-${alertId}" class="fp-form-input" placeholder="Reason (optional) — e.g. expected RDP from admin desk" maxlength="240"/>
-        <button class="fp-form-submit" onclick="window.__markFpFromForm('${eidSafe}','${alertId}')">Mark FP</button>
+        <button class="fp-form-submit" data-cap="fp.edit" onclick="window.__markFpFromForm('${eidSafe}','${alertId}')">Mark FP</button>
       </div>
       ${fpHint}
     </div>` : "";
@@ -204,8 +204,8 @@ export function feedRows(alerts, colSpan, idPrefix) {
     const eidSafe = (a.event_id || "").replace(/'/g, "\\'").replace(/\\/g, "\\\\");
     const fpBtn = a.event_id
       ? (isFp
-          ? `<button class="fp-btn-inline fp-btn-restore" title="Restore from false positives — was marked: ${escapeAttr(a.fp.reason || "(no reason)")}" onclick="event.stopPropagation();unmarkFP('${eidSafe}')">FP ↺</button>`
-          : `<button class="fp-btn-inline" title="Mark as false positive (no reason). Use the evidence panel to add a reason." onclick="event.stopPropagation();markFP('${eidSafe}')">FP</button>`)
+          ? `<button class="fp-btn-inline fp-btn-restore" data-cap="fp.edit" title="Restore from false positives — was marked: ${escapeAttr(a.fp.reason || "(no reason)")}" onclick="event.stopPropagation();unmarkFP('${eidSafe}')">FP ↺</button>`
+          : `<button class="fp-btn-inline" data-cap="fp.edit" title="Mark as false positive (no reason). Use the evidence panel to add a reason." onclick="event.stopPropagation();markFP('${eidSafe}')">FP</button>`)
       : "";
     // Watch-list marker. Present only when the engine matched this alert's
     // entity against the watch list, in which case the score shown in the next

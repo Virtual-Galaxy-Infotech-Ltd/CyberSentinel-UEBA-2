@@ -78,7 +78,7 @@ export function renderWatchlist() {
       <td>${esc(e.added_by) || "<span class='wl-dim'>—</span>"}</td>
       <td class="wl-dim">${fmtWhen(e.added_at)}</td>
       <td><button class="fp-btn-inline" title="Stop watching ${esc(e.value)}"
-            onclick="removeWatchEntry('${esc(e.id)}','${esc(e.value)}')">Remove</button></td>
+            data-cap="watchlist.edit" onclick="removeWatchEntry('${esc(e.id)}','${esc(e.value)}')">Remove</button></td>
     </tr>`).join("");
 }
 
