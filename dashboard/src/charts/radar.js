@@ -6,7 +6,7 @@
 // outward — upward for top half labels, downward for bottom half — so it
 // can't collide with the ring stack.
 
-import { toLayout } from "../ui/ui-scale.js";
+import { placeFixed } from "../ui/ui-scale.js";
 
 export function drawRadar(reasons) {
   if (!reasons || !reasons.length) return;
@@ -246,9 +246,7 @@ function _attachTooltips(root) {
       tip.style.opacity = "1";
     });
     g.addEventListener("mousemove", (e) => {
-      // clientX/Y are VISUAL px; a position:fixed offset is LAYOUT px.
-      tip.style.left = toLayout(e.clientX) + "px";
-      tip.style.top  = (toLayout(e.clientY) - 8) + "px";
+      placeFixed(tip, e.clientX, e.clientY - 8);
     });
     g.addEventListener("mouseleave", () => {
       tip.style.opacity = "0";

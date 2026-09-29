@@ -7,7 +7,7 @@ import { renderFeed, filteredFeed, availableTactics } from "./feed.js";
 import { exportCsv, exportJson, exportXml, exportPdf, exportXlsx } from "../export.js";
 import { initSearchSuggest } from "./search-suggest.js";
 import { initDeepSearch } from "./deep-search.js";
-import { layoutRect, layoutViewport } from "../ui/ui-scale.js";
+import { placeFixed, uiScale } from "../ui/ui-scale.js";
 
 const SEARCH_DEBOUNCE_MS = 150;
 
@@ -89,18 +89,16 @@ export function initFeedToolbar() {
 
   function _positionPop() {
     if (!btn || !pop || pop.hasAttribute("hidden")) return;
-    // style.top/left are LAYOUT px, so anchor and clamp entirely in that space
-    // (layoutRect / layoutViewport) rather than mixing a VISUAL client rect with
-    // a LAYOUT offsetWidth — under `html { zoom }` those disagree by 1/zoom.
-    const r  = layoutRect(btn);
-    const vw = layoutViewport().width;
+    // Clamp in viewport space, then let placeFixed() work out what style.left
+    // has to be — the popover lives in <body>, but `html { zoom }` still scales
+    // its offsets.
+    const r = btn.getBoundingClientRect();
     // Width is set in CSS (260-320px); use the actual width for clamping.
-    const popW = pop.offsetWidth || 260;
+    const popW = pop.offsetWidth * uiScale() || 260;
     let left = r.left;
-    if (left + popW > vw - 12) left = vw - popW - 12;
+    if (left + popW > window.innerWidth - 12) left = window.innerWidth - popW - 12;
     if (left < 8) left = 8;
-    pop.style.top  = (r.bottom + 6) + "px";
-    pop.style.left = left + "px";
+    placeFixed(pop, left, r.bottom + 6);
   }
 
   function _closePop() {

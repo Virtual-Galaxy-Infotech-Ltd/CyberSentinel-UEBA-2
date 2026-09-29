@@ -3216,21 +3216,7 @@
   box-shadow: inset 0 0 120px rgba(0, 0, 0, 0.6);
 }
 .tm-globe { width: 100%; height: 100%; }
-/* globe.gl builds  host > div.scene-container > canvas  and gives the container
-   only position:relative, so give it a definite size for the canvas's
-   percentage height below to resolve against. */
-.tm-globe > .scene-container { width: 100%; height: 100%; }
-/* sizeGlobe() deliberately hands globe.gl the VISUAL pixel size so its pointer
-   raycasting is accurate under `html { zoom: var(--ui-scale) }` (see the comment
-   in threatmap.js). three.js copies that size into canvas.style.width/height as
-   LAYOUT px, which the zoom would scale a second time and shrink the globe to
-   scale² of its column — so pin the DISPLAY size here instead. !important is
-   what lets these beat three.js's inline style. */
-.tm-globe canvas {
-  display: block;
-  width:  100% !important;
-  height: 100% !important;
-}
+.tm-globe canvas { display: block; }
 
 /* 2D flat map (SVG) — overlays the same stage, shown via the 2D/3D toggle */
 .tm-flat { position: absolute; inset: 0; display: none; background: #01030a; overflow: hidden; cursor: grab; touch-action: none; }
@@ -3389,7 +3375,10 @@
 
 /* Sidebar */
 .tm-side {
-  flex: 0 0 340px;
+  /* 340 -> 430. Remember everything here is LAYOUT px scaled by
+     `html { zoom: var(--ui-scale) }`, so 430 paints at ~344 on screen at the
+     default 0.8 — the on-screen gain is smaller than the number suggests. */
+  flex: 0 0 430px;
   display: flex; flex-direction: column; gap: 12px;
   min-height: 0;
   overflow: hidden;
@@ -3413,22 +3402,22 @@
 }
 
 /* Stat grid */
-.tm-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tm-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .tm-stat {
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 13px 15px;
   min-width: 0;
 }
 .tm-stat b {
   display: block;
-  font-family: var(--mono); font-size: 23px; line-height: 1.1;
+  font-family: var(--mono); font-size: 31px; line-height: 1.1;
   color: var(--accent);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tm-stat span {
-  font-family: var(--mono2); font-size: 12px; letter-spacing: 0.4px;
+  font-family: var(--mono2); font-size: 12.5px; letter-spacing: 0.4px;
   color: var(--text2);
   display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }

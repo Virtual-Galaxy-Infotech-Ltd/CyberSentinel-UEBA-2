@@ -93,6 +93,35 @@ export function localPoint(el, ev) {
   };
 }
 
+/**
+ * Place a `position: fixed` overlay so its top-left corner lands on the given
+ * VIEWPORT point (the space getBoundingClientRect and MouseEvent.clientX use).
+ *
+ * Assigning viewport coordinates straight to style.left/top is wrong here for
+ * two independent reasons, and this measures its way around both:
+ *
+ *  1. CONTAINING BLOCK. `position: fixed` resolves against the viewport only
+ *     while no ancestor establishes a containing block. Any ancestor with a
+ *     transform, filter, backdrop-filter, perspective, contain or will-change
+ *     does establish one — and liquid-glass.css puts `backdrop-filter` on
+ *     .panel / .stat-card / .stat-banner, so every tooltip inside a panel is
+ *     positioned relative to that panel, not the window.
+ *  2. SCALE. style.left is in LAYOUT px, which `html { zoom }` then scales.
+ *
+ * Rather than trying to predict either, we park the element at 0,0, read where
+ * that actually put it, and correct by the difference. That is exact whatever
+ * the containing block turns out to be, and it self-heals if the glass theme
+ * moves `backdrop-filter` to a different element later.
+ */
+export function placeFixed(el, viewportX, viewportY) {
+  el.style.left = "0px";
+  el.style.top  = "0px";
+  const origin = el.getBoundingClientRect();   // where 0,0 really landed
+  const s = _scale || 1;
+  el.style.left = ((viewportX - origin.left) / s) + "px";
+  el.style.top  = ((viewportY - origin.top)  / s) + "px";
+}
+
 remeasure();
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", remeasure, { once: true });

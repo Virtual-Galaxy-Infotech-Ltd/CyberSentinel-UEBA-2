@@ -265,6 +265,8 @@ async function buildGlobe() {
     });
   }
 
+  installPointerCorrection(area || host);
+
   sizeGlobe();
   window.addEventListener("resize", sizeGlobe);
   // A window resize is not the only thing that changes this box: collapsing the
@@ -393,30 +395,72 @@ function pointTooltipHTML(p) {
 function sizeGlobe() {
   const host = el("threatmap-globe");
   if (!host || !globe) return;
-  // VISUAL px (getBoundingClientRect), NOT the layout box — because this size is
-  // the denominator in globe.gl's hit-test, not just a canvas dimension.
+  // clientWidth/clientHeight, NOT getBoundingClientRect().
   //
-  // globe.gl turns a pointer into normalized device coords with
-  // `offset / state.width * 2 - 1`, and it reads that offset from d3.pointer,
-  // i.e. `clientX - rect.left` — VISUAL px. `state.width` is whatever we pass
-  // here. Under `html { zoom: var(--ui-scale) }` those two spaces differ by the
-  // zoom factor, so passing the LAYOUT width made every raycast land ~20% short
-  // of the cursor toward the top-left: hovering India reported its neighbour.
-  // Passing the VISUAL size puts both sides of that division in one space, and
-  // the aspect ratio is unchanged because both axes scale by the same factor.
+  // The dashboard renders inside `html { zoom: var(--ui-scale) }`. getBoundingClientRect()
+  // reports VIEWPORT coordinates, so it already has the zoom factor baked in,
+  // while globe.gl applies these numbers as CSS px on the canvas — which the
+  // same zoom then scales a second time. The canvas ended up at scale² of its
+  // container (0.64x at 0.8 zoom): too small, offset inside its box, and the
+  // camera aspect no longer matching the box it is drawn into.
   //
-  // three.js also copies this size into canvas.style.width/height as LAYOUT px,
-  // which the zoom would then scale a second time down to scale² of the column
-  // (0.64x at 0.8). `.tm-globe canvas` in styles.css pins the DISPLAY size to
-  // 100%/100% with !important — that beats the inline style, so the canvas keeps
-  // filling its column while the drawing buffer matches the real on-screen
-  // pixel count. Do NOT write canvas.style sizes back from here.
-  const r = host.getBoundingClientRect();
-  const w = Math.round(r.width);
-  const h = Math.round(r.height);
+  // clientWidth/clientHeight are layout-box pixels and are NOT zoom-scaled, so
+  // they are the same coordinate space the canvas is styled in. The zoom then
+  // scales canvas and container together, which keeps the globe filling its
+  // column and the aspect ratio honest at any --ui-scale.
+  //
+  // The mismatch this leaves in globe.gl's hit-testing is corrected at the
+  // pointer instead, by installPointerCorrection() — NOT by resizing anything
+  // here. Changing these numbers to fix hover distorts the globe.
+  const w = host.clientWidth;
+  const h = host.clientHeight;
   if (w > 0 && h > 0) {
     globe.width(w).height(h);
   }
+}
+
+// Correct the pointer coordinate globe.gl hit-tests with, without touching how
+// anything is sized or drawn.
+//
+// globe.gl stores the cursor as `pointerPos = pageX - containerRect.left` and
+// then builds normalized device coords with `pointerPos.x / state.width`.
+// pageX/containerRect are VIEWPORT px; state.width is the LAYOUT width we pass
+// in sizeGlobe(). Under `html { zoom }` those differ, so the ratio is wrong by
+// the zoom factor and the raycast lands short of the cursor toward the top-left
+// — hovering India reports a neighbouring country.
+//
+// Rescaling pageX/pageY so the ratio comes out right is safe because globe.gl
+// reads pageX/pageY while three.js's OrbitControls reads clientX/clientY: the
+// rotate, pan and zoom gestures never see these values and keep their original
+// sensitivity. The correction is built purely from measured quantities, so when
+// rect and layout agree (no zoom) it is exactly a no-op.
+//
+// Capture phase on the host fires ahead of globe.gl's own bubble-phase listener
+// on .scene-container, so the corrected values are in place before it reads them.
+function installPointerCorrection(host) {
+  const fix = (e) => {
+    // The offset must be measured against .scene-container because that is the
+    // element globe.gl subtracts. The multiplier, though, has to be exactly the
+    // size sizeGlobe() hands to globe.width()/height() — that is the divisor in
+    // its NDC math. They are not interchangeable: .scene-container also holds
+    // globe.gl's nav-info div and can be taller than the canvas.
+    const box = host.querySelector(".scene-container") || host;
+    const rect = box.getBoundingClientRect();
+    const lw = host.clientWidth, lh = host.clientHeight;
+    if (!rect.width || !rect.height || !lw || !lh) return;
+    const sx = window.pageXOffset || document.documentElement.scrollLeft || 0;
+    const sy = window.pageYOffset || document.documentElement.scrollTop  || 0;
+    const px = rect.left + sx + (e.clientX - rect.left) * (lw / rect.width);
+    const py = rect.top  + sy + (e.clientY - rect.top)  * (lh / rect.height);
+    try {
+      Object.defineProperty(e, "pageX", { value: px, configurable: true });
+      Object.defineProperty(e, "pageY", { value: py, configurable: true });
+    } catch (err) {
+      /* non-fatal: hover stays as inaccurate as it was, nothing else breaks */
+    }
+  };
+  ["pointermove", "pointerdown"].forEach((t) =>
+    host.addEventListener(t, fix, true));
 }
 
 // ── Live day/night driver (shared by the globe shader + the flat map) ──────────

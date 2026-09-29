@@ -10,7 +10,7 @@
 // in the window being viewed, ranked by how often they occur.
 
 import { state } from "../state.js";
-import { layoutRect } from "../ui/ui-scale.js";
+import { placeFixed, uiScale } from "../ui/ui-scale.js";
 
 const DEBOUNCE_MS = 130;
 const MAX_ROWS = 40;
@@ -59,11 +59,10 @@ function ensureBox(input) {
 }
 
 function place(input) {
-  // LAYOUT px — the dropdown is positioned with style.left/top/width.
-  const r = layoutRect(input);
-  box.style.left = `${r.left}px`;
-  box.style.top = `${r.bottom + 4}px`;
-  box.style.width = `${Math.max(r.width, 320)}px`;
+  const r = input.getBoundingClientRect();          // viewport px
+  placeFixed(box, r.left, r.bottom + 4);
+  // style.width is layout px, so convert the measured viewport width back.
+  box.style.width = `${Math.max(r.width / (uiScale() || 1), 320)}px`;
 }
 
 function hide() {
