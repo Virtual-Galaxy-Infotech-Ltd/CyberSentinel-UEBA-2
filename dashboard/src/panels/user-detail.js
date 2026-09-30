@@ -28,7 +28,9 @@ export async function loadUserDetail(userName, { silent = false } = {}) {
 
   let alerts = [];
   try {
-    alerts = await fetch("/api/user/" + encodeURIComponent(userName)).then((r) => r.json());
+    // ?hours — see the note in agents.js; the window is "All" without it.
+    alerts = await fetch("/api/user/" + encodeURIComponent(userName)
+      + "?hours=" + (state.timelineHours || 0)).then((r) => r.json());
   } catch {
     if (!silent) body.innerHTML = '<div class="empty-state"><p>FAILED TO LOAD USER</p></div>';
     return;

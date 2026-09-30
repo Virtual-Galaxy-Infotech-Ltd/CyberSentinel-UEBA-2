@@ -2558,12 +2558,21 @@ def agent_alerts(agent_name):
     Evidence is omitted (include_evidence=False) — exactly like /api/feed — so a
     noisy host (tens of thousands of alerts) doesn't ship a 100MB+ payload. The
     drilldown table lazy-loads each row's evidence on expand via /api/evidence.
+
+    Capped at feed_row_cap like the feed. Dropping evidence was not enough on its
+    own: with no ?hours= the window is 0 ("All", bounded only by history_days), so
+    one busy host returned 1,139,873 rows / 673 MB and the browser gave up with
+    "failed to load". Breaking at the cap also avoids building a million dicts
+    server-side just to throw them away.
     """
+    cap = int(CFG.get("feed_row_cap", 5000) or 5000)
     out = []
     for a in reversed(load_alerts(include_fp=_wants_include_fp())):
         if ((a.get("host", {}) or {}).get("name", "")) != agent_name:
             continue
         out.append(_alert_to_feed_item(a, include_evidence=False))
+        if len(out) >= cap:
+            break
     return jsonify(out)
 
 
@@ -2574,12 +2583,19 @@ def user_alerts(username):
     Evidence is omitted (see agent_alerts) — a single noisy entity can have 80k+
     alerts, and shipping each one's evidence blob made this a ~200MB / 6s response.
     The table lazy-loads evidence per row on expand via /api/evidence.
+
+    Capped at feed_row_cap for the same reason agent_alerts is: without a ?hours=
+    the window is "All", so row count alone can blow the payload past what a
+    browser will accept even with evidence stripped.
     """
+    cap = int(CFG.get("feed_row_cap", 5000) or 5000)
     out = []
     for a in reversed(load_alerts(include_fp=_wants_include_fp())):
         if get_user(a) != username:
             continue
         out.append(_alert_to_feed_item(a, include_evidence=False))
+        if len(out) >= cap:
+            break
     return jsonify(out)
 
 

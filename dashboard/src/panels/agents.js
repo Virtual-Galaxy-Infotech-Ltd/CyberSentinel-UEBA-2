@@ -93,7 +93,10 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
   }
   let alerts = [];
   try {
-    alerts = await fetch("/api/agent/" + encodeURIComponent(agentName)).then((r) => r.json());
+    // ?hours — without it the server treats the window as "All" and a busy host
+    // returns every alert in retention (measured: 1.1M rows / 673MB).
+    alerts = await fetch("/api/agent/" + encodeURIComponent(agentName)
+      + "?hours=" + (state.timelineHours || 0)).then((r) => r.json());
   } catch (e) {
     if (!silent) body.innerHTML = '<div class="empty-state"><p>FAILED TO LOAD</p></div>';
     return;
