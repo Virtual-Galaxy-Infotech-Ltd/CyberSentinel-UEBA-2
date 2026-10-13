@@ -17,7 +17,14 @@
 
 set -euo pipefail
 
-BASE=/root/NEW_DRIVE/aditya_ueba
+# Site-specific values come from ueba_site.env, which install_ueba.sh writes per
+# deployment, so this script is identical at every customer. The fallback keeps
+# the original lab path working for any install that predates the site file.
+_SITE_ENV="${UEBA_SITE_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ueba_site.env}"
+# shellcheck source=/dev/null
+[[ -r "$_SITE_ENV" ]] && . "$_SITE_ENV"
+
+BASE="${UEBA_BASE:-/root/NEW_DRIVE/aditya_ueba}"
 ALERTS=$BASE/ueba_alerts.jsonl
 ENRICHED=$BASE/enriched.jsonl
 UEBA_STATE=$BASE/.state/ueba.state

@@ -536,9 +536,53 @@ StandardError=append:$BASE_DIR/logs/ueba_${svc}.stdout.log
 WantedBy=multi-user.target
 EOF
   done
+  install_watchdog
   systemctl daemon-reload >>"$LOGFILE" 2>&1
-  ok "installed systemd units (ueba-engine, ueba-dashboard, ueba-bridge)"
+  ok "installed systemd units (ueba-engine, ueba-dashboard, ueba-bridge, watchdog)"
   install_cron
+}
+
+install_watchdog() {
+  # The engine pauses for minutes at a time under load and usually recovers on
+  # its own; when it does not, nothing else notices. The watchdog captures
+  # forensics and restarts only if the engine is still frozen after a
+  # confirmation window. Without it a wedged engine stays wedged until someone
+  # looks at the dashboard and sees a stale feed.
+  [[ -f "$SELF_DIR/ueba-engine-watchdog.sh" ]] || {
+    warn "ueba-engine-watchdog.sh not found beside the installer — skipping watchdog"
+    return 0
+  }
+  install -m 755 "$SELF_DIR/ueba-engine-watchdog.sh" /usr/local/bin/ueba-engine-watchdog.sh
+
+  # UEBA_SITE_ENV is passed explicitly: the script looks for ueba_site.env beside
+  # ITSELF, and it lives in /usr/local/bin, not in the install directory.
+  cat >/etc/systemd/system/ueba-engine-watchdog.service <<EOF
+[Unit]
+Description=CyberSentinel UEBA engine liveness watchdog ($CLIENT_NAME)
+After=ueba-engine.service
+
+[Service]
+Type=oneshot
+Environment=UEBA_SITE_ENV=$BASE_DIR/ueba_site.env
+ExecStart=/usr/local/bin/ueba-engine-watchdog.sh
+StandardOutput=null
+StandardError=journal
+EOF
+
+  cat >/etc/systemd/system/ueba-engine-watchdog.timer <<EOF
+[Unit]
+Description=Run the CyberSentinel UEBA engine watchdog every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=ueba-engine-watchdog.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  ok "installed engine watchdog (service + 2-minute timer)"
 }
 
 install_cron() {
@@ -599,6 +643,11 @@ bring_up() {
     ok "baseline found — the engine can run"
     if ask_yn "Start the detection engine now?" y; then
       spin "starting engine" systemctl enable --now ueba-engine || warn "engine did not start"
+      # Only arm the watchdog once the engine is actually running — otherwise it
+      # spends every 2 minutes "restarting" a service nobody has started yet.
+      systemctl enable --now ueba-engine-watchdog.timer >>"$LOGFILE" 2>&1 \
+        && ok "engine watchdog armed (every 2 min)" \
+        || warn "watchdog timer did not start"
     fi
   else
     note "no baseline yet — leaving the engine stopped (it would crash-loop without models)"
