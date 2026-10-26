@@ -509,6 +509,49 @@ noise_suppression:
 # ── Identity Resolution ───────────────────────────────────────────────────────
 identity_resolution:
   enabled: true
+
+  # ── Phase A: canonicalisation ───────────────────────────────────────────────
+  # One person arrives under several spellings, so one person gets several
+  # baselines, each trained on a fraction of their history. Measured on a
+  # 3,412-alert production sample: 10 of 135 identities (7.4%) were duplicates,
+  # and 5 autoencoders on disk were second/third copies of the same person.
+  #
+  # canonicalize de-escapes (DOMAIN\\user → DOMAIN\user), strips the domain
+  # prefix, and case-folds — ACCOUNT NAMES ONLY. ip: and host: keys are left
+  # alone; see canonical_identity() in ueba_preprocessor.py for why that
+  # distinction matters.
+  #
+  # DEFAULT OFF, AND IT MUST STAY OFF UNTIL A RETRAIN. Changing an entity key
+  # changes which autoencoder file is looked up, so turning this on strands
+  # every existing per-entity model: those entities fall back to the global
+  # model until the next training run rebuilds them under the new keys. Switch
+  # it on as part of the retrain on the new server, not on a live deployment.
+  canonicalize: false
+  casefold: true
+  strip_domain: true
+
+  # Accounts that exist separately on many machines. These keep their
+  # DOMAIN\ / HOST\ prefix instead of being stripped, because 'VGINFO\admin'
+  # and 'LAPTOP-07\admin' are different local accounts that merely share a
+  # name — collapsing them would create one baseline averaging unrelated
+  # actors, which is the exact defect that makes `root` useless today. Phase B
+  # replaces this with a proper (account, host) key.
+  shared_accounts:
+    - "administrator"
+    - "admin"
+    - "root"
+    - "system"
+    - "guest"
+    - "user"
+
+  # Spelling → canonical identity. Operator overrides for cases the rules above
+  # cannot infer (truncation, a personal email address, a nickname). The target
+  # is itself canonicalised, so the readable form may be written here.
+  #
+  # NOTE: until `canonicalize` is on these are applied in ueba_engine.py only,
+  # where the trainer never sees them — which is why 3 of the 5 below currently
+  # resolve to a model file that training never produced and fall back to the
+  # global autoencoder. Phase A is what fixes that.
   mappings:
     # RootSeeker / Sujal — same person, 3 different formats
     "RootSeeker":                  "RootSeeker\\Sujal"

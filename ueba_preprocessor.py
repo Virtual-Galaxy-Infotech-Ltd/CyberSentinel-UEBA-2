@@ -128,6 +128,129 @@ def _is_url_junk(s: str) -> bool:
     return any(c in s for c in _ENTITY_JUNK_CHARS)
 
 
+# ── Identity Canonicalisation ─────────────────────────────────────────────────
+#
+# One person arrives under several spellings, so one person gets several
+# baselines and each one is trained on a fraction of their history. Measured on
+# a 3,412-alert production sample: 10 of 135 identities (7.4%) were duplicates
+# of another identity, and 5 of the per-entity autoencoders on disk were second
+# or third copies of a person who already had one.
+#
+#   jinu   <- 'VGSOC-LAP11\\JINU'(24), 'jinu'(20), 'VGSOC-LAP11\JINU'(6)
+#   sujal  <- 'VGSOC-LAP16\Sujal',      'VGSOCSRV\sujal'
+#
+# Three separate defects produce that:
+#   1. escaping — the same event is 'DOMAIN\user' or 'DOMAIN\\user' depending
+#      on how many JSON encode/decode hops it took through the sync bridge
+#   2. qualification — 'VGSOC-LAP11\JINU' and 'jinu' are never related
+#   3. case — 'JINU' vs 'jinu', 'User' vs 'user'
+#
+# This normalisation is deliberately applied INSIDE resolve_entity() rather than
+# at the engine. The pre-existing `identity_resolution.mappings` block was
+# applied in ueba_engine.py only, so the trainer bucketed by the raw name while
+# the engine looked up the canonical one — and 3 of the 5 configured mappings
+# therefore resolved to a model file that training had never produced, silently
+# falling back to the global autoencoder. resolve_entity() is the one place both
+# sides already share, which is what its own docstring promises.
+#
+# TYPE-AWARE ON PURPOSE. Only account names are canonicalised; `ip:` and `host:`
+# keys are returned untouched. A normaliser that also treats "_" as a separator
+# over-merges: it collapses host_DC_ATM_SRV and host_GPU_SRV onto "srv", two
+# unrelated servers. Only the backslash is a domain separator here.
+
+_IDENTITY_CANONICALIZE = False      # off ⇒ resolve_entity() behaves as before
+_IDENTITY_CASEFOLD     = True
+_IDENTITY_STRIP_DOMAIN = True
+_IDENTITY_ALIASES      = {}         # operator overrides: spelling → canonical
+_IDENTITY_SHARED       = set()      # keep these host-qualified (see below)
+
+
+def _deescape(s: str) -> str:
+    """'DOMAIN\\\\user' → 'DOMAIN\\user'. Collapses however many hops it took."""
+    while "\\\\" in s:
+        s = s.replace("\\\\", "\\")
+    return s
+
+
+def canonical_identity(name: str) -> str:
+    """Canonical key for ONE ACCOUNT identity.
+
+    Never call this on an `ip:` or `host:` key — see the type-awareness note
+    above. Returns `name` unchanged when canonicalisation is disabled.
+    """
+    if not name or not _IDENTITY_CANONICALIZE:
+        return name
+
+    raw = str(name).strip()
+    s = _deescape(raw)
+
+    # Operator overrides win, and are probed on both the raw and the de-escaped
+    # spelling so a mapping written either way still fires. The target is then
+    # canonicalised too, so an operator may write the readable form
+    # ("RootSeeker\Sujal") and still land on the key training produces.
+    for probe in (raw, s):
+        if probe in _IDENTITY_ALIASES:
+            s = _deescape(str(_IDENTITY_ALIASES[probe]).strip())
+            break
+
+    # DOMAIN\user and HOST\user → user.
+    #
+    # EXCEPT for shared/local accounts. 'VGINFO\admin' and 'LAPTOP-07\admin'
+    # are two different local accounts that happen to share a name, so merging
+    # them would be a regression — one baseline averaging unrelated actors, the
+    # exact defect that makes `root` useless today. Those keep their prefix
+    # until Phase B gives them a proper (account, host) key.
+    if _IDENTITY_STRIP_DOMAIN and "\\" in s:
+        head, _, tail = s.rpartition("\\")
+        tail = tail.strip()
+        if tail and tail.casefold() not in _IDENTITY_SHARED:
+            s = tail
+
+    if _IDENTITY_CASEFOLD:
+        s = s.casefold()
+
+    return s or raw
+
+
+def apply_identity_config(config: dict) -> bool:
+    """Load `identity_resolution` from ueba_config.yaml into the module state
+    above. Idempotent — safe to call from every consumer's startup, and called
+    from FeatureExtractor.__init__ for the same reason apply_noise_config() is:
+    so the engine, the trainer and the batch preprocessor cannot disagree about
+    what an entity is. Returns whether canonicalisation is on.
+
+    Default is OFF. Changing an entity key changes which autoencoder file is
+    looked up, so switching this on strands every existing per-entity model
+    until the next retrain — the entity falls back to the global model in the
+    meantime. It must therefore be turned on as part of a retrain, not on a
+    live deployment.
+    """
+    global _IDENTITY_CANONICALIZE, _IDENTITY_CASEFOLD, _IDENTITY_STRIP_DOMAIN
+
+    block = config.get("identity_resolution", {}) or {}
+
+    _IDENTITY_CANONICALIZE = bool(block.get("canonicalize", False))
+    _IDENTITY_CASEFOLD     = bool(block.get("casefold", True))
+    _IDENTITY_STRIP_DOMAIN = bool(block.get("strip_domain", True))
+
+    _IDENTITY_ALIASES.clear()
+    for alias, target in (block.get("mappings", {}) or {}).items():
+        if str(alias).strip() and str(target).strip():
+            _IDENTITY_ALIASES[str(alias).strip()] = str(target).strip()
+
+    _IDENTITY_SHARED.clear()
+    for acct in (block.get("shared_accounts", []) or []):
+        if str(acct).strip():
+            _IDENTITY_SHARED.add(str(acct).strip().casefold())
+
+    if _IDENTITY_CANONICALIZE:
+        log.info("Identity canonicalisation ON (casefold=%s strip_domain=%s "
+                 "aliases=%d shared_accounts=%d)",
+                 _IDENTITY_CASEFOLD, _IDENTITY_STRIP_DOMAIN,
+                 len(_IDENTITY_ALIASES), len(_IDENTITY_SHARED))
+    return _IDENTITY_CANONICALIZE
+
+
 def resolve_entity(log: dict) -> str:
     """Single source of truth for the UEBA entity (user/host/IP) key.
 
@@ -159,7 +282,8 @@ def resolve_entity(log: dict) -> str:
     if user and _is_url_junk(user):
         user = None
     if user:
-        return user
+        # Account names only. The ip:/host: fallbacks below are returned as-is.
+        return canonical_identity(user)
     src_ip = (
         get_nested(log, "subject.ip")
         or get_nested(log, "data.srcip")
@@ -462,6 +586,10 @@ class FeatureExtractor:
         # here so every consumer (engine, trainer, batch preprocessor) that
         # builds a FeatureExtractor picks them up — no per-call config plumbing.
         apply_noise_config(config)
+        # Same reasoning, same place: the entity key must be identical in the
+        # trainer and at runtime or the AE lookup misses. See
+        # apply_identity_config() for why this defaults to off.
+        apply_identity_config(config)
 
     def extract(self, log: dict) -> np.ndarray:
         """
