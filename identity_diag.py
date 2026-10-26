@@ -22,7 +22,7 @@ Usage:
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import ueba_preprocessor as pp
@@ -125,6 +125,91 @@ def selftest(cfg):
     return 0 if not total else 1
 
 
+def bindings_report(cfg, sample, limit):
+    """Backfill an in-memory binding table from the sample and report what it
+    could attribute. Writes nothing to disk."""
+    import tempfile
+    import ueba_identity as ui
+
+    block = dict((cfg or {}).get("identity_resolution", {}) or {})
+    block["typed_keys"] = True
+    block.setdefault("shared_accounts",
+                     ["administrator", "admin", "root", "system", "guest", "user"])
+    pp.apply_identity_config({"identity_resolution": block})
+
+    bcfg = block.get("bindings", {}) or {}
+    db = Path(tempfile.mkdtemp()) / "bindings_preview.db"
+    b = ui.IdentityBindings(str(db),
+                            retention_days=bcfg.get("retention_days", 90))
+
+    endpoints = Counter()
+    latest = None
+    n = 0
+    with open(sample, encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f):
+            if limit and i >= limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            n += 1
+            key = pp.resolve_entity(rec)
+            b.record_event(key, rec, pp.get_nested)
+            if key.startswith("endpoint:"):
+                endpoints[key.split(":", 1)[1]] += 1
+            t = ui.event_time(rec, pp.get_nested)
+            if t and (latest is None or t > latest):
+                latest = t
+    b.commit()
+
+    st = b.stats()
+    print("records read: %d" % n)
+    print("latest event in sample: %s" % (latest.isoformat() if latest else "unknown"))
+    print("\nBINDINGS BUILT (auth-derived, person: entities only)")
+    print("  rows                 : %d" % st["rows"])
+    print("  people bound         : %d" % st["people"])
+    print("  distinct host/addr   : %d" % st["values"])
+    print("  observations         : %d" % st["observations"])
+    print("  values used by >1 person: %d   <- no confident attribution from these"
+          % st["ambiguous_values"])
+
+    print("\nATTRIBUTION COVERAGE — could we name a person for each endpoint:?")
+    if not endpoints:
+        print("  no endpoint: entities in this sample")
+    for value, hits in endpoints.most_common(15):
+        kind = ui.KIND_IP if value.replace(".", "").isdigit() else ui.KIND_HOST
+        cands = b.owner_of(kind, value, at=latest)
+        if not cands:
+            print("  %-26s %5d events  -> no binding" % (value[:26], hits))
+        else:
+            top = cands[0]
+            print("  %-26s %5d events  -> %s  conf %.2f%s"
+                  % (value[:26], hits, top["person"], top["confidence"],
+                     ("  (%d candidates)" % len(cands)) if len(cands) > 1 else ""))
+
+    named = sum(h for v, h in endpoints.items()
+                if b.owner_of(ui.KIND_IP if v.replace(".", "").isdigit()
+                              else ui.KIND_HOST, v, at=latest))
+    tot = sum(endpoints.values())
+    print("\n  %d of %d endpoint: records (%.0f%%) could be attributed to a person."
+          % (named, tot, 100.0 * named / max(tot, 1)))
+
+    print("\nPEOPLE AND WHERE THEY WERE SEEN")
+    for person in sorted({r[0] for r in b.conn.execute(
+            "SELECT DISTINCT person FROM identity_bindings")})[:20]:
+        obs = b.bindings_for(person)
+        print("  %-26s %s" % (person[:26],
+                              ", ".join("%s:%s(%d)" % (o["kind"], o["value"],
+                                                       o["observations"])
+                                        for o in obs[:4])))
+    b.close()
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="ueba_config.yaml")
@@ -133,7 +218,15 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="0 = whole file")
     ap.add_argument("--selftest", action="store_true",
                     help="assert the classification rules and exit")
+    ap.add_argument("--bindings", action="store_true",
+                    help="preview the Phase D identity bindings from the sample")
     args = ap.parse_args()
+
+    if args.bindings:
+        if not Path(args.input).exists():
+            sys.exit("no such sample: %s" % args.input)
+        cfg = pp.load_config(args.config) if Path(args.config).exists() else {}
+        sys.exit(bindings_report(cfg, args.input, args.limit))
 
     if args.selftest:
         cfg = (pp.load_config(args.config)

@@ -561,6 +561,30 @@ identity_resolution:
   # Switch on during the retrain on the new server, never on a live deployment.
   typed_keys: false
 
+  # ── Phase D: identity bindings ──────────────────────────────────────────────
+  # Binds a person to the hosts and private addresses they were observed using,
+  # so userless internal traffic (endpoint:10.200.11.157) can be attributed to
+  # someone. Built from auth events, which is the ONLY stitching source we
+  # have: the event_category mix is auth 2596 / system 523 / process 283 /
+  # web 9 / other 1 — no DHCP, DNS or VPN feed reaches UEBA. Splunk UBA uses
+  # all four and says you need at least one; this is that minimum.
+  #
+  # There is deliberately no mac field: a MAC address appears nowhere in the
+  # data at any nesting depth, so the column would be permanently NULL and
+  # would imply a capability we do not have. The schema keys on (kind, value),
+  # so mac becomes a new kind when a DHCP feed arrives — no migration.
+  #
+  # Populating is additive and safe: a separate table, written from the same
+  # events, read by nothing yet. The longer it runs before the cutover, the
+  # better the history it can answer from. USING a binding to re-attribute an
+  # anomaly to a person is the part that changes detection, and that waits for
+  # the retrain.
+  bindings:
+    enabled: false
+    retention_days: 90          # a binding is evidence about a period; past it,
+                                # a former laptop owner could be named for what
+                                # the current one did
+
   # Accounts that are software, not people. Windows built-ins
   # (NT AUTHORITY\*, NT SERVICE\*, SYSTEM, LOCAL/NETWORK SERVICE) and machine
   # accounts (trailing "$") are detected without being listed; add site-local

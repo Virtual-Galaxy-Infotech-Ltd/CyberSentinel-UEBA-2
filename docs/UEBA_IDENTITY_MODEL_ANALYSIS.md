@@ -409,7 +409,95 @@ false merge of two unrelated servers. Normalisation must therefore be **type-awa
 domain prefixes on account names, never on hostnames — and must be validated against the
 existing key list before it is switched on. Do not ship a blind `re.sub`.
 
-### Change 3 — An identity-resolution table (3 days)
+### Change 3 — An identity-resolution table (3 days) — **IMPLEMENTED 2026-10-26**
+
+`ueba_identity.py`, behind `identity_resolution.bindings.enabled` (default off). Answers the
+question Phases A and B cannot: *"`endpoint:10.200.11.157` exfiltrated 4 GB at 02:30 — who was
+that?"*
+
+**The schema I proposed in this document was wrong in two ways, and the data is why.**
+
+**1. No `mac` column.** A MAC address appears *nowhere* in the data — not under `mac`, `src_mac`,
+`dst_mac`, `hwaddr` or `mac_address`, at any nesting depth. The column would be permanently NULL
+and would imply a capability we do not have. The schema keys on `(kind, value)` instead, so `mac`
+becomes a new *kind* the day a DHCP feed arrives, with no migration.
+
+**2. No per-source `confidence` constant.** `auth=0.9, dhcp=0.8` would be numbers we invented.
+What actually determines whether an attribution is trustworthy is in the data: how many distinct
+people were seen on that host, and how recently. So confidence is **derived at query time**:
+
+```
+confidence = share × recency
+```
+
+`share` is this person's fraction of observations on the value; `recency` decays linearly from 1.0
+at `last_seen` to 0.0 at the window edge. Deliberately pessimistic — an attribution is a lead for
+an analyst, not a verdict, and a number that is honest about a shared server beats one that is
+confidently wrong.
+
+**Also measured: we have exactly one stitching source.** `event_category` over the sample is
+auth 2,596 / system 523 / process 283 / web 9 / other 1. **There is no DHCP, DNS or VPN feed
+reaching UEBA at all.** Splunk uses all four and says you need at least one; this is that minimum,
+and the document should not have implied otherwise.
+
+**Measured attribution coverage:**
+
+```
+BINDINGS BUILT (auth-derived, person: entities only)
+  rows 35 | people 21 | distinct host/addr 23 | observations 300
+  values used by >1 person: 3   <- no confident attribution from these
+
+  utkarsh_Pc          36 events -> person:utkarsh.chandekar  conf 0.97
+  Access-SRV-2.140    12 events -> person:jinu  conf 0.32  (11 candidates)
+  CPU-SRV-208         12 events -> no binding
+
+  48 of 60 endpoint: records (80%) could be attributed to a person.
+```
+
+The three cases are exactly the behaviour wanted: a personal laptop attributes confidently; a
+shared access server returns eleven candidates and refuses to be confident; the brute-force target
+has no binding at all, because no legitimate person ever authenticated to it internally.
+
+**Unplanned benefit — the bindings resolve the residual duplicates.** Phases A and B could not
+merge `person:firdo`/`person:firdous` or `person:renuk`/`person:renuka` (different tails). The
+binding table supplies the evidence:
+
+```
+person:firdo    host:firdous(10)
+person:renuk    host:Renuka(44)
+```
+
+Each truncated identity's host is named after the person the other key refers to. Those two
+`mappings` entries can now be written with justification rather than guesswork.
+
+**A bug this work found and fixed.** Opening a second SQLite connection to the profile database
+deadlocks it. The binding table is written mid-transaction from `UserProfileStore.update()`, so
+the binding connection held a write lock that the profile store's own connection waited on, and
+the next `INSERT INTO users` failed with `database is locked` — taking out profiling, which
+matters far more than a binding. `IdentityBindings` now accepts a borrowed connection and
+`UserProfileStore` passes its own. One connection, one transaction, and the two tables are
+consistent with each other by construction.
+
+**Gating.** `bindings.enabled` requires `typed_keys`, because bindings key on `person:` entities;
+with typed keys off every `record()` would be rejected and the table would sit empty while looking
+enabled, which is worse than being off. The flag refuses and logs rather than pretending. With
+the flag off, the table is never even created — verified.
+
+**Tests.** `python3 ueba_identity.py --selftest` asserts 31 cases with no sample file: the
+`+0530` timestamp format the data actually uses (no colon, which `fromisoformat` rejects before
+3.11), that only `person:` keys bind, that repeat observations upsert rather than duplicate, the
+share/recency maths on both an exclusive and a shared host, window expiry, and that an unknown
+value returns empty rather than a guess. `identity_diag.py --bindings` previews coverage from a
+sample without writing to disk.
+
+**Not yet wired into scoring.** Using a binding to re-attribute an endpoint's anomaly to a person
+changes detection behaviour, so it belongs with the retrain cutover behind its own flag.
+Populating is additive and safe in the meantime, and the longer it runs first the better the
+history it can answer from.
+
+#### Original recommendation, retained for reference
+
+
 
 A new table binding observations over time:
 

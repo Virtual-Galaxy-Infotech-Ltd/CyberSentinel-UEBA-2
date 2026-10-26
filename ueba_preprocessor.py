@@ -64,6 +64,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("ueba.preprocessor")
 
+# Alias for code where a local parameter shadows `log` — several methods here
+# take the event dict as `log`, so the module logger is unreachable by name
+# inside them (see UserProfileStore.update).
+_log = log
+
 
 # ── Config Loader ─────────────────────────────────────────────────────────────
 
@@ -264,6 +269,12 @@ def canonical_identity(name: str) -> str:
 
 _ENTITY_TYPED = False
 
+# Phase D — see ueba_identity.py. Off by default; populating costs one upsert
+# per person: event on the profile-store path, which is why it is a flag and
+# not always-on.
+_BINDINGS_ENABLED = False
+_BINDINGS_RETENTION = 90.0
+
 # Windows built-ins. A trailing "$" is a machine account.
 _SERVICE_PREFIXES = {"nt authority", "nt service"}
 _SERVICE_TAILS    = {"system", "local service", "network service",
@@ -330,7 +341,7 @@ def apply_identity_config(config: dict) -> bool:
     live deployment.
     """
     global _IDENTITY_CANONICALIZE, _IDENTITY_CASEFOLD, _IDENTITY_STRIP_DOMAIN
-    global _ENTITY_TYPED
+    global _ENTITY_TYPED, _BINDINGS_ENABLED, _BINDINGS_RETENTION
 
     block = config.get("identity_resolution", {}) or {}
 
@@ -361,6 +372,18 @@ def apply_identity_config(config: dict) -> bool:
     if _ENTITY_TYPED and not _IDENTITY_CANONICALIZE:
         _IDENTITY_CANONICALIZE = True
         log.info("typed_keys is on, so canonicalize is forced on with it")
+
+    bcfg = block.get("bindings", {}) or {}
+    _BINDINGS_ENABLED = bool(bcfg.get("enabled", False))
+    _BINDINGS_RETENTION = float(bcfg.get("retention_days", 90) or 90)
+    if _BINDINGS_ENABLED and not _ENTITY_TYPED:
+        # Bindings key on person: entities, which only exist under typed keys.
+        # Without them every record() would be rejected and the table would
+        # stay empty while looking enabled — worse than being off.
+        _BINDINGS_ENABLED = False
+        log.warning("identity bindings need typed_keys; staying off")
+    elif _BINDINGS_ENABLED:
+        log.info("Identity bindings ON (retention=%.0fd)", _BINDINGS_RETENTION)
 
     if _ENTITY_TYPED:
         log.info("Typed entity keys ON (person/endpoint/service/shared/external; "
@@ -994,6 +1017,8 @@ class UserProfileStore:
                  mode: str = MODE_EVENTS, legacy_alpha: float = 0.01):
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.db_path = db_path
+        self._bindings_store = None
         self.window_days = max(0.5, float(window_days or 21.0))
         self.mode = mode if mode in (self.MODE_EVENTS, self.MODE_TIME) else self.MODE_EVENTS
         self.legacy_alpha = float(legacy_alpha or 0.01)
@@ -1107,11 +1132,32 @@ class UserProfileStore:
         """)
         self.conn.commit()
 
+    def _bindings(self):
+        """Lazily open the binding table in this same database. Opened on
+        first use rather than in __init__ so that a deployment with the flag
+        off never creates the table at all."""
+        if self._bindings_store is None:
+            import ueba_identity
+            # Share this store's connection — a second connection to the same
+            # file deadlocks mid-transaction. See IdentityBindings.__init__.
+            self._bindings_store = ueba_identity.IdentityBindings(
+                conn=self.conn, retention_days=_BINDINGS_RETENTION)
+        return self._bindings_store
+
     def update(self, log: dict, feature_vec: np.ndarray):
         """Update a user's profile with data from a new log event."""
         # Same entity key as feature extraction so training-eligibility (which
         # is gated off this profile store) matches the runtime AE bucket.
         user = resolve_entity(log)
+
+        # Phase D: note which host/address this person was seen on. Additive —
+        # a separate table, read by nothing in the scoring path yet. Must never
+        # be able to break profiling, so it is fully contained.
+        if _BINDINGS_ENABLED:
+            try:
+                self._bindings().record_event(user, log, get_nested)
+            except Exception as e:
+                log_.debug("identity binding skipped: %s", e)
 
         existing = self.conn.execute(
             "SELECT * FROM users WHERE username = ?", (user,)
