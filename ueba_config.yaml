@@ -530,6 +530,48 @@ identity_resolution:
   casefold: true
   strip_domain: true
 
+  # ── Phase B: typed entity keys ──────────────────────────────────────────────
+  # The entity namespace is flat today, so a person, a laptop, a service
+  # account and an internet stranger all compete for the same keyspace. The
+  # consequences, measured: 397 of 453 autoencoders (87.6%) are keyed on an IP
+  # address; 103 of 135 named accounts were seen ONLY from a public source IP
+  # (SSH brute-force guesses — janya, jesica, postgres, zabbix, pi, odoo) and
+  # each got its own autoencoder; and `root` was one baseline for 912 alerts
+  # from 16 different public IPs, so sixteen unrelated attackers averaged into
+  # a single profile that none of them deviated from.
+  #
+  # Typed keys split that five ways:
+  #   person:<canonical>        a human being
+  #   endpoint:<ip|host>        a machine, and userless internal traffic
+  #   service:<account>@<host>  SYSTEM, LOCAL SERVICE, machine accounts
+  #   shared:<account>@<host>   root/admin/guest, scoped per host
+  #   external:<ip>             an actor out on the internet
+  #
+  # THE DECISIVE RULE: anything presenting from a public source IP is external,
+  # whatever account name it offers, ahead of every other classification. That
+  # is what keeps attack traffic out of legitimate baselines. The target
+  # endpoint does not absorb it either — that would just move the poisoning
+  # onto the server's profile and teach us that being attacked is normal for it.
+  #
+  # Implies canonicalize (forced on, with a log line, if left off — otherwise
+  # person:VGINFO\JINU and person:jinu would be two entities).
+  #
+  # SAME RETRAIN CAVEAT, LARGER: this rewrites nearly every entity key, so all
+  # 453 existing per-entity models are stranded until training rebuilds them.
+  # Switch on during the retrain on the new server, never on a live deployment.
+  typed_keys: false
+
+  # Accounts that are software, not people. Windows built-ins
+  # (NT AUTHORITY\*, NT SERVICE\*, SYSTEM, LOCAL/NETWORK SERVICE) and machine
+  # accounts (trailing "$") are detected without being listed; add site-local
+  # daemon accounts here.
+  service_accounts:
+    - "postgres"
+    - "mysql"
+    - "zabbix"
+    - "ftpuser"
+    - "deploy"
+
   # Accounts that exist separately on many machines. These keep their
   # DOMAIN\ / HOST\ prefix instead of being stripped, because 'VGINFO\admin'
   # and 'LAPTOP-07\admin' are different local accounts that merely share a

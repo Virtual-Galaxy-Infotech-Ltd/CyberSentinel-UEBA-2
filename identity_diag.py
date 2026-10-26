@@ -33,11 +33,12 @@ def _safe_name(username: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in username)
 
 
-def _keys(path, cfg, canonicalize, limit):
+def _keys(path, cfg, canonicalize, limit, typed=False):
     """Entity key for every record in the sample, under one config setting."""
     cfg = dict(cfg)
     block = dict(cfg.get("identity_resolution", {}) or {})
     block["canonicalize"] = canonicalize
+    block["typed_keys"] = typed
     cfg["identity_resolution"] = block
     pp.apply_identity_config(cfg)
 
@@ -57,13 +58,87 @@ def _keys(path, cfg, canonicalize, limit):
     return out
 
 
+# Expected classifications. Each case states a rule the engine depends on, so a
+# failure here means detection behaviour changed, not that a label moved.
+_SELFTEST_IP = [
+    ("10.200.11.76",  False), ("192.168.1.5", False), ("172.16.4.9",   False),
+    ("127.0.0.1",     False), ("169.254.1.1", False), ("10.200.11.76 ", False),
+    ("45.148.10.151", True),  ("2.57.121.112", True), ("8.8.8.8",      True),
+    ("",              False), ("not-an-ip",   False),
+]
+
+_SELFTEST_ENTITY = [
+    (("root", "45.148.10.151", "CPU-SRV-208"), "external:45.148.10.151",
+     "a public source IP outranks every other classification — this is the "
+     "rule that keeps 912 brute-force events out of root's baseline"),
+    (("jinu", "", "VGSOC-LAP11"), "person:jinu",
+     "an endpoint user with no source IP is a person"),
+    (("VGSOC-LAP11\\JINU", "", "VGSOC-LAP11"), "person:jinu",
+     "qualified spellings canonicalise to one person"),
+    (("root", "10.200.11.5", "GPU_SRV"), "shared:root@GPU_SRV",
+     "root reached internally is host-scoped, so root on the GPU box is not "
+     "root on the ATM server"),
+    (("NT AUTHORITY\\SYSTEM", "", "DC_AD_srv"), "service:system@DC_AD_srv",
+     "Windows built-ins are services, not people"),
+    (("VGSOC-LAP06$", "", "utkarsh_Pc"), "service:vgsoc-lap06$@utkarsh_Pc",
+     "a trailing $ is a machine account"),
+    (("", "10.200.11.76", ""), "endpoint:10.200.11.76",
+     "userless internal traffic is a machine"),
+    (("", "", "Nidhi"), "endpoint:Nidhi", "host fallback"),
+    (("", "8.8.8.8", "fw"), "external:8.8.8.8", "userless external traffic"),
+    (("", "", ""), "unknown", "nothing identifiable"),
+    (("admin", "", "LAPTOP-07"), "shared:admin@LAPTOP-07",
+     "shared accounts keep a host scope instead of merging estate-wide"),
+]
+
+
+def selftest(cfg):
+    """Assert the classification rules. No sample file needed."""
+    block = dict((cfg or {}).get("identity_resolution", {}) or {})
+    block["typed_keys"] = True
+    block.setdefault("shared_accounts",
+                     ["administrator", "admin", "root", "system", "guest",
+                      "user"])
+    pp.apply_identity_config({"identity_resolution": block})
+
+    fails = 0
+    print("_is_public_ip")
+    for addr, want in _SELFTEST_IP:
+        got = pp._is_public_ip(addr)
+        if got != want:
+            fails += 1
+            print("  FAIL %r -> %s, expected %s" % (addr, got, want))
+    print("  %d case(s), %d failure(s)" % (len(_SELFTEST_IP), fails))
+
+    efails = 0
+    print("\n_typed_entity")
+    for args, want, why in _SELFTEST_ENTITY:
+        got = pp._typed_entity(*args)
+        if got != want:
+            efails += 1
+            print("  FAIL %s\n    got      %s\n    expected %s\n    rule: %s"
+                  % (args, got, want, why))
+    print("  %d case(s), %d failure(s)" % (len(_SELFTEST_ENTITY), efails))
+
+    total = fails + efails
+    print("\n%s" % ("PASS" if not total else "FAIL — %d case(s)" % total))
+    return 0 if not total else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="ueba_config.yaml")
     ap.add_argument("--input", default="ueba_alerts.jsonl")
     ap.add_argument("--models", default="models/autoencoders")
     ap.add_argument("--limit", type=int, default=0, help="0 = whole file")
+    ap.add_argument("--selftest", action="store_true",
+                    help="assert the classification rules and exit")
     args = ap.parse_args()
+
+    if args.selftest:
+        cfg = (pp.load_config(args.config)
+               if Path(args.config).exists() else {})
+        sys.exit(selftest(cfg))
 
     if not Path(args.input).exists():
         sys.exit("no such sample: %s" % args.input)
@@ -142,6 +217,53 @@ def main():
     mdir = Path(args.models)
     block = cfg.get("identity_resolution", {}) or {}
     maps = block.get("mappings", {}) or {}
+    # ── Phase B: what typed classification would produce ────────────────────
+    typed = _keys(args.input, cfg, True, args.limit, typed=True)
+    if len(typed) == len(before):
+        bykind = defaultdict(set)
+        recs_by_kind = defaultdict(int)
+        for k in typed:
+            kind = k.split(":", 1)[0] if ":" in k else "unknown"
+            bykind[kind].add(k)
+            recs_by_kind[kind] += 1
+
+        print("\nTYPED KEYS (typed_keys: true) — entities, and records behind them")
+        print("  %-10s %10s %10s" % ("type", "entities", "records"))
+        for kind in ("person", "endpoint", "service", "shared", "external",
+                     "unknown"):
+            if bykind[kind] or recs_by_kind[kind]:
+                print("  %-10s %10d %10d"
+                      % (kind, len(bykind[kind]), recs_by_kind[kind]))
+        print("  %-10s %10d %10d"
+              % ("TOTAL", len(set(typed)), len(typed)))
+
+        print("\n  flat scheme today: %d entities. typed: %d."
+              % (len(set(before)), len(set(typed))))
+        print("  Of the %d accounts in the flat scheme, typed classification "
+              "keeps %d as people." % (len(kb["account"]), len(bykind["person"])))
+
+        # The headline: attack traffic no longer lands on a legitimate entity.
+        acct_ext = sum(1 for b, t in zip(before, typed)
+                       if t.startswith("external:")
+                       and not b.startswith(("ip:", "host:")))
+        if acct_ext:
+            print("\n  %d records presented an account name from a public IP and "
+                  "are now\n  external: rather than that account's baseline. "
+                  "Those are the\n  brute-force guesses." % acct_ext)
+
+        print("\n  people kept (%d):" % len(bykind["person"]))
+        ppl = sorted(bykind["person"])
+        for i in range(0, min(len(ppl), 40), 4):
+            print("    " + "  ".join("%-22s" % x[:22] for x in ppl[i:i + 4]))
+        if len(ppl) > 40:
+            print("    ... and %d more" % (len(ppl) - 40))
+
+        for kind in ("shared", "service"):
+            if bykind[kind]:
+                print("\n  %s (%d):" % (kind, len(bykind[kind])))
+                for k in sorted(bykind[kind])[:12]:
+                    print("    %s" % k)
+
     if maps:
         # Evaluate the targets WITH canonicalisation on: the question is what
         # these resolve to after the cutover, not what they do today.

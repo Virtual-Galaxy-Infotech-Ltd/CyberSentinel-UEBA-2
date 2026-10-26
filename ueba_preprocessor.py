@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import ipaddress
 import json
 import math
 import logging
@@ -172,6 +173,18 @@ def _deescape(s: str) -> str:
     return s
 
 
+def _account_parts(name: str) -> tuple:
+    """De-escape, then split 'DOMAIN\\user' into ('DOMAIN', 'user').
+
+    prefix is '' for an unqualified name. Only the backslash is treated as a
+    separator — see the type-awareness note above for why '_' must not be.
+    """
+    s = _deescape(str(name).strip())
+    head, sep, tail = s.rpartition("\\")
+    tail = tail.strip()
+    return (head.strip() if sep else ""), (tail or s)
+
+
 def canonical_identity(name: str) -> str:
     """Canonical key for ONE ACCOUNT identity.
 
@@ -200,16 +213,107 @@ def canonical_identity(name: str) -> str:
     # them would be a regression — one baseline averaging unrelated actors, the
     # exact defect that makes `root` useless today. Those keep their prefix
     # until Phase B gives them a proper (account, host) key.
-    if _IDENTITY_STRIP_DOMAIN and "\\" in s:
-        head, _, tail = s.rpartition("\\")
-        tail = tail.strip()
-        if tail and tail.casefold() not in _IDENTITY_SHARED:
+    if _IDENTITY_STRIP_DOMAIN:
+        prefix, tail = _account_parts(s)
+        if prefix and tail.casefold() not in _IDENTITY_SHARED:
             s = tail
 
     if _IDENTITY_CASEFOLD:
         s = s.casefold()
 
     return s or raw
+
+
+# ── Typed Entity Keys (Phase B) ───────────────────────────────────────────────
+#
+# Phase A merges spellings of the same account. It does not address the larger
+# problem: the entity namespace is flat, so a person, a laptop, a service
+# account and an internet stranger are all just strings competing for the same
+# keyspace. Measured on the model store and a 3,412-alert sample:
+#
+#   * 397 of 453 per-entity autoencoders (87.6%) are keyed on an IP address
+#   * 103 of 135 named accounts were seen ONLY from a public source IP — they
+#     are SSH brute-force username guesses (janya, jesica, kaycie, postgres,
+#     zabbix, pi, odoo ...), not employees, and each got its own autoencoder
+#   * `root` was ONE baseline for 912 alerts from 16 different public IPs, so
+#     sixteen unrelated attackers were averaged into a single "normal" profile
+#     and none of them deviated from it
+#
+# Typed keys split that into five namespaces:
+#
+#   person:<canonical>            a human being
+#   endpoint:<ip|host>            a machine, and userless internal traffic
+#   service:<account>@<host>      SYSTEM, LOCAL SERVICE, machine accounts
+#   shared:<account>@<host>       root/admin/guest — scoped, because `root` on
+#                                 the ATM server is not `root` on the GPU box
+#   external:<ip>                 an actor out on the internet
+#
+# THE DECISIVE RULE: anything presenting from a PUBLIC source IP is an external
+# actor, whatever account name it offers, and that takes precedence over every
+# other classification. Verified unambiguous on the sample — no named account
+# ever appeared from a private source IP (0 of 1,458), so the rule never has to
+# adjudicate a genuine employee against it.
+#
+# This is what keeps attack traffic out of legitimate baselines. The target
+# endpoint deliberately does NOT absorb it either: keying a brute-force flood
+# to endpoint:CPU-SRV-208 would merely move the poisoning from `root`'s profile
+# to the server's, and teach us that being attacked is normal for that server.
+# External actors have no history, so they fall through to the global Isolation
+# Forest — which is the correct model for them, since it is the one that knows
+# what a port scan looks like across the whole estate.
+
+_ENTITY_TYPED = False
+
+# Windows built-ins. A trailing "$" is a machine account.
+_SERVICE_PREFIXES = {"nt authority", "nt service"}
+_SERVICE_TAILS    = {"system", "local service", "network service",
+                     "local system", "localsystem"}
+_IDENTITY_SERVICE = set()           # plus anything named in the config
+
+
+def _is_public_ip(addr: str) -> bool:
+    """True for a routable internet address. Malformed input is NOT public —
+    an unparseable string must never be allowed to reclassify a real person
+    as an external attacker."""
+    try:
+        return not ipaddress.ip_address(str(addr).strip()).is_private
+    except ValueError:
+        return False
+
+
+def _is_service_account(name: str) -> bool:
+    prefix, tail = _account_parts(name)
+    p, t = prefix.casefold(), tail.casefold()
+    return (t.endswith("$")
+            or p in _SERVICE_PREFIXES
+            or t in _SERVICE_TAILS
+            or t in _IDENTITY_SERVICE
+            or name.strip().casefold() in _IDENTITY_SERVICE)
+
+
+def _typed_entity(account: str, src_ip: str, host: str) -> str:
+    """Classify one event into a typed entity key. See the note above."""
+    # 1. External actors first — this outranks any account name presented.
+    if src_ip and _is_public_ip(src_ip):
+        return f"external:{src_ip}"
+
+    if account:
+        # Shared and service accounts are scoped by host, so the host suffix is
+        # what disambiguates them and the domain prefix is redundant noise.
+        _, tail = _account_parts(account)
+        tail = tail.casefold()
+        if _is_service_account(account):
+            return f"service:{tail}@{host}" if host else f"service:{tail}"
+        if tail in _IDENTITY_SHARED:
+            return f"shared:{tail}@{host}" if host else f"shared:{tail}"
+        return f"person:{canonical_identity(account)}"
+
+    # 2. Userless. A private source IP is one of our own machines.
+    if src_ip:
+        return f"endpoint:{src_ip}"
+    if host:
+        return f"endpoint:{host}"
+    return "unknown"
 
 
 def apply_identity_config(config: dict) -> bool:
@@ -226,6 +330,7 @@ def apply_identity_config(config: dict) -> bool:
     live deployment.
     """
     global _IDENTITY_CANONICALIZE, _IDENTITY_CASEFOLD, _IDENTITY_STRIP_DOMAIN
+    global _ENTITY_TYPED
 
     block = config.get("identity_resolution", {}) or {}
 
@@ -243,12 +348,30 @@ def apply_identity_config(config: dict) -> bool:
         if str(acct).strip():
             _IDENTITY_SHARED.add(str(acct).strip().casefold())
 
+    _IDENTITY_SERVICE.clear()
+    for acct in (block.get("service_accounts", []) or []):
+        if str(acct).strip():
+            _IDENTITY_SERVICE.add(str(acct).strip().casefold())
+
+    # Typed keys imply canonicalisation: person: keys are built from
+    # canonical_identity(), so leaving it off would produce person:VGINFO\JINU
+    # and person:jinu as two entities and silently undo Phase A. Rather than
+    # offer that half-state as a configuration, force it and say so.
+    _ENTITY_TYPED = bool(block.get("typed_keys", False))
+    if _ENTITY_TYPED and not _IDENTITY_CANONICALIZE:
+        _IDENTITY_CANONICALIZE = True
+        log.info("typed_keys is on, so canonicalize is forced on with it")
+
+    if _ENTITY_TYPED:
+        log.info("Typed entity keys ON (person/endpoint/service/shared/external; "
+                 "service_accounts=%d)", len(_IDENTITY_SERVICE))
+
     if _IDENTITY_CANONICALIZE:
         log.info("Identity canonicalisation ON (casefold=%s strip_domain=%s "
                  "aliases=%d shared_accounts=%d)",
                  _IDENTITY_CASEFOLD, _IDENTITY_STRIP_DOMAIN,
                  len(_IDENTITY_ALIASES), len(_IDENTITY_SHARED))
-    return _IDENTITY_CANONICALIZE
+    return _IDENTITY_CANONICALIZE or _ENTITY_TYPED
 
 
 def resolve_entity(log: dict) -> str:
@@ -262,7 +385,13 @@ def resolve_entity(log: dict) -> str:
     Falls back to the reporting host, then literal ``"unknown"`` (≈0 events).
 
     Used by BOTH feature extraction and the profile store so that training-time
-    bucketing and runtime AE selection can never diverge.
+    bucketing and runtime AE selection can never diverge. Identity
+    canonicalisation and typed classification therefore happen HERE and nowhere
+    else — see canonical_identity() and _typed_entity().
+
+    With ``identity_resolution.typed_keys`` on, returns a typed key instead
+    (``person:`` / ``endpoint:`` / ``service:`` / ``shared:`` / ``external:``);
+    the flat scheme described above is what you get with it off.
 
     NOTE: object.name on network events is a destination hostname
     (e.g. www.google.com), so it is only accepted as a username for auth events.
@@ -281,21 +410,29 @@ def resolve_entity(log: dict) -> str:
     )
     if user and _is_url_junk(user):
         user = None
-    if user:
-        # Account names only. The ip:/host: fallbacks below are returned as-is.
-        return canonical_identity(user)
+
+    # Hoisted above the account branch because typed classification needs all
+    # three fields together: the source IP decides whether an account name
+    # belongs to a person or to an internet stranger presenting that name.
     src_ip = (
         get_nested(log, "subject.ip")
         or get_nested(log, "data.srcip")
         or get_nested(log, "context.raw_event.data.srcip")
     )
-    if src_ip:
-        return f"ip:{src_ip}"
     host = (
         get_nested(log, "host.name")
         or get_nested(log, "agent.name")
         or get_nested(log, "context.raw_event.agent.name")
     )
+
+    if _ENTITY_TYPED:
+        return _typed_entity(user or "", src_ip or "", host or "")
+
+    if user:
+        # Account names only. The ip:/host: fallbacks below are returned as-is.
+        return canonical_identity(user)
+    if src_ip:
+        return f"ip:{src_ip}"
     return f"host:{host}" if host else "unknown"
 
 

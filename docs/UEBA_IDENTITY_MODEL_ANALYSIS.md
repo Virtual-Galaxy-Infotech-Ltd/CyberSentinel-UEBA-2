@@ -195,7 +195,84 @@ We currently have none of the five.
 
 Four changes, in dependency order. Effort figures are engineering days for one developer.
 
-### Change 1 — Typed entity keys, not one flat namespace (2 days)
+### Change 1 — Typed entity keys (2 days) — **IMPLEMENTED 2026-10-26**
+
+`_typed_entity()` in `ueba_preprocessor.py`, behind `identity_resolution.typed_keys`
+(default off). Five namespaces:
+
+| Type | Key | Meaning |
+|---|---|---|
+| `person` | `person:<canonical>` | a human being |
+| `endpoint` | `endpoint:<ip\|host>` | a machine, and userless internal traffic |
+| `service` | `service:<account>@<host>` | SYSTEM, LOCAL/NETWORK SERVICE, machine accounts (`$`) |
+| `shared` | `shared:<account>@<host>` | root/admin/guest, scoped per host |
+| `external` | `external:<ip>` | an actor out on the internet |
+
+`typed_keys` forces `canonicalize` on (with a log line) rather than offering the half-state where
+`person:VGINFO\JINU` and `person:jinu` would be two entities.
+
+**The decisive rule, validated before implementation:** anything presenting from a public source
+IP is external, whatever account name it offers, ahead of every other classification. The rule
+never has to adjudicate a real employee against it — **no named account in the sample ever
+appeared from a private source IP (0 of 1,458)**.
+
+The target endpoint deliberately does *not* absorb that traffic either. Keying a brute-force flood
+to `endpoint:CPU-SRV-208` would move the poisoning from `root`'s profile onto the server's and
+teach us that being attacked is normal for it. External actors have no history, so they fall
+through to the global Isolation Forest — the correct model for them, since it is the one that
+knows what a port scan looks like across the whole estate.
+
+**Measured on the 3,412-alert sample:**
+
+```
+TYPED KEYS — entities, and records behind them
+  type         entities    records
+  person             21        261
+  endpoint            3         60
+  service             6         50
+  shared              1          5
+  external           51       3036
+  TOTAL              82       3412
+
+flat scheme today: 175 entities. typed: 82.
+Of the 137 accounts in the flat scheme, typed classification keeps 21 as people.
+1936 records presented an account name from a public IP and are now external:
+rather than that account's baseline.
+```
+
+A crosstab confirms where everything went: all 1,936 brute-force records leave the account
+namespace, and **all 35 flat `ip:` entities in this sample are public addresses** and become
+`external:`.
+
+**Caveat on that ratio.** `ueba_alerts.jsonl` is the *alerts* file — post-0.75 threshold — so it
+is heavily skewed toward inbound internet traffic. Internal userless traffic rarely scores above
+the threshold, which is why `endpoint:` looks tiny here. The training corpus is the opposite.
+Reclassifying the actual model store shows the real shape:
+
+| The 397 `ip_*.pt` models | Count | Share |
+|---|---:|---:|
+| private → `endpoint:` | 367 | 92.4% |
+| public → `external:` | 30 | 7.6% |
+
+So this **refines the headline of this document**. "87.6% of our user models are IP addresses" is
+true, but the fix is not to delete them — 367 of them are legitimate machine baselines that were
+merely mislabelled as users. Only the 30 public ones are genuinely worthless, because they model
+attacker behaviour. Combined with the ~15 dictionary-name models, roughly 45 of 453 models should
+be discarded at the cutover rather than migrated.
+
+**Residual duplicates that typed keys cannot fix.** The person list still contains
+`person:firdo` / `person:firdous` and `person:renuk` / `person:renuka` — truncations and nicknames
+with different tails. Neither canonicalisation nor typing can infer those; they are exactly what
+the operator `mappings` block is for. Worth reviewing that list at the cutover.
+
+**Tests.** `identity_diag.py --selftest` asserts 22 cases with no sample file needed — 11 for
+`_is_public_ip` (private ranges, loopback, link-local, whitespace, malformed input must never be
+treated as public) and 11 for `_typed_entity`, each stating the rule it protects. All pass. The
+flag-off path remains bit-identical across all 3,412 keys after this change.
+
+#### Original recommendation, retained for reference
+
+
 
 Replace the single string key with an explicit `(type, id)` pair. Entity types:
 
