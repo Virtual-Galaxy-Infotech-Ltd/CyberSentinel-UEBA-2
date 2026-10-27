@@ -262,7 +262,7 @@ dashboard:
   # agent-sync disabled 2026-08-06: target soc@localhost:2222 was the
   # 222->98 reverse tunnel, decommissioned in the SIEM 222->23 migration
   # (spammed the log with SSH auth failures every poll). Re-enable only
-  # after repointing ssh_host at the current Wazuh manager with a key.
+  # after repointing ssh_host at the current SIEM manager with a key.
   agent_sync:
     enabled:        false
   host:             "0.0.0.0"
@@ -455,6 +455,44 @@ auth:
 
 # ── Streaming Engine ──────────────────────────────────────────────────────────
 streaming:
+  # ── Where events come from ──────────────────────────────────────────────────
+  # file  — tail paths.enriched_input, resuming from a byte offset in
+  #         paths.state_file. What the SSH sync bridge fed.
+  # kafka — consume the SIEM pipeline's `enriched` topic directly. Correct when
+  #         UEBA runs ON the SIEM host: the pipeline already publishes every
+  #         enriched event, and its kafka_jsonl_sink.py is just another consumer
+  #         writing that topic down to files. Reading the topic instead means no
+  #         sync bridge, no second copy on disk (~30 GB/day at the observed
+  #         66 events/s), durable offsets kept by Kafka, and replay after an
+  #         outage up to topic retention.
+  #
+  # Default is file so an existing deployment is unchanged by this setting
+  # appearing. See ueba_source.py.
+  source: file
+
+  kafka:
+    # NOTE 39092, not 9092. The pipeline's own layers connect on
+    # localhost:39092; 9092 is only reachable inside the broker container.
+    brokers: "localhost:39092"
+    topic: "enriched"
+
+    # MUST be UEBA's own group. Kafka splits a topic's partitions across the
+    # members of a group, so reusing one of the SIEM pipeline's groups
+    # (enricher, correlation, scorer, enriched-file-sink, scored-file-sink)
+    # would take partitions away from that consumer — the pipeline's file sink
+    # would quietly stop receiving a share of events, with no error anywhere.
+    # ueba_source.py refuses those names outright.
+    group: "ueba-engine"
+
+    # latest = start at the live edge, matching the file source's behaviour of
+    # seeking to EOF when there is no saved state. earliest would replay the
+    # whole retained topic and present months of historical anomalies as
+    # current alerts.
+    offset_reset: latest
+
+    # Passed through to the confluent_kafka Consumer verbatim, for site tuning.
+    client_config: {}
+
   poll_interval_ms: 100
   state_save_interval: 1000
   # Isolation Forest batching (2026-08-27). sklearn score_samples() carries a

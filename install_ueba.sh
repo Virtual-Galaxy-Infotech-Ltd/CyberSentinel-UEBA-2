@@ -12,7 +12,7 @@
 #     2. Site details     — client name, SIEM host/port/user, paths
 #     3. Install location — base dir, dashboard bind address
 #     4. SSH trust        — generate a keypair, help you authorise it, test it
-#     5. Discovery        — pull the Wazuh agent registry -> agents.json
+#     5. Discovery        — pull the SIEM agent registry -> agents.json
 #     6. Configuration    — render ueba_config.yaml + the bridge env file
 #     7. Runtime          — venv + CPU-only wheels, systemd units
 #     8. Bring-up         — first sync, optional training, start services
@@ -201,13 +201,46 @@ collect_site() {
   say "${DIM}Where this UEBA instance lives, and which SIEM it feeds from.${R}"
   blank
   ask CLIENT_NAME "Client / bank name"                ""
-  ask SIEM_HOST   "SIEM (Wazuh manager) host or IP"   "" v_host
-  ask SIEM_PORT   "SIEM SSH port"                     "22" v_port
-  ask SIEM_USER   "SSH user on the SIEM"              "root" v_user
-  ask SIEM_ENRICHED_DIR "Enriched-log directory on the SIEM" \
-      "/home/${SIEM_USER}/CyberSentinel-Event-Correlation-Kafka/data/enriched" v_abs
-  ask SIEM_CLIENT_KEYS  "Wazuh agent registry on the SIEM" \
-      "/var/ossec/etc/client.keys" v_abs
+
+  # Two topologies, and they differ by more than a hostname.
+  #
+  #   separate  — UEBA on its own host. ueba_sync_bridge.sh pulls rotated
+  #               enriched chunks over SSH and appends them to a local file the
+  #               engine tails.
+  #   colocated — UEBA on the SIEM host itself. The correlation pipeline already
+  #               publishes every enriched event to a Kafka topic, and its own
+  #               kafka_jsonl_sink.py is just another consumer writing that topic
+  #               to files. So the engine reads the topic directly: no bridge, no
+  #               SSH, no second copy of the data on disk, and offsets kept
+  #               durably by Kafka instead of by our own byte counter.
+  blank
+  if ask_yn "Is UEBA being installed ON the SIEM host itself?" n; then
+    CO_LOCATED=1
+    SIEM_HOST="localhost"; SIEM_PORT="22"; SIEM_USER="root"
+    ask KAFKA_BROKERS "Kafka brokers the SIEM pipeline uses" \
+        "localhost:39092"
+    ask KAFKA_TOPIC   "Enriched Kafka topic" "enriched"
+    # Its own group, always. Kafka divides a topic's partitions among a group's
+    # members, so reusing one of the pipeline's groups (enricher, correlation,
+    # scorer, enriched-file-sink, scored-file-sink) would take partitions away
+    # from that consumer — the pipeline's file sink would quietly stop seeing a
+    # share of events, with no error logged anywhere. ueba_source.py refuses
+    # those names, but defaulting correctly means nobody has to find out.
+    KAFKA_GROUP="ueba-engine"
+    ask SIEM_ENRICHED_DIR "Enriched-log directory (kept for reference/backfill)" \
+        "/home/vgipl/CyberSentinel-Event-Correlation-Kafka/data/enriched" v_abs
+    ask SIEM_CLIENT_KEYS  "SIEM agent registry" \
+        "/var/ossec/etc/client.keys" v_abs
+  else
+    CO_LOCATED=0
+    ask SIEM_HOST   "CyberSentinel SIEM manager host or IP" "" v_host
+    ask SIEM_PORT   "SIEM SSH port"                     "22" v_port
+    ask SIEM_USER   "SSH user on the SIEM"              "root" v_user
+    ask SIEM_ENRICHED_DIR "Enriched-log directory on the SIEM" \
+        "/home/${SIEM_USER}/CyberSentinel-Event-Correlation-Kafka/data/enriched" v_abs
+    ask SIEM_CLIENT_KEYS  "SIEM agent registry on the SIEM" \
+        "/var/ossec/etc/client.keys" v_abs
+  fi
 }
 
 collect_local() {
@@ -216,6 +249,27 @@ collect_local() {
   ask DATA_DIR  "Data directory (needs ~500 GB, grows ~65 GB/month)" "/data/ueba" v_abs
   ask DASH_HOST "Dashboard bind address" "0.0.0.0"
   ask DASH_PORT "Dashboard port"         "3026" v_port
+
+  # Resource caps. On a dedicated host these are a safety net; on the SIEM host
+  # they are the contract that stops UEBA becoming the reason the SIEM dies.
+  # The kernel OOM killer picks large processes, not guilty ones, so without a
+  # cgroup limit a leaking UEBA would take out whatever else is biggest —
+  # ClickHouse, Elasticsearch, the SIEM's own Java heaps.
+  #
+  # Defaults come from measurement on the previous deployment: engine 19.5 GB
+  # resident, dashboard 4.0 GB, bridge negligible. Headroom is added rather
+  # than trimmed, because a cap set below real usage converts a tuning problem
+  # into a crash loop. Lower them once you have watched actual usage with
+  # `systemctl status ueba-engine`.
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    blank
+    say "${DIM}UEBA will share this host with the SIEM. Caps keep it contained.${R}"
+    ask MEM_ENGINE    "Memory cap for the engine"    "24G"
+    ask MEM_DASHBOARD "Memory cap for the dashboard" "6G"
+  else
+    MEM_ENGINE="${MEM_ENGINE:-24G}"
+    MEM_DASHBOARD="${MEM_DASHBOARD:-6G}"
+  fi
 
   # This server's own IP must be suppressed, or its sync/SSH traffic becomes alerts.
   local guess; guess="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
@@ -285,7 +339,7 @@ raw_path, out_path = sys.argv[1], sys.argv[2]
 agents, seen = [], set()
 try:
     for line in open(raw_path, encoding="utf-8", errors="replace"):
-        # Wazuh client.keys: "<id> <name> <ip|any> <key>"
+        # SIEM client.keys: "<id> <name> <ip|any> <key>"
         parts = line.split()
         if len(parts) < 3 or not parts[0].strip().isdigit():
             continue
@@ -386,6 +440,26 @@ EOF
     # under /root/NEW_DRIVE/aditya_ueba and silently find nothing: no history in
     # the timeline windows, and the stale-feed banner never firing. Write them
     # explicitly. Inserted as text so the file keeps its comments.
+    # Co-located: switch the engine off file-tailing and onto the topic.
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+      python3 - "$BASE_DIR/ueba_config.yaml" \
+        "$KAFKA_BROKERS" "$KAFKA_TOPIC" "$KAFKA_GROUP" >>"$LOGFILE" 2>&1 <<'KPYEOF'
+import re, sys
+cfg, brokers, topic, group = sys.argv[1:5]
+text = open(cfg, encoding="utf-8").read()
+# streaming.source and the three kafka keys all already exist in the shipped
+# YAML with safe defaults, so this edits in place and keeps the comments.
+text = re.sub(r'(?m)^(\s*source:\s*)file\b', r'\1kafka', text, count=1)
+text = re.sub(r'(?m)^(\s*brokers:\s*).*', r'\1"%s"' % brokers, text, count=1)
+text = re.sub(r'(?m)^(\s*topic:\s*).*',   r'\1"%s"' % topic,   text, count=1)
+text = re.sub(r'(?m)^(\s*group:\s*).*',   r'\1"%s"' % group,   text, count=1)
+open(cfg, "w", encoding="utf-8").write(text)
+print("config: streaming.source=kafka brokers=%s topic=%s group=%s"
+      % (brokers, topic, group))
+KPYEOF
+      ok "engine will consume Kafka topic '$KAFKA_TOPIC' as group '$KAFKA_GROUP'"
+    fi
+
     python3 - "$BASE_DIR/ueba_config.yaml" "$BASE_DIR" >>"$LOGFILE" 2>&1 <<'PYEOF'
 import sys
 cfg_path, base = sys.argv[1], sys.argv[2]
@@ -508,12 +582,24 @@ EOF
 
 install_units() {
   local py="$BASE_DIR/venv/bin/python3"
-  for svc in engine dashboard bridge; do
-    local exec desc
+
+  # Co-located installs have no bridge: the engine reads Kafka directly, so a
+  # sync bridge would be a second copy of data already on this disk.
+  local services="engine dashboard bridge"
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    services="engine dashboard"
+    rm -f /etc/systemd/system/ueba-bridge.service
+  fi
+
+  for svc in $services; do
+    local exec desc mem cpu
     case "$svc" in
-      engine)    desc="CyberSentinel UEBA Engine";    exec="$py $BASE_DIR/ueba_engine.py --config $BASE_DIR/ueba_config.yaml" ;;
-      dashboard) desc="CyberSentinel UEBA Dashboard"; exec="$py $BASE_DIR/ueba_dashboard_server.py --config $BASE_DIR/ueba_config.yaml" ;;
-      bridge)    desc="CyberSentinel UEBA Sync Bridge"; exec="/bin/bash $BASE_DIR/ueba_sync_bridge.sh" ;;
+      engine)    desc="CyberSentinel UEBA Engine";    exec="$py $BASE_DIR/ueba_engine.py --config $BASE_DIR/ueba_config.yaml"
+                 mem="$MEM_ENGINE";    cpu="400%" ;;
+      dashboard) desc="CyberSentinel UEBA Dashboard"; exec="$py $BASE_DIR/ueba_dashboard_server.py --config $BASE_DIR/ueba_config.yaml"
+                 mem="$MEM_DASHBOARD"; cpu="200%" ;;
+      bridge)    desc="CyberSentinel UEBA Sync Bridge"; exec="/bin/bash $BASE_DIR/ueba_sync_bridge.sh"
+                 mem="2G";             cpu="100%" ;;
     esac
     cat >"/etc/systemd/system/ueba-${svc}.service" <<EOF
 [Unit]
@@ -529,6 +615,13 @@ EnvironmentFile=$BASE_DIR/ueba_runtime.env
 ExecStart=$exec
 Restart=always
 RestartSec=10
+# A config error should stop and stay stopped; only a crash deserves retrying.
+# Without this a bad argument respawns every 10s forever and buries the real
+# error in a log full of identical usage messages.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+MemoryMax=$mem
+CPUQuota=$cpu
 StandardOutput=append:$BASE_DIR/logs/ueba_${svc}.stdout.log
 StandardError=append:$BASE_DIR/logs/ueba_${svc}.stdout.log
 
@@ -623,7 +716,11 @@ bring_up() {
   fi
 
   if ask_yn "Pull an initial batch of logs from the SIEM now?" y; then
-    spin "starting sync bridge" systemctl enable --now ueba-bridge || warn "bridge did not start"
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+      say "  ${DIM}co-located: no sync bridge (engine reads Kafka directly)${R}"
+    else
+      spin "starting sync bridge" systemctl enable --now ueba-bridge || warn "bridge did not start"
+    fi
   fi
 
   blank

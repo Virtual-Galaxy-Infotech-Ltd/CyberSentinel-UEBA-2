@@ -858,10 +858,20 @@ class UEBAEngine:
         log.info("  Alert threshold : %.2f", self.config["score_fusion"]["alert_threshold"])
         log.info("=" * 60)
 
-        # Wait for input file to appear
-        while self.running and not Path(self.input_path).exists():
-            log.info("Waiting for %s to appear...", self.input_path)
-            time.sleep(2)
+        # Where events come from: a tailed file, or the SIEM's Kafka topic
+        # directly when UEBA runs on the SIEM host. See ueba_source.py — the
+        # consumer-group note there matters, because the wrong group would
+        # steal partitions from the pipeline's own file sink.
+        import ueba_source
+        source = ueba_source.build_source(self.config, self.state)
+
+        # Only the file source needs its input to exist first; Kafka has no
+        # such precondition and waiting on a path would hang forever.
+        if getattr(source, "name", "") == "file":
+            while self.running and not Path(self.input_path).exists():
+                log.info("Waiting for %s to appear...", self.input_path)
+                time.sleep(2)
+        log.info("  Source : %s", source.describe())
 
         last_stat_log = time.time()
         events_since_save = 0
@@ -871,49 +881,18 @@ class UEBAEngine:
         # happens at write time under _alert_write_lock (see the alert-write block).
         out_file = open(self.output_path, "a", encoding="utf-8")
         try:
-            with open(self.input_path, "r", encoding="utf-8",
-                      errors="replace") as in_file:
+            source.open()
+            try:
+                # The source yields already-parsed batches and owns its own
+                # polling cadence, resume logic and partial-line handling. One
+                # batch is one Isolation Forest call, which is what keeps that
+                # call vectorised — scoring row-by-row spent ~96% of the time
+                # budget in sklearn's fixed per-call cost.
+                for parsed, parse_errors in source.batches(self.if_batch_size,
+                                                           lambda: self.running):
+                    self.stats["total_errors"] += parse_errors
 
-                # Seek to last known position (resume support)
-                # -1 sentinel = no state file = seek to END (live mode only)
-                if self.state.position == -1:
-                    in_file.seek(0, 2)  # seek to end of file
-                    live_start = in_file.tell()
-                    self.state.save(live_start)
-                    log.info("No state file found — starting from END of input "
-                             "(live mode). Position: %d", live_start)
-                else:
-                    in_file.seek(self.state.position)
-                partial_line = ""
-
-                while self.running:
-                    chunk = in_file.read(self.read_chunk_bytes)
-
-                    if not chunk:
-                        # No new data — sleep and poll
-                        time.sleep(self.poll_ms / 1000.0)
-                        continue
-
-                    # Process chunk into complete lines
-                    lines = (partial_line + chunk).split("\n")
-                    partial_line = lines[-1]  # may be incomplete
-
-                    # Parse the whole chunk up front, then score it in batches
-                    # so the Isolation Forest runs vectorised (_process_batch).
-                    parsed = []
-                    for line in lines[:-1]:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            parsed.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            self.stats["total_errors"] += 1
-
-                    results = []
-                    for _start in range(0, len(parsed), self.if_batch_size):
-                        results.extend(self._process_batch(
-                            parsed[_start:_start + self.if_batch_size]))
+                    results = self._process_batch(parsed)
 
                     for result, _errored in results:
                         if _errored:
@@ -1002,9 +981,13 @@ class UEBAEngine:
                                     result.get("evidence", {}).get("signature", {}).get("description", "")[:60],
                                 )
 
-                    # Save state periodically
+                    # Persist progress periodically. Deliberately AFTER the
+                    # alert writes above: committing first and crashing second
+                    # would drop those alerts, whereas committing second can at
+                    # worst redeliver a batch. Duplicates are recoverable,
+                    # missing alerts are not.
                     if events_since_save >= self.save_every:
-                        self.state.save(in_file.tell())
+                        source.checkpoint()
                         events_since_save = 0
 
                     # Log stats every 60 seconds
@@ -1013,17 +996,20 @@ class UEBAEngine:
                         self._log_stats()
                         last_stat_log = now
 
-                # Loop exited (running=False on shutdown): persist the final read
-                # offset. Without this, an unclean stop (weekly retrain, crash, or
-                # manual restart) resumes from the last periodic save and
-                # reprocesses up to save_every events → duplicate alerts. (The
-                # daily rotate clears state separately, so it is unaffected.)
+            finally:
+                # Loop exited (running=False on shutdown, or an exception):
+                # persist final progress. Without this, an unclean stop (weekly
+                # retrain, crash, or manual restart) resumes from the last
+                # periodic save and reprocesses up to save_every events →
+                # duplicate alerts. (The daily rotate clears state separately,
+                # so it is unaffected.) close() checkpoints then releases the
+                # handle or the consumer group membership.
                 try:
-                    self.state.save(in_file.tell())
-                    log.info("Final read offset persisted at shutdown: %d",
-                             in_file.tell())
+                    source.close()
+                    log.info("Source closed and progress persisted: %s",
+                             source.describe())
                 except Exception as e:
-                    log.warning("Could not persist final read offset: %s", e)
+                    log.warning("Could not persist final source progress: %s", e)
 
         except Exception:
             raise
