@@ -245,6 +245,19 @@ collect_site() {
         "/home/vgipl/CyberSentinel-Event-Correlation-Kafka/data/enriched" v_abs
     ask SIEM_CLIENT_KEYS  "SIEM agent registry" \
         "/var/ossec/etc/client.keys" v_abs
+    # On a containerised SIEM the registry is not on the host filesystem at
+    # all, so a plain `cat` finds nothing and every endpoint then displays as
+    # a bare IP with no indication why. Offer the docker form, which is what
+    # the first co-located deployment actually needed.
+    AGENT_LOCAL_CMD="cat ${SIEM_CLIENT_KEYS}"
+    if command -v docker >/dev/null 2>&1; then
+      _mgr="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -iE 'manager' | head -1)"
+      if [[ -n "$_mgr" ]] && ! [[ -r "$SIEM_CLIENT_KEYS" ]]; then
+        note "registry not readable on the host; found container ${B}${_mgr}${R}"
+        AGENT_LOCAL_CMD="docker exec ${_mgr} cat ${SIEM_CLIENT_KEYS}"
+      fi
+    fi
+    ask AGENT_LOCAL_CMD "Command to read the agent registry" "$AGENT_LOCAL_CMD"
   else
     CO_LOCATED=0
     ask SIEM_HOST   "CyberSentinel SIEM manager host or IP" "" v_host
@@ -473,6 +486,32 @@ EOF
     # under /root/NEW_DRIVE/aditya_ueba and silently find nothing: no history in
     # the timeline windows, and the stale-feed banner never firing. Write them
     # explicitly. Inserted as text so the file keeps its comments.
+    # Co-located: agent discovery must read the registry locally. SSHing to
+    # localhost fails wherever root@localhost is not permitted, and the only
+    # symptom is endpoints rendering as bare IPs because agents.json is never
+    # written — nothing in the UI explains it.
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+      python3 - "$BASE_DIR/ueba_config.yaml" "$AGENT_LOCAL_CMD" >>"$LOGFILE" 2>&1 <<'APYEOF'
+import re, sys
+cfg, cmd = sys.argv[1], sys.argv[2]
+text = open(cfg, encoding="utf-8").read()
+if "agent_sync:" in text:
+    text = re.sub(r'(?m)^(\s*)(enabled:\s*true\s*)$',
+                  lambda m: m.group(0), text, count=0)
+    # Insert mode + local_command directly under the agent_sync: key.
+    text = re.sub(
+        r'(?m)^(\s*)agent_sync:\s*$',
+        lambda m: '%sagent_sync:\n%s  mode:               "local"\n%s  local_command:      "%s"'
+                  % (m.group(1), m.group(1), m.group(1), cmd),
+        text, count=1)
+    open(cfg, "w", encoding="utf-8").write(text)
+    print("agent_sync set to local mode: %s" % cmd)
+else:
+    print("no agent_sync block in config; code defaults apply")
+APYEOF
+      ok "agent discovery will read the registry locally"
+    fi
+
     # Co-located: switch the engine off file-tailing and onto the topic.
     if [[ "${CO_LOCATED:-0}" == "1" ]]; then
       python3 - "$BASE_DIR/ueba_config.yaml" \

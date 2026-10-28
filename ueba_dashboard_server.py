@@ -209,7 +209,7 @@ _DEFAULTS = {
         "max_tokens":  1000,
         "timeout_secs": 20,
     },
-    # Agent auto-discovery — periodically reads the Wazuh manager's
+    # Agent auto-discovery — periodically reads the SIEM manager's
     # `client.keys` to keep agents.json in sync with the SOC inventory.
     #
     # Reading the bind-mounted client.keys requires NO permission changes
@@ -218,13 +218,28 @@ _DEFAULTS = {
     # (richer: includes connection status), set remote_command to
     # `docker exec cybersentinel-manager /var/ossec/bin/agent_control -l`
     # and grant docker access. The poller auto-detects the format.
+    # `mode` picks how the registry is reached:
+    #   ssh   — UEBA runs on its own host and reaches the SIEM over SSH.
+    #   local — UEBA runs ON the SIEM host, so the registry is reachable
+    #           without a network hop. SSHing to localhost was not merely
+    #           wasteful, it failed outright wherever root@localhost is not
+    #           permitted, and the only symptom was endpoints displaying as
+    #           bare IPs instead of names, because agents.json never got
+    #           written. Nothing in the UI said why.
+    #
+    # In local mode `local_command` is run through a shell, which is what
+    # makes `docker exec ...` usable: on a containerised SIEM the registry is
+    # not on the host filesystem at all. Verified on the first co-located
+    # deployment — client.keys exists only inside the manager container.
     "agent_sync": {
         "enabled":            True,
+        "mode":               "ssh",
         "poll_interval_secs": 60,
         "ssh_host":           "soc@localhost",
         "ssh_port":           2222,
         "ssh_key":            "/root/.ssh/id_ueba",
         "remote_command":     "cat /var/ossec/etc/client.keys",
+        "local_command":      "cat /var/ossec/etc/client.keys",
         "ssh_timeout_secs":   20,
     },
 }
@@ -712,7 +727,7 @@ _agent_sync_lock = __import__("threading").Lock()
 
 
 def _parse_client_keys(stdout: str) -> list[dict]:
-    """Parse a Wazuh `client.keys` file into [{id, name, ip}].
+    """Parse a SIEM `client.keys` file into [{id, name, ip}].
 
     Format is one agent per line: `<id> <name> <ip|"any"> <key>`. Lines
     starting with `#` or `!` (revoked) are skipped. IDs `000` / `0` are
@@ -729,7 +744,7 @@ def _parse_client_keys(stdout: str) -> list[dict]:
         agent_id, name, ip = parts[0], parts[1], parts[2]
         if agent_id in ("000", "0"):
             continue
-        # `any` is Wazuh's placeholder when no fixed IP was configured.
+        # `any` is the SIEM's placeholder when no fixed IP was configured.
         if ip.lower() == "any":
             ip = ""
         else:
@@ -746,9 +761,10 @@ def _parse_client_keys(stdout: str) -> list[dict]:
 def _parse_agent_control_l(stdout: str) -> list[dict]:
     """Parse the output of `agent_control -l` into a list of {id, name, ip} dicts.
 
-    Wazuh's typical output format:
+    Typical output format (the banner line is ignored; the parser keys on
+    the `ID:` prefix):
 
-        Wazuh agent_control. List of available agents:
+        agent_control. List of available agents:
            ID: 000, Name: cybersentinel-manager (server), IP: 127.0.0.1, Active/Local
            ID: 001, Name: Sparta1, IP: 10.200.11.106/any, Active
            ID: 002, Name: KAFKA_ME_P, IP: 10.200.10.174, Disconnected
@@ -791,28 +807,43 @@ def _fetch_agents_from_soc() -> tuple[list[dict] | None, str]:
     On failure agents is None and error_message describes the problem.
     """
     cfg = CFG.get("agent_sync") or _DEFAULTS["agent_sync"]
-    cmd = [
-        "ssh",
-        "-p", str(cfg["ssh_port"]),
-        "-i", cfg["ssh_key"],
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={int(cfg['ssh_timeout_secs'])}",
-        cfg["ssh_host"],
-        cfg["remote_command"],
-    ]
+    timeout = int(cfg.get("ssh_timeout_secs", 20))
+    mode = str(cfg.get("mode", "ssh")).strip().lower()
+
+    if mode == "local":
+        # Through a shell on purpose: the useful command on a containerised
+        # SIEM is `docker exec <manager> cat /var/ossec/etc/client.keys`, and
+        # that needs shell word-splitting. The command comes from our own
+        # config file, not from a request, so it is operator input.
+        cmd = cfg.get("local_command") or cfg.get("remote_command")
+        shell = True
+        what = "local command"
+    else:
+        cmd = [
+            "ssh",
+            "-p", str(cfg["ssh_port"]),
+            "-i", cfg["ssh_key"],
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={timeout}",
+            cfg["ssh_host"],
+            cfg["remote_command"],
+        ]
+        shell = False
+        what = "remote command"
+
     try:
         import subprocess
         r = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=int(cfg["ssh_timeout_secs"]) + 5,
+            cmd, capture_output=True, text=True, shell=shell,
+            timeout=timeout + 5,
         )
     except Exception as e:
-        return None, f"ssh failed: {e}"
+        return None, f"{what} failed: {e}"
     if r.returncode != 0:
         # Surface stderr (first line) so the operator can fix permissions.
         err = (r.stderr or "").strip().splitlines()[:1]
-        return None, f"remote command rc={r.returncode}: {' / '.join(err)}"
+        return None, f"{what} rc={r.returncode}: {' / '.join(err)}"
     # Auto-detect the output format. client.keys lines start with the
     # agent id followed by a space; agent_control lines start with "ID:".
     stdout = r.stdout
@@ -828,7 +859,7 @@ def _merge_agents(fresh: list[dict], existing_path: Path) -> list[dict]:
     """Merge `fresh` (from agent_control) with existing agents.json entries.
 
     Preserves fields the CLI doesn't return — most importantly `os` — by
-    keying on agent id. New agents picked up from Wazuh just won't have
+    keying on agent id. New agents picked up from the SIEM just won't have
     those fields until the operator fills them in (or we extend the
     poller to call `agent_control -i <id>` for OS info).
     """
