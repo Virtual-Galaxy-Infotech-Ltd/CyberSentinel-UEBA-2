@@ -130,6 +130,32 @@ isolation_forest:
   random_state: 42
   training_sample_size: 500000
 
+  # ── Score mapping — FIT THIS PER ESTATE ────────────────────────────────────
+  # The raw sklearn score becomes a 0-1 anomaly score. Without score_range the
+  # mapping is the historical clip(-raw / 0.5, 0, 1), which assumes raw scores
+  # span 0.0 (normal) to -0.5 (anomalous).
+  #
+  # THAT ASSUMPTION DOES NOT TRANSFER BETWEEN ESTATES. On the first co-located
+  # deployment, raw scores over 120,000 real events spanned only
+  # -0.6026..-0.3646 — entirely past the old -0.5 floor for anything that
+  # became an alert. The anomaly score therefore clipped to exactly 1.0 for
+  # 100% of alerts (27% of all traffic), so the Isolation Forest contributed a
+  # flat 1.0 to half the fused score and 54% of alerts came out
+  # "highly_anomalous". A severity column where everything is critical is
+  # noise, and that is the alert-fatigue failure mode this product exists to
+  # avoid.
+  #
+  # Fit it with:  ./venv/bin/python3 calibrate_thresholds.py --sample-dir <enriched dir>
+  # and re-fit after every retrain, because new models mean a new distribution.
+  # Left commented out here so the template does not ship one site's numbers to
+  # another: uncomment and set from the calibration output.
+  #
+  # score_range:
+  #   normal_at:    -0.3691    # p99  of local raw scores -> anomaly 0.0
+  #   anomalous_at: -0.6002    # p0.1 of local raw scores -> anomaly 1.0
+
+  # Verdict tiers for the IF sub-score, as raw-score cutoffs. These are also
+  # estate-specific; calibrate_thresholds.py prints fitted values.
   thresholds:
     suspicious:       -0.50
     anomalous:        -0.55
