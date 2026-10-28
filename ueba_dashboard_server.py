@@ -300,6 +300,14 @@ def load_dashboard_config(config_path: str | None) -> dict:
         shared = (raw.get("paths") or {}).get("watchlist_file")
         if shared:
             cfg["watchlist_file"] = shared
+    # Same for the nickname store (SN 58). Without this an operator who sets
+    # paths.nicknames_file — the obvious place, next to watchlist_file — gets a
+    # dashboard silently writing names to the built-in default path instead,
+    # which is exactly what happened the first time this was deployed.
+    if "nicknames_file" not in dash and isinstance(raw, dict):
+        shared = (raw.get("paths") or {}).get("nicknames_file")
+        if shared:
+            cfg["nicknames_file"] = shared
     return cfg
 
 
@@ -676,7 +684,7 @@ _ARCHIVE_RE = re.compile(r"ueba_alerts_(\d{4}-\d{2}-\d{2})\.jsonl\.zip$")
 # RFP SN 54 (display threat BY MODEL) and SN 47 (account used for the first
 # time). Both were present on the engine's alert and dropped here, so the feed
 # table could never show or filter on them however the UI asked.
-_SLIM_VER = 2
+_SLIM_VER = 3
 
 
 def _slim(a: dict) -> dict:
@@ -719,6 +727,9 @@ def _slim(a: dict) -> dict:
         # One date, not the whole evidence blob: when this entity was first
         # ever observed, which is what makes "first use" and "dormant return"
         # visible in the table instead of only in the expanded evidence pane.
+        # One integer: what this event moved. Needed by the feed table for
+        # SN 12 and dropped with context.raw_event otherwise.
+        "__bytes": _xfer_total(a),
         "evidence": {"history": {
             "first_seen": ((ev.get("history") or {}).get("first_seen")),
         }},
@@ -1855,6 +1866,19 @@ def _build_stats(alerts):
     }
 
 
+def _xfer_total(a: dict) -> int:
+    """Bytes this event moved, 0 when it reported none. Reads the slim record's
+    own field first so it works after projection, then the raw event."""
+    v = a.get("__bytes")
+    if v is not None:
+        return int(v or 0)
+    try:
+        from ueba_preprocessor import transfer_bytes
+        return int(transfer_bytes(a).get("total", 0))
+    except Exception:
+        return 0
+
+
 def _ae(ueba: dict) -> dict:
     """The autoencoder sub-block of an alert's raw scores, or {}."""
     return ((ueba or {}).get("raw_scores") or {}).get("autoencoder") or {}
@@ -1913,6 +1937,9 @@ def _alert_to_feed_item(a: dict, include_evidence: bool = True) -> dict:
         # RFP SN 47 — when this entity was first ever seen, so the table can
         # show and filter first-use and dormant-return accounts.
         "first_seen":   ((a.get("evidence") or {}).get("history") or {}).get("first_seen"),
+        # RFP SN 12 — the table has to be able to report on data volume, so the
+        # figure has to reach it.
+        "bytes":        _xfer_total(a),
         "model_score":  ueba.get("model_score"),
     }
     if include_evidence:

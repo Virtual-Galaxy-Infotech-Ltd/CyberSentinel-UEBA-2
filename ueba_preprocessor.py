@@ -69,6 +69,11 @@ log = logging.getLogger("ueba.preprocessor")
 # inside them (see UserProfileStore.update).
 _log = log
 
+# Transfer-volume writes are committed in batches: roughly ten events a second
+# report bytes, so a commit per row would fsync constantly for a statistic that
+# tolerates losing a few seconds of history on a crash.
+_XFER_COMMIT_EVERY = 50
+
 
 # ── Config Loader ─────────────────────────────────────────────────────────────
 
@@ -395,6 +400,51 @@ def apply_identity_config(config: dict) -> bool:
                  _IDENTITY_CASEFOLD, _IDENTITY_STRIP_DOMAIN,
                  len(_IDENTITY_ALIASES), len(_IDENTITY_SHARED))
     return _IDENTITY_CANONICALIZE or _ENTITY_TYPED
+
+
+# ── Data transfer volume (RFP SN 12 / SN 46) ─────────────────────────────────
+#
+# The Fortigate events already carry transfer volumes and nothing read them:
+# measured on 40,000 live enriched events, context.raw_event.data.sentbyte is
+# present on 8,031 and non-zero on 8,029. The RFP plan recorded this as blocked
+# on "byte counts added to the events the SIEM forwards" — they are already
+# being forwarded.
+#
+# Deliberately NOT added to the 35-feature vector. Every autoencoder and the
+# Isolation Forest were fitted on that exact shape, so a 36th feature would
+# invalidate the whole model store. Volume is tracked beside the vector in the
+# profile instead, and read at alert time.
+
+_BYTE_FIELDS = (
+    ("data.sentbyte",                      "sent"),
+    ("data.rcvdbyte",                      "received"),
+    ("context.raw_event.data.sentbyte",    "sent"),
+    ("context.raw_event.data.rcvdbyte",    "received"),
+)
+
+
+def transfer_bytes(log: dict) -> dict:
+    """{'sent': int, 'received': int, 'total': int} for one event.
+
+    Zeros where the event carries no volume, which is most non-firewall
+    traffic — the caller must treat 0 as "not reported" rather than "nothing
+    transferred", or every Windows logon looks like a quiet link.
+    """
+    out = {"sent": 0, "received": 0}
+    for path, slot in _BYTE_FIELDS:
+        if out[slot]:
+            continue
+        v = get_nested(log, path)
+        if v in (None, ""):
+            continue
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[slot] = n
+    out["total"] = out["sent"] + out["received"]
+    return out
 
 
 def resolve_entity(log: dict) -> str:
@@ -1042,6 +1092,23 @@ class UserProfileStore:
             self.conn.commit()
             log.info("Profile store migrated: added decayed-weight column")
 
+        # Transfer-volume baseline (SN 12 / SN 46).
+        #
+        # Added ONLY here, never in CREATE TABLE, and only after the weight
+        # column above. This method reads the users row positionally
+        # (existing[8] is last_seen, existing[9] is weight), so a column added
+        # to CREATE TABLE lands at a different index on a fresh database than
+        # on a migrated one and every positional read silently returns the
+        # wrong field. Appending through migration in a fixed order keeps the
+        # layout identical everywhere.
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(users)")}
+        for col in ("bytes_events", "bytes_total", "bytes_max"):
+            if col not in cols:
+                self.conn.execute(
+                    "ALTER TABLE users ADD COLUMN %s INTEGER DEFAULT 0" % col)
+                self.conn.commit()
+                log.info("Profile store migrated: added %s", col)
+
     def _seed_weight(self, first_seen, last_seen, total_events):
         """Effective weight to credit an entity that has no decayed weight yet.
 
@@ -1268,6 +1335,15 @@ class UserProfileStore:
                 n + 1, now, user,
             ))
 
+        if xfer > 0:
+            self.conn.execute(
+                """UPDATE users
+                      SET bytes_events = COALESCE(bytes_events, 0) + 1,
+                          bytes_total  = COALESCE(bytes_total, 0) + ?,
+                          bytes_max    = MAX(COALESCE(bytes_max, 0), ?)
+                    WHERE username = ?""",
+                (xfer, xfer, user))
+
         self.conn.commit()
 
     def get_baseline_deviation(self, user: str, feature_vec: np.ndarray) -> float:
@@ -1298,23 +1374,77 @@ class UserProfileStore:
         deviation = (0.4 * hour_dev) + (0.4 * risk_dev) + (0.2 * ev_dev)
         return float(min(deviation, 1.0))
 
+    def record_transfer(self, user: str, nbytes: int) -> None:
+        """Fold one event's transfer volume into an entity's baseline.
+
+        Separate from update() because update() is called ONLY for events that
+        already alerted — see the call site in ueba_engine. A baseline for
+        "normal transfer volume" built from anomalies alone would define normal
+        as the set of things already judged abnormal, and with an alert rate of
+        0.02% it would never reach min_events anyway.
+
+        Cheap on purpose: one UPSERT, only for events that actually report
+        bytes (about a fifth of traffic), so the hot loop takes a write it
+        would not otherwise take roughly ten times a second.
+        """
+        if not user or user == "unknown" or not nbytes or nbytes <= 0:
+            return
+        try:
+            self._xfer_pending = getattr(self, "_xfer_pending", 0) + 1
+            self.conn.execute(
+                """INSERT INTO users (username, bytes_events, bytes_total, bytes_max)
+                   VALUES (?, 1, ?, ?)
+                   ON CONFLICT(username) DO UPDATE SET
+                       bytes_events = COALESCE(bytes_events, 0) + 1,
+                       bytes_total  = COALESCE(bytes_total, 0) + excluded.bytes_total,
+                       bytes_max    = MAX(COALESCE(bytes_max, 0), excluded.bytes_max)""",
+                (user, int(nbytes), int(nbytes)))
+            # Commit on a cadence, not per row. update() commits too, but it
+            # runs only for events that alerted (0.02% of traffic), so without
+            # this the writes sit in an open transaction indefinitely —
+            # invisible to every other connection and lost on a hard stop.
+            if self._xfer_pending >= _XFER_COMMIT_EVERY:
+                self.conn.commit()
+                self._xfer_pending = 0
+        except Exception as e:
+            _log.debug("transfer volume not recorded for %s: %s", user, e)
+
     def get_user_profile(self, user: str) -> dict | None:
         """Return full profile for a user, or None if not found."""
-        row = self.conn.execute(
-            "SELECT * FROM users WHERE username = ?", (user,)
-        ).fetchone()
+        cur = self.conn.execute(
+            "SELECT * FROM users WHERE username = ?", (user,))
+        row = cur.fetchone()
         if row is None:
             return None
+        # By NAME, not position. Columns are appended by _migrate(), so a
+        # positional read silently returns the wrong field the moment the
+        # migration order differs between two deployments — and it returns a
+        # plausible number rather than an error, which is the worst kind.
+        r = dict(zip([d[0] for d in cur.description], row))
+
+        def _int(v):
+            try:
+                return int(v or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        events = _int(r.get("bytes_events"))
+        total = _int(r.get("bytes_total"))
         return {
-            "username":       row[0],
-            "avg_hour":       row[1],
-            "avg_risk":       row[2],
-            "avg_events_1h":  row[3],
-            "seen_countries": json.loads(row[4]),
-            "seen_agents":    json.loads(row[5]),
-            "total_events":   row[6],
-            "first_seen":     row[7],
-            "last_seen":      row[8],
+            "username":       r.get("username"),
+            "avg_hour":       r.get("avg_hour"),
+            "avg_risk":       r.get("avg_risk"),
+            "avg_events_1h":  r.get("avg_events_1h"),
+            "seen_countries": json.loads(r.get("seen_countries") or "[]"),
+            "seen_agents":    json.loads(r.get("seen_agents") or "[]"),
+            "total_events":   r.get("total_events"),
+            "first_seen":     r.get("first_seen"),
+            "last_seen":      r.get("last_seen"),
+            # Transfer-volume baseline (SN 12 / SN 46).
+            "bytes_events":   events,
+            "bytes_total":    total,
+            "bytes_max":      _int(r.get("bytes_max")),
+            "bytes_avg":      (total / events) if events else 0.0,
         }
 
     def get_all_users(self) -> list[str]:

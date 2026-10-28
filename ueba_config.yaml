@@ -570,6 +570,27 @@ noise_suppression:
     - "Centos7Trial"
 
 
+# ── Detection tuning (RFP SN 12 / 46 / 47) ───────────────────────────────────
+detection:
+  # SN 47 — an account seen for the first time, and one returning after a gap.
+  # Annotates events that ALREADY cleared the alert threshold; it does not make
+  # a new entity anomalous on its own, or every new laptop would alert.
+  account_age:
+    new_account_hours: 24
+    dormant_days:      30
+
+  # SN 12 / 46 — data moved against what this entity normally moves.
+  #
+  # BOTH conditions must hold. The ratio alone fires on an entity whose average
+  # is a few hundred bytes, where ten times normal is still nothing. The floor
+  # alone fires on every bulk transfer by a host that does bulk transfers all
+  # day. min_events stops the first transfer an entity ever makes reading as
+  # infinitely above its empty average.
+  data_volume:
+    ratio:      10.0
+    min_bytes:  10485760      # 10 MB
+    min_events: 20
+
 # ── Identity Resolution ───────────────────────────────────────────────────────
 identity_resolution:
   enabled: true

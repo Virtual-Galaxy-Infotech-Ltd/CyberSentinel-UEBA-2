@@ -729,6 +729,20 @@ class UEBAEngine:
         fusion = fuse_scores(if_result, ae_result, self.config,
                              watch_boost=(watch or {}).get("boost", 0.0))
 
+        # Transfer volume is recorded for EVERY event, before the alert gate
+        # below, because the baseline it feeds (SN 12 / SN 46) describes what
+        # normal traffic looks like. update() further down runs only for events
+        # that already alerted, so a volume baseline built there would be drawn
+        # entirely from anomalies — and at a 0.02% alert rate would never reach
+        # min_events in the first place.
+        try:
+            from ueba_preprocessor import transfer_bytes
+            moved = transfer_bytes(log_entry).get("total", 0)
+            if moved > 0:
+                self.profile_store.record_transfer(user, moved)
+        except Exception:
+            pass
+
         # Not anomalous — discard silently
         if not fusion["is_alert"]:
             return None
@@ -786,6 +800,12 @@ class UEBAEngine:
         # right would fire on every new laptop and every service account the
         # estate adds, which is noise, not detection.
         for reason in self._account_age_reasons(profile, log_entry):
+            if reason not in anomaly_reasons:
+                anomaly_reasons.append(reason)
+
+        # RFP SN 12 / SN 46 — data moved on this connection against what this
+        # entity normally moves.
+        for reason in self._data_volume_reasons(profile, log_entry):
             if reason not in anomaly_reasons:
                 anomaly_reasons.append(reason)
 
@@ -1108,6 +1128,45 @@ class UEBAEngine:
             if idle_days >= dormant_days:
                 out.append("dormant_account_reused")
         return out
+
+    def _data_volume_reasons(self, profile: dict | None, log_entry: dict) -> list:
+        """SN 12 / SN 46 — unusual data transfer volume for this entity.
+
+        The Fortigate events carry sentbyte / rcvdbyte and nothing read them;
+        the profile now accumulates a per-entity mean. An event is called out
+        when it moves at least `min_bytes` AND at least `ratio` times what this
+        entity usually moves.
+
+        Both conditions matter. The ratio alone fires on an entity whose
+        average is a few hundred bytes, where ten times normal is still
+        nothing; the floor alone fires on every bulk transfer by a host that
+        does bulk transfers all day.
+
+        Needs `min_events` of history first, or the first transfer an entity
+        ever makes is infinitely above its (empty) average.
+        """
+        if not profile:
+            return []
+        cfg = (self.config.get("detection") or {}).get("data_volume") or {}
+        ratio_thresh = float(cfg.get("ratio", 10.0))
+        min_bytes = int(cfg.get("min_bytes", 10 * 1024 * 1024))
+        min_events = int(cfg.get("min_events", 20))
+
+        try:
+            from ueba_preprocessor import transfer_bytes
+            moved = transfer_bytes(log_entry).get("total", 0)
+        except Exception:
+            return []
+        if moved < min_bytes:
+            return []
+
+        seen = int(profile.get("bytes_events") or 0)
+        avg = float(profile.get("bytes_avg") or 0.0)
+        if seen < min_events or avg <= 0:
+            return []
+        if moved >= avg * ratio_thresh:
+            return ["unusual_data_volume"]
+        return []
 
     def _patch_campaign_ids(self, campaign_map: dict):
         """
