@@ -263,29 +263,54 @@ def build_anomaly_reasons(log_entry: dict, if_result: dict,
                 return default
         return val
 
-    # Enrichment-based reasons
-    if get("enrich.anomalies.is_brute_force"):
-        reasons.append("brute_force_detected")
-    if get("enrich.anomalies.is_impossible_travel"):
-        reasons.append("impossible_travel")
-    if get("enrich.anomalies.is_tor"):
-        reasons.append("tor_exit_node")
-    if get("enrich.anomalies.is_malicious_ip"):
-        reasons.append("malicious_ip_reputation")
-    if get("enrich.anomalies.is_port_scan"):
-        reasons.append("port_scan_detected")
-    if get("enrich.anomalies.is_lateral_movement"):
-        reasons.append("lateral_movement")
-    if get("enrich.anomalies.is_data_exfiltration"):
-        reasons.append("data_exfiltration")
-    if get("enrich.anomalies.is_after_hours"):
-        reasons.append("after_hours_activity")
-    if get("enrich.anomalies.is_high_frequency"):
-        reasons.append("high_frequency_events")
-    if get("enrich.geo.cross_continent"):
-        reasons.append("cross_continent_access")
-    if get("enrich.geo.cross_border"):
-        reasons.append("cross_border_access")
+    def any_of(*paths):
+        """True if any of these field paths is truthy.
+
+        Several paths per reason because the enrichment pipeline does not
+        always put a signal where this function originally looked, and a
+        mismatch here is invisible: the reason simply never appears, and an
+        analyst reads "statistical_anomaly" for an alert that had a perfectly
+        concrete cause.
+
+        Measured against 40,000 live enriched events on 2026-10-28, four of
+        the eleven checks below were reading paths that do not exist:
+
+          is_tor               -> the field is is_tor_traffic
+          is_data_exfiltration -> the field is is_data_exfil
+          geo.cross_continent  -> lives under anomalies (40,000 events
+                                  carry it there; only 6 under geo)
+          geo.cross_border     -> same
+
+        So tor, exfiltration and both cross-boundary reasons could never fire,
+        however obvious the event. The fallbacks keep the old paths accepted
+        so a pipeline that emits either shape still works.
+        """
+        for path in paths:
+            if get(path):
+                return True
+        return False
+
+    # Enrichment-based reasons. (paths..., reason) — first truthy path wins.
+    ENRICHMENT_REASONS = (
+        (("enrich.anomalies.is_brute_force",), "brute_force_detected"),
+        (("enrich.anomalies.is_impossible_travel",), "impossible_travel"),
+        (("enrich.anomalies.is_tor_traffic",
+          "enrich.anomalies.is_tor"), "tor_exit_node"),
+        (("enrich.anomalies.is_malicious_ip",), "malicious_ip_reputation"),
+        (("enrich.anomalies.is_port_scan",), "port_scan_detected"),
+        (("enrich.anomalies.is_lateral_movement",), "lateral_movement"),
+        (("enrich.anomalies.is_data_exfil",
+          "enrich.anomalies.is_data_exfiltration"), "data_exfiltration"),
+        (("enrich.anomalies.is_after_hours",), "after_hours_activity"),
+        (("enrich.anomalies.is_high_frequency",), "high_frequency_events"),
+        (("enrich.anomalies.cross_continent",
+          "enrich.geo.cross_continent"), "cross_continent_access"),
+        (("enrich.anomalies.cross_border",
+          "enrich.geo.cross_border"), "cross_border_access"),
+    )
+    for paths, reason in ENRICHMENT_REASONS:
+        if any_of(*paths):
+            reasons.append(reason)
 
     # Model-based reasons
     if if_result["verdict"] in ("anomalous", "highly_anomalous"):
