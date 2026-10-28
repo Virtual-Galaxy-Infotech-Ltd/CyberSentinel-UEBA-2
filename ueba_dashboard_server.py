@@ -3952,8 +3952,8 @@ def health():
     feed_mtime_iso = None
     feed_age_secs  = None
     try:
-        ep = Path(str(CFG.get("enriched_file") or "/root/NEW_DRIVE/aditya_ueba/enriched.jsonl"))
-        if ep.exists():
+        ep = _resolve_enriched_path(CFG.get("enriched_file"))
+        if ep is not None and ep.exists():
             feed_dt = datetime.fromtimestamp(ep.stat().st_mtime, timezone.utc)
             feed_mtime_iso = feed_dt.isoformat()
             feed_age_secs  = int((now - feed_dt).total_seconds())
@@ -4152,6 +4152,18 @@ _geo_cache_lock = __import__("threading").Lock()
 _dc_loc: dict | None = None
 
 
+# The install directory is wherever this file lives, so a databases/ beside it
+# is found whatever BASE_DIR the installer chose. Without this, auto-detect
+# only knew the lab's absolute path and the customer's own
+# <install>/databases/ — which install_ueba.sh creates — was never looked at,
+# so the threat map stayed empty on every install that did not happen to put
+# UEBA where the lab had it. The explicit geoip_city_db / geoip_asn_db config
+# keys still take precedence for sites that keep the DBs elsewhere.
+_INSTALL_DB_DIR = Path(__file__).resolve().parent / "databases"
+_GEOIP_CITY_CANDIDATES.insert(0, str(_INSTALL_DB_DIR / "GeoLite2-City.mmdb"))
+_GEOIP_ASN_CANDIDATES.insert(0, str(_INSTALL_DB_DIR / "GeoLite2-ASN.mmdb"))
+
+
 def _first_existing(explicit: str, candidates: list) -> str | None:
     if explicit and Path(explicit).is_file():
         return explicit
@@ -4248,6 +4260,58 @@ def _resolve_dc() -> dict:
     return _dc_loc
 
 
+def _resolve_enriched_path(spec: str):
+    """Resolve `dashboard.enriched_file` to a readable JSONL file, or None.
+
+    Accepts three forms, because the deployment topology decides which makes
+    sense:
+
+      * a literal file   — UEBA on its own host, tailing the one enriched.jsonl
+                           the sync bridge appends to.
+      * a directory      — UEBA on the SIEM host. There is no single
+                           enriched.jsonl in that mode: the pipeline's own sink
+                           writes rotating enriched_<timestamp>.jsonl files.
+      * a glob           — same, stated explicitly.
+
+    For the latter two the NEWEST UNCOMPRESSED file wins. Uncompressed matters:
+    the sink gzips a file when it rotates it, so the plain .jsonl is the one
+    still being appended to, and it is the only one whose tail is current. The
+    callers read raw bytes and parse lines, so handing them a .gz would yield
+    nothing but decode errors.
+
+    This is what makes the threat map work without a second copy of the data or
+    an extra process — the events are already on this disk, written by the
+    pipeline. Before this, `enriched_file` pointed at a path that does not
+    exist under Kafka ingestion, which silently cost two things: the geofeed
+    returned zero arcs, and the feed-liveness check never saw an mtime, so the
+    stale-feed banner was stuck on while ingestion was perfectly healthy.
+    """
+    import glob as _glob
+
+    spec = str(spec or "").strip()
+    if not spec:
+        return None
+
+    pth = Path(spec)
+    if pth.is_file():
+        return pth
+
+    if pth.is_dir():
+        pattern = str(pth / "*.jsonl")
+    elif any(ch in spec for ch in "*?["):
+        pattern = spec
+    else:
+        return None
+
+    cands = [c for c in _glob.glob(pattern) if not c.endswith(".gz")]
+    if not cands:
+        return None
+    try:
+        return Path(max(cands, key=lambda c: os.path.getmtime(c)))
+    except OSError:
+        return None
+
+
 def _is_firewall_event(e: dict) -> bool:
     h = e.get("host") or {}
     if h.get("type") == "firewall":
@@ -4296,7 +4360,7 @@ def _tail_firewall_geo(window_bytes: int, max_arcs: int) -> dict:
     _open_geo_readers()
     dc = _resolve_dc()
     geo_ok = _geo_city_reader is not None
-    path = Path(str(CFG.get("enriched_file") or "/root/NEW_DRIVE/aditya_ueba/enriched.jsonl"))
+    path = _resolve_enriched_path(CFG.get("enriched_file"))
     arcs: list = []
     by_country: dict = {}
     by_sig: dict = {}
@@ -4304,7 +4368,7 @@ def _tail_firewall_geo(window_bytes: int, max_arcs: int) -> dict:
                          "outgoing": 0, "external_conn": 0}
     seen_ips: set = set()
     scanned = 0
-    if geo_ok and path.is_file():
+    if geo_ok and path is not None and path.is_file():
         try:
             size = path.stat().st_size
             with open(path, "rb") as f:
