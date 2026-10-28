@@ -138,6 +138,8 @@ _DEFAULTS = {
     # Analyst watch lists (RFP 1). Shared with the engine — normally inherited
     # from the `paths:` block, see load_dashboard_config().
     "watchlist_file":  "/root/NEW_DRIVE/aditya_ueba/watchlist.json",
+    # RFP SN 58 — operator-assigned device/user nicknames (see ueba_nicknames).
+    "nicknames_file":  "/root/NEW_DRIVE/aditya_ueba/nicknames.json",
     # Device registry and proactive alerting (RFP 10, 15).
     "notify": {
         "enabled":      True,
@@ -609,6 +611,7 @@ FP_FILE: Path         = Path(_DEFAULTS["false_positives_file"])
 FP_PATTERNS_FILE: Path = Path(_DEFAULTS["fp_patterns_file"])
 AUDIT_FILE: Path       = Path(_DEFAULTS["audit_file"])
 WATCHLIST_FILE: Path   = Path(_DEFAULTS["watchlist_file"])
+NICKNAMES_FILE: Path   = Path(_DEFAULTS["nicknames_file"])
 
 # ── Alert cache — avoids reading the full file on every API request ──
 # The live alerts file is append-only and grows large (hundreds of MB). The
@@ -2341,10 +2344,27 @@ def _build_agents(alerts):
 # Per category, so one enormous estate cannot produce a multi-megabyte payload.
 _SUGGEST_PER_CATEGORY = 400
 
+def _nickname_for(etype: str, value):
+    """Operator-set label for one entity, or None. Never raises: a missing or
+    unreadable nickname file must not take the search index down."""
+    if not value:
+        return None
+    try:
+        import ueba_nicknames
+        return ueba_nicknames.lookup(NICKNAMES_FILE, etype, str(value))
+    except Exception:
+        return None
+
+
 _SUGGEST_FIELDS = (
     ("user",      "User"),
     ("host",      "Host"),
     ("ip",        "Host IP"),
+    # RFP SN 58 — find a device by the name a human gave it. Unlike every
+    # other field here this one is not derived from the events: that is the
+    # point, since an analyst looking for "the ATM server" should find it
+    # although no event contains that phrase.
+    ("nickname",  "Nickname"),
     ("signature", "Signature"),
     ("tactic",    "MITRE tactic"),
     ("campaign",  "Campaign"),
@@ -2368,6 +2388,14 @@ def _build_suggest(alerts):
         sig = sec.get("signature")
         if sig:
             counts["signature"][str(sig)[:90]] += 1
+        # Count a nickname against every alert for the entity it names, so the
+        # suggestion carries a meaningful volume rather than always reading 1.
+        for etype, val in (("host", host.get("name")), ("ip", host.get("ip")),
+                           ("user", u)):
+            nick = _nickname_for(etype, val)
+            if nick:
+                counts["nickname"][nick] += 1
+                break
         if ueba.get("campaign_id"):
             counts["campaign"][str(ueba["campaign_id"])] += 1
         for r in (ueba.get("anomaly_reasons") or []):
@@ -2988,6 +3016,54 @@ def _capability_map():
     except Exception:
         user = None
     return {c: ueba_auth.role_at_least(user, m) for c, m in CAPABILITIES.items()}
+
+
+@app.route("/api/nicknames")
+@_require_cap("export")
+def api_nicknames():
+    """Operator-assigned names for devices and users (RFP SN 58)."""
+    try:
+        import ueba_nicknames
+        return jsonify({"ok": True, "types": list(ueba_nicknames.TYPES),
+                        "max_len": ueba_nicknames.MAX_LEN,
+                        "entries": ueba_nicknames.entries(NICKNAMES_FILE)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "entries": []}), 500
+
+
+@app.route("/api/nicknames", methods=["POST"])
+@_require_cap("watchlist.edit")
+def api_nicknames_set():
+    """Name an entity, or rename it. Gated on watchlist.edit: naming a device
+    is the same class of curation as watch-listing one, so it needs an analyst
+    rather than a viewer, and inventing a third capability for it would be
+    noise in the permission table."""
+    import ueba_nicknames
+    b = request.get_json(silent=True) or {}
+    try:
+        who = (ueba_auth.current_user() or {}).get("username", "") \
+            if AUTH_MODULE_AVAILABLE else ""
+    except Exception:
+        who = ""
+    try:
+        e = ueba_nicknames.set_name(NICKNAMES_FILE,
+                                    b.get("type"), b.get("value"),
+                                    b.get("nickname"), note=b.get("note") or "",
+                                    added_by=who)
+    except ValueError as err:
+        return jsonify({"ok": False, "error": str(err)}), 400
+    _invalidate_result_cache()
+    return jsonify({"ok": True, "entry": e})
+
+
+@app.route("/api/nicknames/<path:eid>", methods=["DELETE"])
+@_require_cap("watchlist.edit")
+def api_nicknames_delete(eid):
+    import ueba_nicknames
+    gone = ueba_nicknames.remove(NICKNAMES_FILE, eid)
+    if gone:
+        _invalidate_result_cache()
+    return jsonify({"ok": gone}), (200 if gone else 404)
 
 
 @app.route("/api/auth/capabilities")
@@ -4736,7 +4812,7 @@ def _start_report_scheduler() -> None:
 
 def main() -> None:
     global CFG, ALERTS_FILE, AGENTS_REGISTRY, FP_FILE, FP_PATTERNS_FILE, AUDIT_FILE
-    global WATCHLIST_FILE
+    global WATCHLIST_FILE, NICKNAMES_FILE
     args = _parse_args()
     CFG = load_dashboard_config(args.config)
 
@@ -4772,6 +4848,7 @@ def main() -> None:
     FP_PATTERNS_FILE  = Path(CFG.get("fp_patterns_file") or _DEFAULTS["fp_patterns_file"])
     AUDIT_FILE        = Path(CFG.get("audit_file") or _DEFAULTS["audit_file"])
     WATCHLIST_FILE    = Path(CFG.get("watchlist_file") or _DEFAULTS["watchlist_file"])
+    NICKNAMES_FILE = Path(CFG.get("nicknames_file") or _DEFAULTS["nicknames_file"])
     load_fps()
     load_fp_patterns()
 
