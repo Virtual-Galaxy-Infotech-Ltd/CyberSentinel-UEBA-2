@@ -760,13 +760,6 @@ class UEBAEngine:
         # Build anomaly reason list
         anomaly_reasons = build_anomaly_reasons(log_entry, if_result, ae_result)
 
-        # Build ueba block
-        ueba_block = build_ueba_block(
-            if_result, ae_result, fusion,
-            campaign_id, similar_events, anomaly_reasons,
-            self.config,
-        )
-
         # Track per-user alert count today for evidence. Skip unattributed
         # events (user None / "unknown") so they don't all pile into one bucket
         # and inflate the count by orders of magnitude.
@@ -776,11 +769,32 @@ class UEBAEngine:
             self._user_alerts_today[user] = self._user_alerts_today.get(user, 0) + 1
             alerts_today_for_user = self._user_alerts_today[user]
 
-        # Fetch user profile for evidence baseline comparison
+        # Fetch user profile for evidence baseline comparison. Moved ahead of
+        # the ueba block because the account-age reasons below need it.
         try:
             profile = self.profile_store.get_user_profile(user)
         except Exception:
             profile = None
+
+        # RFP SN 47 — an account seen for the first time, and an account that
+        # went quiet and came back. Both are in the profile already (first_seen,
+        # last_seen, total_events); nothing read them, so neither could ever
+        # appear as a reason however obviously it applied.
+        #
+        # Deliberately only annotates an event that ALREADY cleared the alert
+        # threshold. Scoring every brand-new entity as anomalous in its own
+        # right would fire on every new laptop and every service account the
+        # estate adds, which is noise, not detection.
+        for reason in self._account_age_reasons(profile, log_entry):
+            if reason not in anomaly_reasons:
+                anomaly_reasons.append(reason)
+
+        # Build ueba block
+        ueba_block = build_ueba_block(
+            if_result, ae_result, fusion,
+            campaign_id, similar_events, anomaly_reasons,
+            self.config,
+        )
 
         # Build evidence block for SOC analysts
         evidence_block = build_evidence_block(
@@ -1052,6 +1066,48 @@ class UEBAEngine:
         self.profile_store.close()
 
         log.info("UEBA engine stopped.")
+
+    def _account_age_reasons(self, profile: dict | None, log_entry: dict) -> list:
+        """SN 47: first use of an account, and reuse of a dormant one.
+
+        `new_account_hours` — how long an entity counts as newly seen.
+        `dormant_days`      — a gap after which a return is worth saying aloud.
+
+        A profile is written on the entity's FIRST event, so at that moment
+        first_seen == last_seen and total_events is 1. Comparing first_seen to
+        now (rather than trusting a row to be absent) is what makes this work
+        on the very first event rather than only on the second.
+        """
+        if not profile:
+            return []
+        cfg = (self.config.get("detection") or {}).get("account_age") or {}
+        new_hours = float(cfg.get("new_account_hours", 24))
+        dormant_days = float(cfg.get("dormant_days", 30))
+
+        def parsed(v):
+            if not v:
+                return None
+            try:
+                d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+        first = parsed(profile.get("first_seen"))
+        last = parsed(profile.get("last_seen"))
+        if first is None:
+            return []
+        now = datetime.now(timezone.utc)
+
+        out = []
+        if (now - first).total_seconds() <= new_hours * 3600:
+            out.append("first_time_account")
+        elif last is not None:
+            # Gap between the previous sighting and this event.
+            idle_days = (now - last).total_seconds() / 86400.0
+            if idle_days >= dormant_days:
+                out.append("dormant_account_reused")
+        return out
 
     def _patch_campaign_ids(self, campaign_map: dict):
         """

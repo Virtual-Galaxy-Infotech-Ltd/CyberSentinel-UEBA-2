@@ -52,6 +52,15 @@ joblib>=1.3,<2.0
 torch>=2.2,<3.0
 faiss-cpu>=1.7,<2.0
 
+# Report rendering. ueba_report_render.py imports these INSIDE render_xlsx()
+# and render_pdf(), so their absence is silent at startup and only shows when
+# an analyst clicks Excel or PDF. They were never declared, so a clean install
+# produced a deployment whose reporting answered four RFP serials on paper and
+# failed on two formats in practice. Confirmed missing from the first
+# co-located deployment's venv on 2026-10-28.
+openpyxl>=3.1,<4.0
+reportlab>=4.0,<5.0
+
 # Kafka event source (ueba_source.py, streaming.source: kafka). Only needed
 # when UEBA reads the SIEM pipeline's `enriched` topic directly instead of
 # tailing a file — which is the right setup when UEBA runs on the SIEM host.

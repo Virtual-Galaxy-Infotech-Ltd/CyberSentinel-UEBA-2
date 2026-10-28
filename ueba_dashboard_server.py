@@ -669,7 +669,11 @@ _ARCHIVE_RE = re.compile(r"ueba_alerts_(\d{4}-\d{2}-\d{2})\.jsonl\.zip$")
 # (~3%). Evidence is no longer in RAM; /api/evidence lazy-loads it from disk by
 # event_id (rare, single-row action). Bump _SLIM_VER when the kept field set
 # changes so stale on-disk slim caches are rebuilt instead of served incomplete.
-_SLIM_VER = 1
+# v2 (2026-10-28) adds the scoring model and the entity's first-seen date, for
+# RFP SN 54 (display threat BY MODEL) and SN 47 (account used for the first
+# time). Both were present on the engine's alert and dropped here, so the feed
+# table could never show or filter on them however the UI asked.
+_SLIM_VER = 2
 
 
 def _slim(a: dict) -> dict:
@@ -699,7 +703,22 @@ def _slim(a: dict) -> dict:
             "watchlist":       ueba.get("watchlist"),
             "model_score":     ueba.get("model_score"),
             "watch_boost":     ueba.get("watch_boost"),
+            # Two strings, kept deliberately rather than the whole raw_scores
+            # block: which autoencoder scored this row, and whether it was the
+            # entity's own model or the global fallback.
+            "raw_scores": {"autoencoder": {
+                "model_used": ((ueba.get("raw_scores") or {})
+                               .get("autoencoder") or {}).get("model_used"),
+                "model_type": ((ueba.get("raw_scores") or {})
+                               .get("autoencoder") or {}).get("model_type"),
+            }},
         },
+        # One date, not the whole evidence blob: when this entity was first
+        # ever observed, which is what makes "first use" and "dormant return"
+        # visible in the table instead of only in the expanded evidence pane.
+        "evidence": {"history": {
+            "first_seen": ((ev.get("history") or {}).get("first_seen")),
+        }},
         "security": {
             "signature":    sec.get("signature"),
             "signature_id": sec.get("signature_id"),
@@ -1833,6 +1852,11 @@ def _build_stats(alerts):
     }
 
 
+def _ae(ueba: dict) -> dict:
+    """The autoencoder sub-block of an alert's raw scores, or {}."""
+    return ((ueba or {}).get("raw_scores") or {}).get("autoencoder") or {}
+
+
 def _alert_to_feed_item(a: dict, include_evidence: bool = True) -> dict:
     """Map a raw alert (as written by the engine) to the compact dict shape
     consumed by the dashboard feed table. Used by /api/feed, the SSE
@@ -1876,6 +1900,16 @@ def _alert_to_feed_item(a: dict, include_evidence: bool = True) -> dict:
         # unboosted model score travels with it so the UI can show what the
         # models thought before the watch list was applied.
         "watchlist":    ueba.get("watchlist"),
+        # RFP SN 54 — "display threat by user, device and MODEL". The
+        # autoencoder that scored the row was computed and then discarded at
+        # the API boundary: it reached the evidence pane on expand but never
+        # the table, so it could not be sorted or filtered on. Both are cheap
+        # string lookups already present on the alert.
+        "model":        _ae(ueba).get("model_used"),
+        "model_type":   _ae(ueba).get("model_type"),
+        # RFP SN 47 — when this entity was first ever seen, so the table can
+        # show and filter first-use and dormant-return accounts.
+        "first_seen":   ((a.get("evidence") or {}).get("history") or {}).get("first_seen"),
         "model_score":  ueba.get("model_score"),
     }
     if include_evidence:
