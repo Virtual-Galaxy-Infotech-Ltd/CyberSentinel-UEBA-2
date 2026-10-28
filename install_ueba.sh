@@ -213,9 +213,23 @@ collect_site() {
   #               to files. So the engine reads the topic directly: no bridge, no
   #               SSH, no second copy of the data on disk, and offsets kept
   #               durably by Kafka instead of by our own byte counter.
+  #
+  # CO_LOCATED may be preset by an answers file. It must be read BEFORE falling
+  # back to ask_yn, because ask_yn ignores the answers file by design and
+  # returns its default under --unattended — so an unattended co-located
+  # install would otherwise build a bridge install without saying so.
   blank
-  if ask_yn "Is UEBA being installed ON the SIEM host itself?" n; then
-    CO_LOCATED=1
+  if [[ -z "${CO_LOCATED:-}" ]]; then
+    if ask_yn "Is UEBA being installed ON the SIEM host itself?" n; then
+      CO_LOCATED=1
+    else
+      CO_LOCATED=0
+    fi
+  else
+    note "co-located mode: ${CO_LOCATED} ${GRY}(from answers file)${R}"
+  fi
+
+  if [[ "$CO_LOCATED" == "1" ]]; then
     SIEM_HOST="localhost"; SIEM_PORT="22"; SIEM_USER="root"
     ask KAFKA_BROKERS "Kafka brokers the SIEM pipeline uses" \
         "localhost:39092"
@@ -315,6 +329,13 @@ setup_ssh() {
   SSH_BASE=(ssh -i "$SSH_KEY" -p "$SIEM_PORT"
             -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15)
   if (( DRY_RUN )); then note "${DIM}[dry-run]${R} skipping connectivity test"; return 0; fi
+  # Co-located: there is no remote SIEM to reach — this host is it. Testing
+  # ssh root@localhost would fail on any host that (sensibly) does not permit
+  # it, and the installer would die for a connection it never needs.
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    note "co-located: no SSH to the SIEM needed (this host is the SIEM)"
+    return 0
+  fi
   if "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" true 2>>"$LOGFILE"; then
     ok "SSH to ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT} works"
   else
@@ -326,7 +347,19 @@ discover() {
   step "Discovery"
   (( DRY_RUN )) && { note "${DIM}[dry-run]${R} skipping discovery"; return 0; }
 
-  if "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "test -r '$SIEM_CLIENT_KEYS'" 2>>"$LOGFILE"; then
+  # Co-located: the registry is a local file. Reading it through ssh would be
+  # a round trip to ourselves, and fails outright where root@localhost is not
+  # permitted. The dashboard needs agents.json to turn agent ids into endpoint
+  # names — without it every endpoint displays as a bare IP.
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    if [[ -r "$SIEM_CLIENT_KEYS" ]]; then
+      mkdir -p "$BASE_DIR"
+      cp "$SIEM_CLIENT_KEYS" "$BASE_DIR/.client.keys.raw" 2>>"$LOGFILE" || true
+    else
+      warn "cannot read $SIEM_CLIENT_KEYS — endpoints will show as IPs until agents.json exists"
+      return 0
+    fi
+  elif "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "test -r '$SIEM_CLIENT_KEYS'" 2>>"$LOGFILE"; then
     # Pull the registry and render agents.json. Counting the agents is not
     # enough: the dashboard reads agents.json to turn agent ids into endpoint
     # NAMES, and without it every endpoint at the customer shows as a bare IP.
@@ -524,8 +557,18 @@ PYEOF
     warn "template ueba_config.yaml not found beside the installer"
   fi
 
+  # Every module the engine or dashboard imports has to be here. This list was
+  # previously short of six of them — ueba_watchlist, ueba_notify and the three
+  # reporting modules among them — so an install produced a deployment with no
+  # watch lists, no notifications and no reporting engine, all of which are
+  # RFP commitments. The verify step below is what stops that recurring: it
+  # checks the copied tree against what the code actually imports, rather than
+  # trusting this list to stay in sync by hand.
   for f in ueba_engine.py ueba_preprocessor.py ueba_trainer.py ueba_dashboard_server.py \
            ueba_auth.py ueba_prepare_training_data.py ueba_validate_models.py \
+           ueba_source.py ueba_identity.py ueba_watchlist.py ueba_notify.py \
+           ueba_reports.py ueba_report_render.py ueba_report_store.py \
+           ueba_housekeeping.py ueba_prune_corpus.py identity_diag.py \
            enrich_parallel.py retrain.py requirements.txt \
            ueba_sync_bridge.sh ueba_rotate.sh ueba_weekly_retrain.sh \
            ueba_bootstrap_training.sh; do
@@ -535,6 +578,28 @@ PYEOF
   [[ -d "$SELF_DIR/dashboard"   ]] && cp -r "$SELF_DIR/dashboard"   "$BASE_DIR/"
   chmod +x "$BASE_DIR"/*.sh 2>/dev/null || true
   ok "copied application files"
+  verify_modules
+}
+
+verify_modules() {
+  # Resolve every `import ueba_*` in the copied tree against the copied tree.
+  # A missing module is fatal: the engine would die on its first import, and a
+  # lazily-imported one (the dashboard imports reporting inside the request
+  # handler) would instead fail silently at the moment a customer clicks the
+  # button. Better to refuse to install than to ship that.
+  local missing=()
+  local mods
+  mods="$(grep -rhoE '\bueba_[a-z_]+' "$BASE_DIR"/*.py 2>/dev/null | sort -u)"
+  local m
+  for m in $mods; do
+    [[ -f "$SELF_DIR/$m.py" ]] || continue          # not a module of ours
+    [[ -f "$BASE_DIR/$m.py" ]] || missing+=("$m.py")
+  done
+  if (( ${#missing[@]} )); then
+    bad "these modules are imported but were not copied: ${missing[*]}"
+    die "install aborted — add them to the copy list in install_units' caller"
+  fi
+  ok "verified every imported module is present ($(echo "$mods" | wc -w | tr -d ' ') checked)"
 }
 
 setup_runtime() {
@@ -711,7 +776,11 @@ EOF
 bring_up() {
   step "Bring-up"
   if (( DRY_RUN )); then
-    note "${DIM}[dry-run]${R} would: start ueba-bridge, optionally train, start dashboard + engine"
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+      note "${DIM}[dry-run]${R} would: start dashboard + engine (no bridge; engine reads Kafka)"
+    else
+      note "${DIM}[dry-run]${R} would: start ueba-bridge, optionally train, start dashboard + engine"
+    fi
     return 0
   fi
 
@@ -774,21 +843,46 @@ summary() {
   printf '  %b│%b %b%s%b%*s %b│%b\n' "$GRN" "$R" "$B$GRN" "$label" "$R" "$pad" "" "$GRN" "$R"
   printf '  %b╰%s╯%b\n' "$GRN" "$(printf '─%.0s' $(seq 1 $inner))" "$R"
   blank
-  say "${B}Dashboard${R}    http://${SELF_IP}:${DASH_PORT}"
+  # A loopback bind is not reachable at the host's own address, so printing
+  # that URL would send an operator to a connection refused. Say how to get
+  # there instead.
+  if [[ "$DASH_HOST" == "127.0.0.1" || "$DASH_HOST" == "localhost" ]]; then
+    say "${B}Dashboard${R}    http://127.0.0.1:${DASH_PORT} ${GRY}(loopback only)${R}"
+    say "${DIM}             reach it with: ssh -L ${DASH_PORT}:127.0.0.1:${DASH_PORT} root@${SELF_IP}${R}"
+  else
+    say "${B}Dashboard${R}    http://${SELF_IP}:${DASH_PORT}"
+  fi
   say "${B}Install dir${R}  $BASE_DIR"
   say "${B}Data dir${R}     $DATA_DIR"
-  say "${B}SIEM${R}         ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT}"
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    say "${B}Source${R}       kafka ${KAFKA_BROKERS}/${KAFKA_TOPIC} as group ${KAFKA_GROUP}"
+  else
+    say "${B}SIEM${R}         ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT}"
+  fi
   [[ -n "${AGENT_COUNT:-}" ]] && say "${B}Endpoints${R}    ${AGENT_COUNT} discovered"
   blank
   rule
   say "${B}Service control${R}"
-  say "  systemctl status ueba-engine ueba-dashboard ueba-bridge"
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    say "  systemctl status ueba-engine ueba-dashboard"
+  else
+    say "  systemctl status ueba-engine ueba-dashboard ueba-bridge"
+  fi
   say "  journalctl -u ueba-engine -f"
   blank
   say "${B}Next${R}"
-  say "  1. Let the bridge collect ${B}3-7 days${R} of logs"
-  say "  2. Run ${B}$BASE_DIR/ueba_weekly_retrain.sh${R} to build the baseline"
-  say "  3. Alerts appear on the dashboard once models exist"
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    # No bridge to wait on: events arrive from Kafka the moment the engine
+    # starts. What there is to wait for is enough history to train on.
+    say "  1. Confirm intake:  docker exec siem-kafka kafka-consumer-groups \\"
+    say "       --bootstrap-server localhost:9092 --describe --group ${KAFKA_GROUP}"
+    say "  2. Let ${B}3 weeks${R} of history accumulate (profile_store window is 21 days)"
+    say "  3. Run ${B}$BASE_DIR/ueba_weekly_retrain.sh${R} to rebuild the baseline"
+  else
+    say "  1. Let the bridge collect ${B}3-7 days${R} of logs"
+    say "  2. Run ${B}$BASE_DIR/ueba_weekly_retrain.sh${R} to build the baseline"
+    say "  3. Alerts appear on the dashboard once models exist"
+  fi
   blank
   say "${DIM}Install log: $LOGFILE${R}"
   blank
