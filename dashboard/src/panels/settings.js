@@ -20,6 +20,19 @@ let _users = [];
 let _roles = ["viewer", "analyst", "admin"];
 let _me = null;
 
+// Mirrors password_problem() in ueba_auth.py. Checked client-side purely so a
+// too-short password fails instantly in the form rather than after a round
+// trip — the server remains the authority and rejects it regardless.
+const MIN_PASSWORD = 12;
+
+function passwordProblem(pw) {
+  if (!pw) return "Enter a password.";
+  if (pw.length < MIN_PASSWORD) {
+    return `Password must be at least ${MIN_PASSWORD} characters (that one is ${pw.length}).`;
+  }
+  return null;
+}
+
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -100,8 +113,9 @@ async function changeMyPassword() {
   const nw  = document.getElementById("set-pw-new");
   const current_password = (cur && cur.value) || "";
   const new_password = (nw && nw.value) || "";
-  if (!current_password || !new_password) {
-    showToast("Enter your current and new password.", "error");
+  const pwProblem = new_password ? passwordProblem(new_password) : "Enter your new password.";
+  if (!current_password || pwProblem) {
+    showToast(!current_password ? "Enter your current password." : pwProblem, "error");
     return;
   }
   try {
@@ -146,8 +160,9 @@ function renderUsers() {
     return;
   }
   if (!_users.length) {
-    tb.innerHTML = `<tr><td colspan="7" class="wl-empty">No accounts yet — create the first administrator with
-      <code>python3 ueba_auth.py create-admin --username &lt;name&gt;</code>.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="7" class="wl-empty">No accounts yet — use the form above to
+      create one. The first account should be an <b>Admin</b>, or nobody will be able to manage
+      the rest.</td></tr>`;
     return;
   }
 
@@ -188,8 +203,13 @@ function renderUsers() {
       } else if (act === "reset") {
         const pw = window.prompt(
           `Set a new password for ${b.dataset.name}.\n\n` +
-          `Minimum 12 characters. Their existing sessions will be signed out.`, "");
-        if (pw) patchUser(sub, { password: pw }, "Password reset; their sessions were signed out.");
+          `Minimum ${MIN_PASSWORD} characters. Their existing sessions will be signed out.`, "");
+        if (pw !== null) {
+          const bad = passwordProblem(pw);
+          if (bad) showToast(bad, "error");
+          else patchUser(sub, { password: pw },
+                         "Password reset; their sessions were signed out.");
+        }
       } else if (act === "delete") {
         if (window.confirm(`Delete the account "${b.dataset.name}"?\n\nThis cannot be undone.`)) {
           deleteUser(sub, b.dataset.name);
@@ -239,8 +259,13 @@ async function createUser() {
   const username = (u && u.value || "").trim();
   const password = (p && p.value) || "";
   const role = (r && r.value) || "viewer";
-  if (!username || !password) {
-    showToast("Username and password are both required.", "error");
+  if (!username) {
+    showToast("Enter a username.", "error");
+    return;
+  }
+  const problem = passwordProblem(password);
+  if (problem) {
+    showToast(problem, "error");
     return;
   }
   try {

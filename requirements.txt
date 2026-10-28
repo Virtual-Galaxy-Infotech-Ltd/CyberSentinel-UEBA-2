@@ -33,7 +33,18 @@ geoip2>=4.7,<6.0
 numpy>=1.26,<3.0
 pandas>=2.1,<3.0
 h5py>=3.10,<4.0
-scikit-learn>=1.4,<2.0
+# PINNED, not a range. joblib-pickled estimators carry the version that wrote
+# them, and loading an IsolationForest written by 1.8.0 under 1.9.1 raises
+# InconsistentVersionWarning: "This might lead to breaking code or invalid
+# results." Scores are the product here, so "might be invalid" is not a
+# warning to live with. Measured on the first co-located deployment it did NOT
+# cause the score saturation seen there (that was a hardcoded normalisation
+# range — see ueba_models/isolation_forest.py), but the doubt it casts over
+# every score is reason enough to pin.
+#
+# Bump this only together with a retrain, so the models and the library that
+# reads them move at the same time.
+scikit-learn==1.8.0
 tqdm>=4.66,<5.0
 joblib>=1.3,<2.0
 

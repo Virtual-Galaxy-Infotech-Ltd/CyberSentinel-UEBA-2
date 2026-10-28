@@ -367,10 +367,33 @@ _GEOFEED_TTL = 5.0
 # headroom while making it impossible for some future large file to be pulled
 # into memory on every request.
 _GZIP_MAX_STATIC_BYTES = 8 * 1024 * 1024
-# Compressed static assets, keyed by request path. Vite gives every bundle a
-# content hash in its filename, so a path's bytes never change — compress once
-# and reuse, instead of burning CPU gzipping the same 1.2 MB file per request.
+# Compressed static assets, keyed by (path, Last-Modified, Content-Length).
+#
+# This was keyed on the request path alone, on the reasoning that Vite gives
+# every bundle a content hash in its filename so a path's bytes never change.
+# That holds for /assets/index-<hash>.js. It is false for "/" and the SPA
+# routes, which all serve index.html — whose contents change on every single
+# rebuild while the path stays the same.
+#
+# The consequence was severe and very hard to see (hit 2026-10-28): after a
+# frontend rebuild the process kept serving the PREVIOUS index.html to every
+# client that sent Accept-Encoding: gzip, i.e. every browser, while an
+# uncompressed request read the new file correctly from disk. The stale shell
+# referenced bundle filenames the rebuild had deleted, so the browser got a
+# 404 for its JS and CSS and rendered an unstyled skeleton. Nothing in the
+# logs named the cause, and _serve_index()'s own no-store header — added to
+# prevent exactly this class of failure at the browser — was powerless against
+# a stale copy held server-side.
+#
+# Keying on the file's Last-Modified and Content-Length (both set by
+# send_from_directory from the file stat) means a changed file cannot hit a
+# stale entry: the key changes with the file. No restart needed after a
+# rebuild, which is what the "decision is per-request" comment above the
+# DASHBOARD_DIST definition already promised.
 _static_gzip_cache: dict = {}
+# Entries are small (compressed bytes of static assets) but the key space grows
+# with every rebuild, so bound it rather than leak across a long uptime.
+_GZIP_CACHE_MAX_ENTRIES = 64
 
 
 @app.after_request
@@ -401,7 +424,12 @@ def _gzip_response(resp: "Response") -> "Response":
             return resp
 
         is_static = bool(resp.direct_passthrough)
-        cache_key = request.path if is_static else None
+        # Last-Modified + Content-Length come from the file stat, so the key
+        # follows the file's identity rather than just its URL.
+        cache_key = ((request.path,
+                      resp.headers.get("Last-Modified"),
+                      resp.headers.get("Content-Length"))
+                     if is_static else None)
 
         if is_static:
             # send_from_directory() sets direct_passthrough for static files, and
@@ -431,6 +459,8 @@ def _gzip_response(resp: "Response") -> "Response":
             return resp
         packed = gzip.compress(data, 6)
         if cache_key is not None:
+            if len(_static_gzip_cache) >= _GZIP_CACHE_MAX_ENTRIES:
+                _static_gzip_cache.clear()
             _static_gzip_cache[cache_key] = packed
         resp.set_data(packed)
         resp.headers["Content-Encoding"] = "gzip"
