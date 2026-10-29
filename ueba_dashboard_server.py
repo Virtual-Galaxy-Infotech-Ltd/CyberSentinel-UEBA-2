@@ -81,6 +81,14 @@ except Exception:
     ueba_egress = None
     EGRESS_AVAILABLE = False
 
+# Privileged-account declarations (RFP SN 15). Optional on the same terms.
+try:
+    import ueba_privilege  # type: ignore
+    PRIVILEGE_AVAILABLE = True
+except Exception:
+    ueba_privilege = None
+    PRIVILEGE_AVAILABLE = False
+
 # Confirmed-incident history (RFP SN 48). Optional on the same terms.
 try:
     import ueba_risk_history  # type: ignore
@@ -711,7 +719,8 @@ _ARCHIVE_RE = re.compile(r"ueba_alerts_(\d{4}-\d{2}-\d{2})\.jsonl\.zip$")
 # watch_boost is, two fields below: without it the badge shows on a
 # live-streamed alert and then disappears when the same alert comes back from
 # the cache as a slim record.
-_SLIM_VER = 4
+# v5 (2026-10-29) adds privilege_boost, for RFP SN 15, on the same grounds.
+_SLIM_VER = 5
 
 
 def _slim(a: dict) -> dict:
@@ -742,6 +751,7 @@ def _slim(a: dict) -> dict:
             "model_score":     ueba.get("model_score"),
             "watch_boost":     ueba.get("watch_boost"),
             "history_boost":   ueba.get("history_boost"),
+            "privilege_boost": ueba.get("privilege_boost"),
             # Two strings, kept deliberately rather than the whole raw_scores
             # block: which autoencoder scored this row, and whether it was the
             # entity's own model or the global fallback.
@@ -3065,6 +3075,7 @@ CAPABILITIES = {
     "watchlist.edit":   "analyst",
     "fp.edit":          "analyst",
     "incident.confirm": "analyst",
+    "privileged.edit":  "admin",
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
@@ -3814,6 +3825,104 @@ def api_watchlist_list():
         "max_boost":     ueba_watchlist.MAX_BOOST,
         "entries": items,
     })
+
+
+# ── Privileged accounts (RFP SN 15) ──────────────────────────────────────────
+#
+# What the SOC declares here is authoritative: nothing inferred from observed
+# activity or account-name shape overrides it. Editing is an admin capability
+# rather than an analyst one, because declaring an account privileged changes
+# how every one of its events scores.
+
+def _privileged_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    p = paths.get("privileged_file") or ""
+    if not p:
+        p = str(_abs_install_path("privileged.json"))
+    return str(_abs_install_path(p))
+
+
+@app.route("/api/privileged")
+def api_privileged_list():
+    """Declared privileged accounts, plus the inference rules in force.
+
+    Readable by any signed-in user: an analyst triaging an alert that cites
+    privilege needs to see why the account counts as privileged.
+    """
+    if not PRIVILEGE_AVAILABLE:
+        return jsonify({"ok": False, "error": "privilege module unavailable",
+                        "entries": []}), 503
+    cfg = (_RAW_CFG.get("detection") or {}).get("privilege") or {}
+    try:
+        items = ueba_privilege.entries(_privileged_path())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "entries": []}), 500
+    items.sort(key=lambda e: (e.get("level") != "high", e.get("value") or ""))
+    return jsonify({
+        "ok":      True,
+        "count":   len(items),
+        "levels":  list(ueba_privilege.LEVELS),
+        "classes": list(ueba_privilege.CLASSES),
+        "config":  {
+            "applies_from":          cfg.get("applies_from", "elevated"),
+            "min_privileged_events": cfg.get("min_privileged_events", 5),
+            "sharing_min_hosts":     cfg.get("sharing_min_hosts", 4),
+            "max_boost":             cfg.get("max_boost", 0.15),
+        },
+        "entries": items,
+    })
+
+
+@app.route("/api/privileged", methods=["POST"])
+@_require_cap("privileged.edit")
+def api_privileged_add():
+    """Declare one account privileged, or change what it is declared as."""
+    if not PRIVILEGE_AVAILABLE:
+        return jsonify({"ok": False, "error": "privilege module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    value = (body.get("value") or "").strip()
+    if not value:
+        return jsonify({"ok": False, "error": "value required"}), 400
+    level = (body.get("level") or "high").strip().lower()
+    if level not in ueba_privilege.LEVELS:
+        return jsonify({"ok": False,
+                        "error": "level must be one of %s"
+                                 % list(ueba_privilege.LEVELS)}), 400
+    klass = (body.get("class") or "human").strip().lower()
+    if klass not in ueba_privilege.CLASSES:
+        return jsonify({"ok": False,
+                        "error": "class must be one of %s"
+                                 % list(ueba_privilege.CLASSES)}), 400
+    path = _privileged_path()
+    try:
+        items = ueba_privilege.entries(path)
+        items = [e for e in items if e.get("value") != value.lower()]
+        items.append({"value": value, "level": level, "class": klass,
+                      "note": (body.get("note") or "")})
+        ueba_privilege.save(path, items)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "count": len(items),
+                    "entry": {"value": value.lower(), "level": level,
+                              "class": klass}})
+
+
+@app.route("/api/privileged/<path:value>", methods=["DELETE"])
+@_require_cap("privileged.edit")
+def api_privileged_remove(value):
+    """Withdraw a declaration. Inference may still classify the account."""
+    if not PRIVILEGE_AVAILABLE:
+        return jsonify({"ok": False, "error": "privilege module unavailable"}), 503
+    path = _privileged_path()
+    try:
+        items = ueba_privilege.entries(path)
+        kept = [e for e in items if e.get("value") != (value or "").strip().lower()]
+        if len(kept) == len(items):
+            return jsonify({"ok": False, "error": "not declared"}), 404
+        ueba_privilege.save(path, kept)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "count": len(kept)})
 
 
 @app.route("/api/watchlist", methods=["POST"])

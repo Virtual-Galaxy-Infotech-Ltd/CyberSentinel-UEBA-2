@@ -1299,7 +1299,7 @@ class UserProfileStore:
             try:
                 self._bindings().record_event(user, log, get_nested)
             except Exception as e:
-                log_.debug("identity binding skipped: %s", e)
+                _log.debug("identity binding skipped: %s", e)
 
         existing = self.conn.execute(
             "SELECT * FROM users WHERE username = ?", (user,)
@@ -1511,6 +1511,13 @@ class UserProfileStore:
                     if distinct <= 1 or distinct > _PRESENCE_NOVELTY_CAP:
                         first_time = False
 
+                # The engine asks "how many hosts has this account been used
+                # on" for every event, to decide credential sharing (SN 15).
+                # Updated here, where a new row is created and the count is
+                # already known, so that question never costs a query.
+                if kind == "agent" and distinct:
+                    self._host_counts()[user] = distinct
+
                 out[kind] = {"value": value, "first_time": first_time,
                              "distinct": distinct, "events": seen}
 
@@ -1521,6 +1528,85 @@ class UserProfileStore:
         except Exception as e:
             log.debug("presence not recorded for %s: %s", user, e)
         return out
+
+    def record_privilege_use(self, user: str, log: dict) -> int:
+        """Count one privileged operation against an entity (SN 15).
+
+        Stored as another kind in entity_presence rather than a new table: it
+        is the same shape (how many times a value was observed for an entity)
+        and inherits that table's commit cadence. presence_summary and the
+        novelty reasons read only the "country" and "agent" kinds, so these
+        rows are invisible to them.
+
+        Returns the entity's running total, served from memory. The engine asks
+        for an entity's privilege level on EVERY event, and a SELECT per event
+        to answer it would add a read to the hot loop for a number that changes
+        a few times a second at most.
+        """
+        if not user or user == "unknown":
+            return 0
+        counts = self._privop_counts()
+        try:
+            self.conn.execute(
+                """INSERT INTO entity_presence
+                       (username, kind, value, events, first_seen, last_seen)
+                   VALUES (?, 'privop', 'any', 1, ?, ?)
+                   ON CONFLICT(username, kind, value) DO UPDATE SET
+                       events    = events + 1,
+                       last_seen = excluded.last_seen""",
+                (user, datetime.now(timezone.utc).isoformat(),
+                 datetime.now(timezone.utc).isoformat()))
+            counts[user] = counts.get(user, 0) + 1
+            self._presence_pending = getattr(self, "_presence_pending", 0) + 1
+            if self._presence_pending >= _PRESENCE_COMMIT_EVERY:
+                self.conn.commit()
+                self._presence_pending = 0
+        except Exception as e:
+            _log.debug("privilege use not recorded for %s: %s", user, e)
+        return counts.get(user, 0)
+
+    def privilege_use_count(self, user: str) -> int:
+        """How many privileged operations this entity has been seen performing."""
+        if not user:
+            return 0
+        return self._privop_counts().get(user, 0)
+
+    def distinct_host_count(self, user: str) -> int:
+        """How many distinct hosts this entity has been seen on (SN 15)."""
+        if not user:
+            return 0
+        return self._host_counts().get(user, 0)
+
+    def _host_counts(self) -> dict:
+        """Entity -> distinct host count, read from disk once per process."""
+        cached = getattr(self, "_host_cache", None)
+        if cached is not None:
+            return cached
+        cached = {}
+        try:
+            for name, n in self.conn.execute(
+                    "SELECT username, COUNT(*) FROM entity_presence "
+                    "WHERE kind = 'agent' GROUP BY username"):
+                cached[name] = int(n or 0)
+        except Exception as e:
+            _log.debug("host counts unavailable: %s", e)
+        self._host_cache = cached
+        return cached
+
+    def _privop_counts(self) -> dict:
+        """Entity -> privileged-operation count, read from disk once per process."""
+        cached = getattr(self, "_privop_cache", None)
+        if cached is not None:
+            return cached
+        cached = {}
+        try:
+            for name, n in self.conn.execute(
+                    "SELECT username, events FROM entity_presence WHERE kind = 'privop'"):
+                cached[name] = int(n or 0)
+        except Exception as e:
+            _log.debug("privileged-use counts unavailable: %s", e)
+        self._privop_cache = cached
+        return cached
 
     def presence_summary(self, user: str) -> dict:
         """Everywhere an entity has been seen, newest first. For the UI/reports."""

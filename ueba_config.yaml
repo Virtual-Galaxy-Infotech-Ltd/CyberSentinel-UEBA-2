@@ -35,6 +35,11 @@ paths:
   # before the alert threshold, so their borderline activity surfaces.
   # See ueba_watchlist.py for why that boost is deliberately small.
   watchlist_file:       "/root/NEW_DRIVE/aditya_ueba/watchlist.json"
+  # Operator-declared privileged accounts (SN 15). Authoritative: nothing
+  # inferred from observed activity or account-name shape overrides what a SOC
+  # lists here. Same file-and-mtime contract as watchlist_file above, so naming
+  # an account privileged takes effect on the next event with no restart.
+  privileged_file:      "/root/NEW_DRIVE/aditya_ueba/privileged.json"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -607,6 +612,38 @@ noise_suppression:
 
 # ── Detection tuning (RFP SN 12 / 46 / 47) ───────────────────────────────────
 detection:
+  # ── Privileged access (RFP SN 15) ──────────────────────────────────────────
+  #
+  # Privilege is scored as an entity attribute, and three behaviours are called
+  # out: misuse, credential sharing and account takeover.
+  #
+  # The level comes from three sources, in this order of authority:
+  #   1. paths.privileged_file  — what the SOC declares. Always wins.
+  #   2. observed privileged operations, once an account passes
+  #      min_privileged_events.
+  #   3. the shape of the account name, as a last resort.
+  #
+  # Group membership would be the right source and is unavailable: the SIEM
+  # forwards no account-management events, so there is no group to read. This
+  # is the same data gap that blocks SN 43.
+  #
+  # applies_from          the level at which SN 15 starts applying.
+  # min_privileged_events how many privileged operations mark an unlisted
+  #                       account as elevated.
+  # sharing_min_hosts     distinct hosts before one human privileged account
+  #                       reads as a shared credential. Service and machine
+  #                       accounts are exempt by CLASS, not by threshold:
+  #                       being on every host is their job, and counting them
+  #                       would make this reason worthless within a day.
+  # max_boost             the most privilege alone can add to a score.
+  #                       Hard-capped at 0.40 in code whatever is set here.
+  privilege:
+    enabled:               true
+    applies_from:          elevated
+    min_privileged_events: 5
+    sharing_min_hosts:     4
+    max_boost:             0.15
+
   # ── Risk history (RFP SN 48) ───────────────────────────────────────────────
   #
   # A user or device previously involved in confirmed malicious behaviour stays

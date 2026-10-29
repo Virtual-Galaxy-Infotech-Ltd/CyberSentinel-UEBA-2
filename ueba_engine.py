@@ -43,7 +43,8 @@ import yaml
 
 import ueba_watchlist
 import ueba_risk_history
-from ueba_preprocessor import FeatureExtractor, UserProfileStore
+import ueba_privilege
+from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
 from ueba_models.clusterer import CampaignDetector, RAGRetriever
@@ -184,30 +185,35 @@ class StreamState:
 # ── Score Fusion ──────────────────────────────────────────────────────────────
 
 def fuse_scores(if_result: dict, ae_result: dict, config: dict,
-                watch_boost: float = 0.0, history_boost: float = 0.0) -> dict:
+                watch_boost: float = 0.0, history_boost: float = 0.0,
+                privilege_boost: float = 0.0) -> dict:
     """
     Combine Isolation Forest and Autoencoder scores into a final verdict.
 
-    Two additive priors, both applied BEFORE the threshold and verdict tiers
+    Three additive priors, all applied BEFORE the threshold and verdict tiers
     are evaluated, which is the whole point: a prior should lower the bar at
     which an entity's behaviour becomes visible, not merely relabel alerts that
     would have fired anyway.
 
-    `watch_boost`   — an analyst has flagged this entity for elevated scrutiny
-                      (see ueba_watchlist).
-    `history_boost` — this entity has confirmed malicious incidents on record
-                      (see ueba_risk_history, RFP SN 48).
+    `watch_boost`     — an analyst has flagged this entity for elevated
+                        scrutiny (see ueba_watchlist).
+    `history_boost`   — this entity has confirmed malicious incidents on record
+                        (see ueba_risk_history, RFP SN 48).
+    `privilege_boost` — this entity holds privilege, so its unusual behaviour
+                        matters more (see ueba_privilege, RFP SN 15).
 
     They are reported separately because they answer different questions. "Did
-    this alert fire because someone is watching this account, or because the
-    account has form?" is the first thing an analyst asks about a boosted
-    alert, and a single combined figure cannot answer it.
+    this alert fire because someone is watching this account, because the
+    account has form, or because it is an administrator?" is the first thing an
+    analyst asks about a boosted alert, and one combined figure cannot answer
+    it.
 
     Returns dict with:
         combined_score  — 0-1 weighted average
         model_score     — the same figure BEFORE any boost
         watch_boost     — how much the watch list contributed (0.0 if none)
         history_boost   — how much confirmed history contributed (0.0 if none)
+        privilege_boost — how much privilege contributed (0.0 if none)
         risk_verdict    — 'suspicious' | 'anomalous' | 'highly_anomalous'
         confidence      — 'low' | 'medium' | 'high'
         is_alert        — bool (True if above alert_threshold)
@@ -228,7 +234,8 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
     # fact, whether an alert was the models' judgement or a prior's — which is
     # exactly the question an analyst reviewing a boosted user asks.
     model_score = combined
-    total_boost = float(watch_boost or 0.0) + float(history_boost or 0.0)
+    total_boost = (float(watch_boost or 0.0) + float(history_boost or 0.0)
+                   + float(privilege_boost or 0.0))
     if total_boost:
         combined = float(np.clip(combined + total_boost, 0.0, 1.0))
 
@@ -249,6 +256,7 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
         "model_score":    round(model_score, 4),
         "watch_boost":    round(float(watch_boost or 0.0), 4),
         "history_boost":  round(float(history_boost or 0.0), 4),
+        "privilege_boost": round(float(privilege_boost or 0.0), 4),
         "risk_verdict":   verdict,
         "confidence":     confidence,
         "is_alert":       is_alert,
@@ -372,12 +380,15 @@ def build_ueba_block(
     # Either prior having fired is worth carrying, and model_score is what
     # makes the boost auditable — it is the models' own verdict before anything
     # was added to it.
-    if fusion.get("watch_boost") or fusion.get("history_boost"):
+    if (fusion.get("watch_boost") or fusion.get("history_boost")
+            or fusion.get("privilege_boost")):
         ueba["model_score"] = fusion.get("model_score")
     if fusion.get("watch_boost"):
         ueba["watch_boost"] = fusion["watch_boost"]
     if fusion.get("history_boost"):
         ueba["history_boost"] = fusion["history_boost"]
+    if fusion.get("privilege_boost"):
+        ueba["privilege_boost"] = fusion["privilege_boost"]
 
     if include_raw:
         ueba["raw_scores"] = {
@@ -439,6 +450,7 @@ def build_evidence_block(
     profile: dict | None,
     alerts_today: int | None,
     presence: dict | None = None,
+    privilege: dict | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -558,6 +570,13 @@ def build_evidence_block(
             # the all-traffic answer and is the one to trust.
             "seen_countries":       profile.get("seen_countries", []),
             "seen_locations":       _presence_evidence(presence),
+            # RFP SN 15. `source` is carried deliberately: an analyst who
+            # doubts a privilege verdict can see which signal produced it
+            # rather than having to take it on trust.
+            "privilege":            ({"level": privilege.get("level"),
+                                      "class": privilege.get("class"),
+                                      "source": privilege.get("source")}
+                                     if privilege else None),
             "autoencoder_error":    round(ae_result["reconstruction_error"], 4),
             "autoencoder_threshold": round(ae_result["threshold"], 4),
             "error_vs_threshold":   f"{round(ae_result['reconstruction_error'] / max(ae_result['threshold'], 0.0001), 1)}x above threshold",
@@ -727,6 +746,13 @@ class UEBAEngine:
         self.risk_history_cfg = (
             (cfg.get("detection") or {}).get("risk_history") or {})
 
+        # Privilege as an entity attribute (SN 15). The operator list follows
+        # the same file-and-mtime contract as the watch list, so naming an
+        # account privileged takes effect on the next event.
+        self.privileged_file = paths.get("privileged_file") or ""
+        self.privilege_cfg = (
+            (cfg.get("detection") or {}).get("privilege") or {})
+
         log.info("All components loaded successfully")
 
     def _maybe_reset_alerts_today(self) -> None:
@@ -804,15 +830,7 @@ class UEBAEngine:
             except Exception as e:
                 log.debug("risk history lookup failed: %s", e)
 
-        # Fuse scores. Both priors are additive and their sum is clipped inside
-        # fuse_scores, so an entity that is watch-listed AND has history cannot
-        # push the combined score past 1.0.
-        fusion = fuse_scores(
-            if_result, ae_result, self.config,
-            watch_boost=(watch or {}).get("boost", 0.0),
-            history_boost=(history or {}).get("boost", 0.0))
-
-        # Transfer volume is recorded for EVERY event, before the alert gate
+        # Transfer volume is recorded for EVERY event, ahead of the alert gate
         # below, because the baseline it feeds (SN 12 / SN 46) describes what
         # normal traffic looks like. update() further down runs only for events
         # that already alerted, so a volume baseline built there would be drawn
@@ -826,17 +844,52 @@ class UEBAEngine:
         except Exception:
             pass
 
-        # SN 19 — where this entity has been seen. Recorded for every event and
-        # before the alert gate, for the same reason as transfer volume above:
-        # "never seen from this country before" is only true if the set of
-        # countries it HAS been seen from was built from all of its traffic.
-        # The verdict is kept for the reason builders further down, so the
-        # novelty is read out of the write we are already doing.
+        # SN 19 — where this entity has been seen. Recorded for every event,
+        # for the same reason as transfer volume above: "never seen from this
+        # country before" is only true if the set of countries it HAS been seen
+        # from was built from all of its traffic.
+        #
+        # Deliberately ahead of fusion, not merely ahead of the alert gate. A
+        # privileged account turning up on a host it has never used is the
+        # takeover signal in SN 15, and it has to be able to make an event
+        # alert rather than only annotate one that alerted anyway.
         presence = {}
         try:
             presence = self.profile_store.record_presence(user, log_entry) or {}
         except Exception:
             presence = {}
+
+        # SN 15 — privilege as an entity attribute, and the three behaviours
+        # the serial names: misuse, sharing and takeover.
+        privilege = None
+        priv_assess = {}
+        if self.privilege_cfg.get("enabled", True):
+            try:
+                priv_event = ueba_privilege.is_privileged_event(log_entry, get_nested)
+                if priv_event:
+                    priv_count = self.profile_store.record_privilege_use(user, log_entry)
+                else:
+                    priv_count = self.profile_store.privilege_use_count(user)
+                privilege = ueba_privilege.classify(
+                    user, self.privileged_file, priv_count, self.privilege_cfg)
+                priv_assess = ueba_privilege.assess(
+                    privilege, presence,
+                    self.profile_store.distinct_host_count(user),
+                    priv_event,
+                    get_nested(log_entry, "enrich.temporal.is_business_hours", None),
+                    self.privilege_cfg) or {}
+            except Exception as e:
+                log.debug("privilege assessment skipped: %s", e)
+                privilege, priv_assess = None, {}
+
+        # Fuse scores. The three priors are additive and their sum is clipped
+        # inside fuse_scores, so an entity that is watch-listed AND has history
+        # AND is privileged cannot push the combined score past 1.0.
+        fusion = fuse_scores(
+            if_result, ae_result, self.config,
+            watch_boost=(watch or {}).get("boost", 0.0),
+            history_boost=(history or {}).get("boost", 0.0),
+            privilege_boost=priv_assess.get("boost", 0.0))
 
         # Not anomalous — discard silently
         if not fusion["is_alert"]:
@@ -920,6 +973,11 @@ class UEBAEngine:
             if history["reason"] not in anomaly_reasons:
                 anomaly_reasons.append(history["reason"])
 
+        # RFP SN 15 — misuse, sharing or takeover of a privileged account.
+        for reason in (priv_assess.get("reasons") or []):
+            if reason not in anomaly_reasons:
+                anomaly_reasons.append(reason)
+
         # Build ueba block
         ueba_block = build_ueba_block(
             if_result, ae_result, fusion,
@@ -941,6 +999,7 @@ class UEBAEngine:
             anomaly_reasons, profile,
             alerts_today=alerts_today_for_user,
             presence=presence_summary,
+            privilege=privilege,
         )
 
         # Append ueba block + evidence to original log
