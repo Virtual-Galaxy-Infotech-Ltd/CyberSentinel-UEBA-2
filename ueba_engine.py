@@ -386,6 +386,31 @@ def build_ueba_block(
 
 # ── Evidence Block Builder ────────────────────────────────────────────────────
 
+def _presence_evidence(presence: dict | None) -> dict:
+    """Condense a presence summary into something an analyst reads at a glance.
+
+    Ordered by how often the entity was seen there, so the first entry is where
+    it normally is and anything further down is the exception.
+    """
+    if not presence:
+        return {}
+    out: dict = {}
+    for kind, label in (("country", "countries"), ("agent", "hosts")):
+        rows = presence.get(kind) or []
+        if not rows:
+            continue
+        total = sum(int(r.get("events") or 0) for r in rows) or 1
+        out[label] = [
+            {"value": r.get("value"),
+             "events": r.get("events"),
+             "share": "%.0f%%" % (100.0 * int(r.get("events") or 0) / total),
+             "first_seen": r.get("first_seen")}
+            for r in rows[:10]
+        ]
+        out[label + "_distinct"] = len(rows)
+    return out
+
+
 def build_evidence_block(
     log_entry: dict,
     if_result: dict,
@@ -394,6 +419,7 @@ def build_evidence_block(
     anomaly_reasons: list[str],
     profile: dict | None,
     alerts_today: int | None,
+    presence: dict | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -508,7 +534,11 @@ def build_evidence_block(
             "is_business_hours":    is_business_hours,
             "is_weekend":           is_weekend,
             "day_of_week":          day_of_week,
+            # Kept for continuity, but note it is alert-derived: it lists the
+            # countries this entity has ALERTED from. `seen_locations` below is
+            # the all-traffic answer and is the one to trust.
             "seen_countries":       profile.get("seen_countries", []),
+            "seen_locations":       _presence_evidence(presence),
             "autoencoder_error":    round(ae_result["reconstruction_error"], 4),
             "autoencoder_threshold": round(ae_result["threshold"], 4),
             "error_vs_threshold":   f"{round(ae_result['reconstruction_error'] / max(ae_result['threshold'], 0.0001), 1)}x above threshold",
@@ -743,6 +773,18 @@ class UEBAEngine:
         except Exception:
             pass
 
+        # SN 19 — where this entity has been seen. Recorded for every event and
+        # before the alert gate, for the same reason as transfer volume above:
+        # "never seen from this country before" is only true if the set of
+        # countries it HAS been seen from was built from all of its traffic.
+        # The verdict is kept for the reason builders further down, so the
+        # novelty is read out of the write we are already doing.
+        presence = {}
+        try:
+            presence = self.profile_store.record_presence(user, log_entry) or {}
+        except Exception:
+            presence = {}
+
         # Not anomalous — discard silently
         if not fusion["is_alert"]:
             return None
@@ -809,6 +851,14 @@ class UEBAEngine:
             if reason not in anomaly_reasons:
                 anomaly_reasons.append(reason)
 
+        # RFP SN 19 — a location or a host this entity has not been seen on
+        # before. seen_countries / seen_agents were collected on the profile and
+        # read by nothing in the scoring path; this reads the all-traffic
+        # presence table instead, for the reason recorded in record_presence.
+        for reason in self._presence_reasons(presence):
+            if reason not in anomaly_reasons:
+                anomaly_reasons.append(reason)
+
         # Build ueba block
         ueba_block = build_ueba_block(
             if_result, ae_result, fusion,
@@ -817,10 +867,19 @@ class UEBAEngine:
         )
 
         # Build evidence block for SOC analysts
+        # Everywhere this entity has actually been seen (SN 19). Read once per
+        # alert, not per event — it is a second query, and 0.01% of events get
+        # this far.
+        try:
+            presence_summary = self.profile_store.presence_summary(user)
+        except Exception:
+            presence_summary = None
+
         evidence_block = build_evidence_block(
             log_entry, if_result, ae_result, fusion,
             anomaly_reasons, profile,
             alerts_today=alerts_today_for_user,
+            presence=presence_summary,
         )
 
         # Append ueba block + evidence to original log
@@ -1128,6 +1187,40 @@ class UEBAEngine:
             if idle_days >= dormant_days:
                 out.append("dormant_account_reused")
         return out
+
+    def _presence_reasons(self, presence: dict | None) -> list:
+        """SN 19 — first sighting of an entity at a country or on a host.
+
+        Annotates an event that already cleared the alert threshold; it does
+        not score novelty on its own. A first sighting is extremely common in
+        normal operation — every new laptop, every VPN egress the estate adds —
+        so on its own it is an inventory event, not a detection. Alongside an
+        anomaly score it is the sentence an analyst actually wants: not "this
+        is unusual" but "this is unusual AND it is the first time this account
+        has ever appeared from Russia".
+
+        record_presence has already suppressed the two cases where novelty is
+        meaningless: an entity with no prior history, and one whose spread is
+        so wide that nowhere is new.
+        """
+        if not presence:
+            return []
+        reasons = []
+        country = presence.get("country") or {}
+        if country.get("first_time"):
+            reasons.append(
+                "First time this entity has been seen from %s (previously seen "
+                "from %d other %s)"
+                % (country.get("value"), max(country.get("distinct", 1) - 1, 0),
+                   "country" if country.get("distinct", 2) == 2 else "countries"))
+        agent = presence.get("agent") or {}
+        if agent.get("first_time"):
+            reasons.append(
+                "First time this entity has been seen on host %s (previously "
+                "seen on %d other %s)"
+                % (agent.get("value"), max(agent.get("distinct", 1) - 1, 0),
+                   "host" if agent.get("distinct", 2) == 2 else "hosts"))
+        return reasons
 
     def _data_volume_reasons(self, profile: dict | None, log_entry: dict) -> list:
         """SN 12 / SN 46 — unusual data transfer volume for this entity.

@@ -73,6 +73,54 @@ _log = log
 # report bytes, so a commit per row would fsync constantly for a statistic that
 # tolerates losing a few seconds of history on a crash.
 _XFER_COMMIT_EVERY = 50
+# Presence observations run on every event, same as transfer volume, so they
+# commit on the same cadence and for the same reason: update() only runs after
+# the alert gate, so nothing else would flush these writes.
+_PRESENCE_COMMIT_EVERY = 50
+# How many distinct values an entity may accumulate per kind before novelty
+# stops being meaningful. A laptop that has legitimately been in 40 countries
+# has no "unusual country"; past this point the signal is suppressed rather
+# than reported, because at that spread it is noise.
+_PRESENCE_NOVELTY_CAP = 40
+
+# Where the host and the source country actually live in an enriched event.
+#
+# Ordered, and tried in order. `agent.name` was the only path the profile store
+# ever looked at for the host, and no event carries it: the agent appears under
+# context.raw_event, and the normalised host under host.name. The consequence
+# was measurable — seen_agents was empty on all 155,160 profile rows while
+# seen_countries was populated on 125,947 of them. The column was not sparse,
+# it was dead. Keep `agent.name` last so an event that does carry it still
+# works.
+_HOST_FIELDS = (
+    "host.name",
+    "context.raw_event.agent.name",
+    "context.raw_event.data.win.system.computer",
+    "agent.name",
+)
+_COUNTRY_FIELDS = (
+    "enrich.geo.src.country",
+    "enrich.geo.src_country",
+)
+
+
+def _first_field(log: dict, fields) -> str:
+    """First of `fields` that this event actually carries, as a string."""
+    for path in fields:
+        v = get_nested(log, path, "")
+        if v not in (None, "", [], {}):
+            return str(v).strip()
+    return ""
+
+
+def event_host(log: dict) -> str:
+    """The host an event came from, whichever field this source populates."""
+    return _first_field(log, _HOST_FIELDS)
+
+
+def event_country(log: dict) -> str:
+    """The source country an event came from, if it was geo-enriched."""
+    return _first_field(log, _COUNTRY_FIELDS)
 
 
 # ── Config Loader ─────────────────────────────────────────────────────────────
@@ -1109,6 +1157,32 @@ class UserProfileStore:
                 self.conn.commit()
                 log.info("Profile store migrated: added %s", col)
 
+        # Where each entity has actually been seen (SN 19).
+        #
+        # A separate table, not more columns on `users`, for two reasons. The
+        # positional-read hazard above is one. The other is that this is
+        # populated from ALL traffic while every column on `users` is populated
+        # from alerts only — `seen_countries` and `seen_agents` there answer
+        # "which countries has this entity alerted from before", which is a
+        # different question and, at a 0.02% alert rate, one whose answer is
+        # almost always "none". Scoring novelty off those would have reported
+        # nearly every event as a first-time country.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS entity_presence (
+                username   TEXT    NOT NULL,
+                kind       TEXT    NOT NULL,
+                value      TEXT    NOT NULL,
+                events     INTEGER NOT NULL DEFAULT 0,
+                first_seen TEXT,
+                last_seen  TEXT,
+                PRIMARY KEY (username, kind, value)
+            )
+        """)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_presence_entity "
+            "ON entity_presence(username, kind)")
+        self.conn.commit()
+
     def _seed_weight(self, first_seen, last_seen, total_events):
         """Effective weight to credit an entity that has no decayed weight yet.
 
@@ -1234,8 +1308,8 @@ class UserProfileStore:
         hour        = float(feature_vec[0])
         risk        = float(feature_vec[28])
         events_1h   = float(feature_vec[20])
-        country     = get_nested(log, "enrich.geo.src.country", "")
-        agent       = get_nested(log, "agent.name", "")
+        country     = event_country(log)
+        agent       = event_host(log)
 
         if existing is None:
             # New user — insert baseline
@@ -1373,6 +1447,97 @@ class UserProfileStore:
         # Weighted average deviation
         deviation = (0.4 * hour_dev) + (0.4 * risk_dev) + (0.2 * ev_dev)
         return float(min(deviation, 1.0))
+
+    def record_presence(self, user: str, log: dict) -> dict:
+        """Note where an entity was seen, and say whether it is somewhere new.
+
+        Called for EVERY event, before the alert gate — the same reasoning as
+        record_transfer. "This account has never logged in from this country
+        before" is only a meaningful statement if the set of countries it HAS
+        logged in from was built from all of its traffic. Built from alerts
+        alone the claim inverts: it would announce a first-time country on
+        almost every alert, because the alert-derived set is nearly empty.
+
+        Returns a novelty verdict for this event, so the caller gets it from
+        the write it is already doing rather than reading back afterwards:
+
+            {"country": {"value": "RU", "first_time": True, "distinct": 3},
+             "agent":   {"value": "...", "first_time": False, "distinct": 2}}
+
+        Kinds with no value in this event are simply absent. Never raises: a
+        novelty signal is worth less than the pipeline it would take down.
+        """
+        out: dict = {}
+        if not user or user == "unknown":
+            return out
+        try:
+            country = event_country(log)
+            agent   = event_host(log)
+            now     = datetime.now(timezone.utc).isoformat()
+
+            for kind, value in (("country", country), ("agent", agent)):
+                value = str(value).strip()
+                if not value:
+                    continue
+                # One statement per kind. RETURNING gives us the post-increment
+                # count, so events == 1 means this event is the first sighting;
+                # a separate SELECT would both cost more and race.
+                row = self.conn.execute(
+                    """INSERT INTO entity_presence
+                           (username, kind, value, events, first_seen, last_seen)
+                       VALUES (?, ?, ?, 1, ?, ?)
+                       ON CONFLICT(username, kind, value) DO UPDATE SET
+                           events    = events + 1,
+                           last_seen = excluded.last_seen
+                       RETURNING events""",
+                    (user, kind, value, now, now)).fetchone()
+                seen = int(row[0]) if row else 1
+                first_time = (seen == 1)
+
+                # Only counted when it matters: on a first sighting, to decide
+                # whether this entity's spread is still narrow enough for
+                # novelty to mean anything. Every other event skips the count.
+                distinct = 0
+                if first_time:
+                    distinct = int(self.conn.execute(
+                        "SELECT COUNT(*) FROM entity_presence "
+                        "WHERE username = ? AND kind = ?",
+                        (user, kind)).fetchone()[0] or 0)
+                    # The entity's very first event is not a novel location —
+                    # everything is new to an entity with no history at all,
+                    # and reporting that would flag every new account's first
+                    # appearance as an anomalous one.
+                    if distinct <= 1 or distinct > _PRESENCE_NOVELTY_CAP:
+                        first_time = False
+
+                out[kind] = {"value": value, "first_time": first_time,
+                             "distinct": distinct, "events": seen}
+
+            self._presence_pending = getattr(self, "_presence_pending", 0) + 1
+            if self._presence_pending >= _PRESENCE_COMMIT_EVERY:
+                self.conn.commit()
+                self._presence_pending = 0
+        except Exception as e:
+            log.debug("presence not recorded for %s: %s", user, e)
+        return out
+
+    def presence_summary(self, user: str) -> dict:
+        """Everywhere an entity has been seen, newest first. For the UI/reports."""
+        out: dict = {"country": [], "agent": []}
+        if not user:
+            return out
+        try:
+            for kind, value, events, first_seen, last_seen in self.conn.execute(
+                    "SELECT kind, value, events, first_seen, last_seen "
+                    "FROM entity_presence WHERE username = ? "
+                    "ORDER BY events DESC, last_seen DESC", (user,)):
+                if kind in out:
+                    out[kind].append({"value": value, "events": events,
+                                      "first_seen": first_seen,
+                                      "last_seen": last_seen})
+        except Exception as e:
+            log.debug("presence summary unavailable for %s: %s", user, e)
+        return out
 
     def record_transfer(self, user: str, nbytes: int) -> None:
         """Fold one event's transfer volume into an entity's baseline.
