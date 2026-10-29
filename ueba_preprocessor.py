@@ -969,7 +969,8 @@ class FeatureExtractor:
         """
         Extract non-numeric metadata from a log for storing alongside
         the feature vector (used by FAISS metadata store and output writer).
-        Supports both real Wazuh schema (subject/object) and legacy schema (data.srcuser).
+        Supports both the CyberSentinel SIEM schema (subject/object) and the legacy
+        schema (data.srcuser).
         """
         # Entity (user / host / source-IP) key — single source of truth.
         # Userless firewall/network events resolve to ip:<src> rather than the
@@ -1834,7 +1835,7 @@ def run_demo(config: dict):
     Show what a feature vector looks like for a sample enriched log.
     Useful for verifying the extractor works correctly with your data.
     """
-    # Sample enriched log (matches your actual Wazuh + L2 output format)
+    # Sample enriched log (matches the CyberSentinel SIEM + L2 output format)
     sample_log = {
         "true": 1771327039.492798,
         "timestamp": "2026-02-17T16:47:19.290+0530",

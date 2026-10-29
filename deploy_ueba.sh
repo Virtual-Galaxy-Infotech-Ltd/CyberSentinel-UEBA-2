@@ -203,12 +203,12 @@ target_check() {
 site_details() {
   printf '\n  %b[4/5]%b %bSite details%b\n' "$B$CYA" "$R" "$B" "$R"; rule
   ask CLIENT_NAME "Client / bank name" ""
-  ask SIEM_HOST   "SIEM (Wazuh manager) host or IP" ""
+  ask SIEM_HOST   "CyberSentinel SIEM manager host or IP" ""
   ask SIEM_PORT   "SIEM SSH port" "22"
   ask SIEM_USER   "SSH user on the SIEM" "root"
   ask SIEM_ENRICHED_DIR "Enriched-log directory on the SIEM" \
       "/home/${SIEM_USER}/CyberSentinel-Event-Correlation-Kafka/data/enriched"
-  ask SIEM_CLIENT_KEYS "Wazuh agent registry on the SIEM" "/var/ossec/etc/client.keys"
+  ask SIEM_CLIENT_KEYS "Agent registry on the CyberSentinel SIEM" "/var/ossec/etc/client.keys"
   ask BASE_DIR "UEBA install directory (on the target)" "/opt/cybersentinel/ueba"
   ask DATA_DIR "Data directory (on the target)" "/data/ueba"
   ask DASH_HOST "Dashboard bind address" "0.0.0.0"

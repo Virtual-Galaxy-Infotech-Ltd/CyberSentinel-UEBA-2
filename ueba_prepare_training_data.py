@@ -212,6 +212,9 @@ def main():
     log.info("=" * 55)
 
     # Clean up any stale normalizer state files
+    # These two are literal on-disk filenames written by an older version, not
+    # a product reference: the strings have to stay exactly as they are or the
+    # stale files they clean up would be left behind forever.
     for stale in [Path("wazuh_normalizer.state"), Path(".wazuh_normalizer.state")]:
         if stale.exists():
             stale.unlink()
