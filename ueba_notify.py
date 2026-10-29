@@ -35,6 +35,8 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+
+import ueba_egress
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -161,6 +163,14 @@ def save_rule(path, *, name, min_score=None, verdicts=None, priorities=None,
     webhook = (webhook or "").strip()
     if webhook and not webhook.lower().startswith(("http://", "https://")):
         raise ValueError("webhook must be an http(s) URL")
+    if webhook:
+        # Refuse the rule now rather than letting it fail silently every time it
+        # fires. An operator who typed an off-premises destination needs to hear
+        # about it while the form is still open.
+        try:
+            ueba_egress.guard(webhook)
+        except ueba_egress.EgressBlocked as e:
+            raise ValueError("webhook destination is not permitted: %s" % e.reason)
     if not emails and not webhook:
         raise ValueError("a rule needs at least one channel: email or webhook")
 
@@ -323,6 +333,10 @@ def _body(s, device, rule_name, site):
 
 
 def post_webhook(url, payload):
+    # Checked again here, not only at rule-creation time: the egress policy can
+    # be tightened after a rule was saved, and the tightening must take effect
+    # without anyone having to remember to re-validate every stored rule.
+    ueba_egress.guard(url)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST",

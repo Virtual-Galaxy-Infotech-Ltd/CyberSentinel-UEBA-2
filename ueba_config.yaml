@@ -408,6 +408,37 @@ dashboard:
 #      round-trip through /auth/sso.
 #   3. Only then set enforce: true. Doing it earlier locks analysts out of a
 #      live dashboard — the server refuses to start in that state on purpose.
+# ── Outbound egress (RFP SN 64) ──────────────────────────────────────────────
+#
+# What this product is allowed to send, and where. Enforced by ueba_egress for
+# every outbound call the platform makes: notification webhooks and the
+# AI-analyst helper. Deny-by-default — an install that never touches this block
+# keeps all customer data on premises.
+#
+# This governs the product's own calls, not the machine's. It is not a firewall
+# and does not replace site-level egress filtering.
+#
+#   mode: deny         no outbound connections at all.
+#         on_premises  DEFAULT. Private, loopback and link-local destinations
+#                      only, so an internal SMTP relay or ticketing webhook
+#                      works with no configuration, plus anything in `allow`.
+#         allowlist    nothing but `allow`.
+#         open         unrestricted. The compliance report calls this out as a
+#                      data-residency exception, because it is one.
+#
+# A destination clears the gate only if every address its hostname resolves to
+# clears it; a name that cannot be resolved is refused rather than assumed safe.
+#
+# `allow` entries may be an exact hostname, a *.suffix wildcard, a bare IP or a
+# CIDR. Anything listed here is a deliberate, auditable exception — it appears
+# by name in the Audit & Compliance report.
+#
+# UEBA_EGRESS_MODE in the environment overrides `mode`, for locking an install
+# down without editing site config.
+egress:
+  mode: on_premises
+  allow: []
+
 auth:
   enabled:            true
   enforce:            false          # Turned on 2026-09-09 and verified working

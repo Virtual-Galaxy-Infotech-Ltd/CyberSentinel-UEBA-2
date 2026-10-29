@@ -482,6 +482,36 @@ def _sec_retention(ctx):
                         "training corpus to the configured rolling window.")
 
 
+def _sec_residency(ctx):
+    """Where the platform is permitted to send data (RFP SN 64).
+
+    Reads the gate's own report rather than restating policy in prose, so this
+    section cannot claim a posture the deployment does not actually have.
+    """
+    r = ctx.get("residency") or {}
+    if not r:
+        return None
+    summary = r.get("summary") or ""
+    labels = {
+        "outbound_gate":       "Outbound gate",
+        "mode":                "Egress policy",
+        "allowed_exceptions":  "Permitted exceptions",
+        "on_premises":         "Data stays on premises",
+        "external_ai_analyst": "External AI analyst",
+    }
+    items = []
+    for key, label in labels.items():
+        if key not in r:
+            continue
+        v = r[key]
+        if isinstance(v, list):
+            v = ", ".join(v) if v else "none"
+        elif isinstance(v, bool):
+            v = "yes" if v else "no"
+        items.append({"label": label, "value": str(v)})
+    return metrics("Data residency", items, note=summary) if items else None
+
+
 def _sec_geo(ctx, limit=15):
     geo = ctx.get("geo") or []
     if not geo:
@@ -542,6 +572,7 @@ SECTIONS = {
     "audit_summary":      _sec_audit_summary,
     "system_health":      _sec_system_health,
     "retention":          _sec_retention,
+    "data_residency":     _sec_residency,
     "geo_origins":        _sec_geo,
 }
 
@@ -566,6 +597,7 @@ SECTION_LABELS = {
     "audit_summary":     "Audit summary",
     "system_health":     "System health",
     "retention":         "Data retention",
+    "data_residency":    "Data residency (on-premises)",
     "geo_origins":       "External traffic by country",
 }
 
@@ -602,7 +634,8 @@ REPORTS = {
         "purpose":  "Who did what inside the platform, and how it is configured.",
         "rfp":      "37",
         "sections": ["scope", "audit_summary", "analyst_actions", "fp_activity",
-                     "watchlist_config", "retention", "system_health"],
+                     "watchlist_config", "retention", "data_residency",
+                     "system_health"],
     },
     # 62 — threat report for a specified period.
     "threat_report": {

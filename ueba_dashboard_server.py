@@ -71,6 +71,16 @@ except ImportError:
     ueba_auth = None
     AUTH_MODULE_AVAILABLE = False
 
+# The outbound-egress gate (RFP SN 64). Unlike the other optional siblings, a
+# missing module here is a posture change, not a missing feature: the startup
+# banner says UNGATED so it cannot pass unnoticed.
+try:
+    import ueba_egress  # type: ignore
+    EGRESS_AVAILABLE = True
+except Exception:
+    ueba_egress = None
+    EGRESS_AVAILABLE = False
+
 # Watch lists. Optional on the same terms — an install that predates this module
 # keeps serving, with the watch-list endpoints reporting themselves unavailable
 # rather than 500ing.
@@ -206,7 +216,11 @@ _DEFAULTS = {
         "dc_label":     "VG Datacenter",
     },
     "ai_analyst": {
-        "enabled":     True,
+        # Opt-in, deliberately. This feature POSTs alert context to an external
+        # API; on a customer install that is a data-residency breach, so it must
+        # take a positive act to switch on, not merely an API key appearing in
+        # the environment. See ueba_egress and RFP SN 64.
+        "enabled":     False,
         "model":       "claude-sonnet-4-6",
         "max_tokens":  1000,
         "timeout_secs": 20,
@@ -2940,6 +2954,9 @@ def _report_context(hours, generated_by=None):
         # not exist anywhere, so the compliance report always printed the
         # hardcoded fallback whatever the deployment was actually set to.
         "retention": _retention_facts(),
+        # RFP SN 64 — an on-premises claim an auditor can check rather than
+        # take on trust. Derived from the installed gate, not from prose.
+        "residency":    _residency_facts(),
         "site":         CFG.get("site_name") or "CyberSentinel UEBA",
         "generated_by": generated_by,
         "generated_at": now.isoformat(),
@@ -2965,6 +2982,35 @@ def _retention_facts():
             "event-count EWMA (alpha "
             f"{ps.get('legacy_alpha', 0.01)}) — not a time period")
     return out
+
+
+def _residency_facts():
+    """Where this deployment is permitted to send data (RFP SN 64).
+
+    Reported from the gate that actually enforces the policy, so the statement
+    and the behaviour cannot drift apart.
+    """
+    if not EGRESS_AVAILABLE:
+        return {
+            "outbound_gate": "absent",
+            "on_premises":   False,
+            "summary":       "The outbound-egress gate is not installed; this "
+                             "deployment's outbound behaviour is ungoverned.",
+        }
+    st = ueba_egress.status()
+    ai_on = bool(CFG.get("ai_analyst", {}).get("enabled")
+                 and os.environ.get("ANTHROPIC_API_KEY"))
+    return {
+        "outbound_gate":       "enforced",
+        "mode":                st["mode"],
+        "allowed_exceptions":  st["allow"],
+        "on_premises":         st["compliant_on_premises"] and not ai_on,
+        "external_ai_analyst": ai_on,
+        "summary": st["description"] + (
+            " The external AI-analyst feature is enabled, which sends alert "
+            "context off premises." if ai_on else
+            " No component sends behavioural data to a third party."),
+    }
 
 
 def _current_username():
@@ -4069,6 +4115,17 @@ def unmark_fp_pattern(pat_id):
 
 
 # ── Engine health ────────────────────────────────────────────────────────────
+@app.route("/api/compliance/residency")
+def compliance_residency():
+    """Where this deployment may send data (RFP SN 64).
+
+    Deliberately readable by any signed-in user: it names no secret, and an
+    analyst being able to confirm for themselves that nothing leaves the site
+    is the point of the control.
+    """
+    return jsonify(_residency_facts())
+
+
 @app.route("/api/health")
 def health():
     """Engine + dashboard health snapshot for the Overview health card."""
@@ -4256,9 +4313,17 @@ def ai_analyze():
     if requests is None:
         return jsonify({"ok": False, "error": "requests not installed", "source": "fallback"})
 
+    endpoint = "https://api.anthropic.com/v1/messages"
+    if EGRESS_AVAILABLE:
+        try:
+            ueba_egress.guard(endpoint)
+        except ueba_egress.EgressBlocked as e:
+            return jsonify({"ok": False, "error": "blocked by egress policy: %s" % e.reason,
+                            "source": "fallback"})
+
     try:
         r = requests.post(
-            "https://api.anthropic.com/v1/messages",
+            endpoint,
             headers={
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
@@ -4856,6 +4921,10 @@ def main() -> None:
     # enforcing but silently open" is worse.
     global _RAW_CFG
     _RAW_CFG = load_raw_config(args.config) or {}
+    if EGRESS_AVAILABLE:
+        # Installed before anything can send: the gate governs this process and
+        # the notification dispatcher it starts.
+        ueba_egress.install_from_config(_RAW_CFG)
 
     auth_status = "module not installed"
     auth_cfg: dict = {}
@@ -4889,6 +4958,13 @@ def main() -> None:
     print(f"  Dashboard build:  {'dist/ (Vite build)' if dist_ok else 'legacy index.html'}")
     print(f"  AI analyst:       "
           f"{'enabled' if CFG['ai_analyst'].get('enabled') and os.environ.get('ANTHROPIC_API_KEY') else 'fallback only'}")
+    if EGRESS_AVAILABLE:
+        _eg = ueba_egress.status()
+        print(f"  Outbound egress:  {_eg['mode']}"
+              f"{'' if _eg['compliant_on_premises'] else '  (NOT on-premises-compliant)'}"
+              f"{('  allow: ' + ', '.join(_eg['allow'])) if _eg['allow'] else ''}")
+    else:
+        print("  Outbound egress:  UNGATED (ueba_egress not importable)")
     if REPORTS_AVAILABLE:
         print(f"  Reporting:        {len(ueba_reports.REPORTS)} built-in reports, "
               f"formats: {', '.join(ueba_report_render.available_formats())}"
