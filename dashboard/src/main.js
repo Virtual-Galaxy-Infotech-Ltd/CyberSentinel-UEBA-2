@@ -20,6 +20,7 @@ import { initFooter, openFooterPage, closeFooterPage } from "./ui/footer.js";
 import { initInfoTooltip } from "./ui/info-tooltip.js";
 import { initCapabilities } from "./ui/capabilities.js";
 import { initLogin, logout } from "./ui/login.js";
+import { initAccountMenu } from "./ui/account-menu.js";
 import { initSettings, refreshSettings } from "./panels/settings.js";
 import { initTabs } from "./ui/tabs.js";
 import { initShortcuts } from "./ui/shortcuts.js";
@@ -152,6 +153,7 @@ Object.assign(window, {
 initTheme();
 initLogin();          // puts the sign-in gate up only if the server enforces auth
 initCapabilities();   // RFP 23 — hides controls the current role cannot use
+initAccountMenu();    // header account menu: Settings + Sign out
 initSettings();
 initFooter();
 initInfoTooltip();

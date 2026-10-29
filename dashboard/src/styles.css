@@ -925,7 +925,86 @@
     50%       { opacity: 0.7; box-shadow: 0 0 0 5px rgba(6,214,160,0); }
   }
 
-  .last-update { font-family: var(--mono2); font-size: 13px; color: var(--text3); }
+  /* ── Header account menu (Settings + Sign out) ──────────────────────────
+     Sits where the "Updated HH:MM" readout used to be. Settings moved in here
+     from the sidebar, so everything account-level is behind one control. */
+  .account-menu { position: relative; display: flex; align-items: center; }
+
+  .account-btn {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 7px 3px 3px;
+    background: transparent;
+    border: 1px solid var(--border2);
+    border-radius: 20px;
+    color: var(--text2);
+    cursor: pointer;
+    transition: border-color .15s ease, color .15s ease;
+  }
+  .account-btn:hover,
+  .account-menu.open .account-btn { border-color: var(--accent); color: var(--text); }
+  .account-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .account-avatar {
+    width: 24px; height: 24px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: rgba(6,214,160,0.12);
+    border: 1px solid rgba(6,214,160,0.35);
+    color: var(--green);
+    font-family: var(--mono2); font-size: 12px; font-weight: 600;
+    line-height: 1;
+  }
+  .account-caret { font-size: 9px; line-height: 1; }
+  .account-menu.open .account-caret { transform: rotate(180deg); }
+
+  .account-dropdown {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 400;
+    min-width: 212px;
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+    padding: 6px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+
+  .account-who {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 7px 10px 9px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+  .account-who-name {
+    font-family: var(--sans); font-size: 13px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .account-who-role {
+    font-family: var(--mono2); font-size: 10px; letter-spacing: 0.6px;
+    text-transform: uppercase; color: var(--text3);
+  }
+  .account-who-role:empty { display: none; }
+
+  .account-item {
+    display: flex; align-items: center; gap: 9px;
+    width: 100%; padding: 8px 10px;
+    background: transparent; border: 0; border-radius: 7px;
+    font-family: var(--sans); font-size: 13px; text-align: left;
+    color: var(--text2); cursor: pointer;
+    transition: background .12s ease, color .12s ease;
+  }
+  .account-item:hover { background: var(--bg3); color: var(--text); }
+  .account-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .account-item-icon { width: 14px; text-align: center; font-size: 13px; }
+  .account-item-danger { color: var(--red); }
+  .account-item-danger:hover { background: rgba(239,71,111,0.10); color: var(--red); }
+
+  html.light .account-dropdown {
+    background: #fff;
+    box-shadow: 0 8px 24px rgba(16,24,40,0.14);
+  }
+  html.light .account-avatar {
+    background: rgba(4,168,124,0.08);
+    border-color: rgba(4,168,124,0.32);
+  }
 
   /* ════════════════════════════════════════════════════════════════════
      Collapsible icon sidebar  (replaces the old horizontal <nav>)
@@ -3158,6 +3237,8 @@
     }
     .tab { flex: 0 0 auto; }
     .header-right { gap: 8px; flex-wrap: wrap; }
+    /* The header wraps here, so a right-anchored dropdown can sit off-canvas. */
+    .account-dropdown { right: auto; left: 0; }
     .row-gauge-timeline,
     .row-users-mitre,
     .row-mitre-health,

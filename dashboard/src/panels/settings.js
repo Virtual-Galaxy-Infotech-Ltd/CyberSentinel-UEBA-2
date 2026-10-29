@@ -288,10 +288,11 @@ export function initSettings() {
   const btn = document.getElementById("set-new-btn");
   if (btn) btn.addEventListener("click", createUser);
 
-  // Re-read on every visit to the tab. Accounts are changed by other admins and
-  // by the CLI, so a list cached since page load is routinely wrong.
-  const tab = document.querySelector('.tab[data-tab="settings"]');
-  if (tab) tab.addEventListener("click", refreshSettings);
+  // Re-read on every visit. Accounts are changed by other admins and by the
+  // CLI, so a list cached since page load is routinely wrong. The trigger is
+  // the account-menu item, since Settings no longer has a sidebar tab.
+  const entry = document.getElementById("account-settings");
+  if (entry) entry.addEventListener("click", refreshSettings);
 
   refreshSettings();
 }

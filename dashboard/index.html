@@ -63,7 +63,32 @@
       <div class="status-dot"></div>
       <span>ENGINE LIVE</span>
     </div>
-    <div class="last-update" id="last-update">Not loaded yet</div>
+    <!-- Account menu. Replaces the "Updated HH:MM" readout that sat here: the
+         engine-live pill beside it already says whether data is flowing, so the
+         timestamp was the less useful of the two in a fixed amount of space.
+         Holds the sign-out and Settings actions; Settings was removed from the
+         sidebar so account-level things live in one place. -->
+    <div class="account-menu" id="account-menu">
+      <button class="account-btn" id="account-btn" type="button"
+              aria-haspopup="menu" aria-expanded="false" aria-controls="account-dropdown"
+              title="Account">
+        <span class="account-avatar" id="account-avatar" aria-hidden="true">?</span>
+        <span class="account-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="account-dropdown" id="account-dropdown" role="menu"
+           aria-labelledby="account-btn" hidden>
+        <div class="account-who">
+          <span class="account-who-name" id="account-who-name">Not signed in</span>
+          <span class="account-who-role" id="account-who-role"></span>
+        </div>
+        <button class="account-item" id="account-settings" type="button" role="menuitem">
+          <span class="account-item-icon" aria-hidden="true">⚙</span>Settings
+        </button>
+        <button class="account-item account-item-danger" id="account-logout" type="button" role="menuitem">
+          <span class="account-item-icon" aria-hidden="true">⏻</span>Sign out
+        </button>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -94,8 +119,6 @@
         <span class="tab-icon" aria-hidden="true">⚑</span><span class="tab-label">False Positives</span><span class="nav-pill" id="fp-nav-badge">0</span></div>
       <div class="tab" data-tab="alerting" data-cap="notify.edit"               title="Alerting">
         <span class="tab-icon" aria-hidden="true">◈</span><span class="tab-label">Alerting</span><span class="nav-pill" id="ntf-nav-badge">0</span></div>
-      <div class="tab" data-tab="settings"               title="Settings">
-        <span class="tab-icon" aria-hidden="true">⚙</span><span class="tab-label">Settings</span></div>
       <div class="tab" data-tab="reports"                title="Reports">
         <span class="tab-icon" aria-hidden="true">▤</span><span class="tab-label">Reports</span></div>
       <div class="tab" data-tab="watchlist"              title="Watch List">

@@ -102,8 +102,6 @@ export async function fetchAll() {
     loadUserDetail(state.selectedUser, { silent: true });
   }
 
-  const lu = document.getElementById("last-update");
-  if (lu) lu.textContent = "Updated " + new Date().toLocaleTimeString("en-IN");
   const dot  = document.querySelector(".status-dot");
   const pill = document.querySelector(".status-pill");
   if (dot)  dot.style.background = "var(--green)";
@@ -146,8 +144,6 @@ export function manualRefresh() {
       if (dot)  dot.style.background = "var(--red)";
       if (pill) pill.style.color = "var(--red)";
       if (pillSpan) pillSpan.textContent = "OFFLINE";
-      const lu = document.getElementById("last-update");
-      if (lu) lu.textContent = "Connection error";
       showToast("Connection failed — engine offline?", "error");
     });
 
