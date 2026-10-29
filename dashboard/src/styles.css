@@ -966,6 +966,9 @@
     padding: 6px;
     display: flex; flex-direction: column; gap: 2px;
   }
+  /* This class sets display:flex, which clobbers the UA's [hidden]{display:none}.
+     Re-assert hiding for this specific element, same as .mitre-pop below. */
+  .account-dropdown[hidden] { display: none; }
 
   .account-who {
     display: flex; flex-direction: column; gap: 2px;
