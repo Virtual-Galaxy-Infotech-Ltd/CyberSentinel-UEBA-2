@@ -348,6 +348,22 @@ def build_anomaly_reasons(log_entry: dict, if_result: dict,
 
 # ── UEBA Block Builder ────────────────────────────────────────────────────────
 
+def _overrides_noise(result: dict) -> bool:
+    """True if this alert carries a finding that outranks noise suppression.
+
+    Kept to named fields rather than matching reason text, so rewording a
+    reason can never silently change what gets suppressed.
+    """
+    ueba = result.get("ueba") or {}
+    if ueba.get("privilege_findings"):
+        return True
+    # SN 48 — an entity with confirmed malicious history. If we know that much
+    # about it, its anomalies should not be dropped on the event type alone.
+    if ueba.get("history_boost"):
+        return True
+    return False
+
+
 def build_ueba_block(
     if_result: dict,
     ae_result: dict,
@@ -1014,6 +1030,14 @@ class UEBAEngine:
                 "boost":  watch["boost"],
             }
 
+        # SN 15 — which of the three behaviours fired, named rather than left to
+        # be inferred from the reason text. The noise gate in run() reads this,
+        # so it has to be a field and not a string match on prose.
+        if priv_assess.get("findings"):
+            ueba_block["privilege_findings"] = list(priv_assess["findings"])
+        if privilege and privilege.get("level") != "standard":
+            ueba_block["privilege_level"] = privilege.get("level")
+
         output_log = dict(log_entry)
         output_log["ueba"] = ueba_block
         output_log["evidence"] = evidence_block
@@ -1150,6 +1174,30 @@ class UEBAEngine:
                             if not _is_noise:
                                 from ueba_preprocessor import is_noise as _is_noise_fn
                                 _is_noise = _is_noise_fn(result)
+
+                            # A named finding outranks signature-level noise
+                            # suppression (SN 15, SN 48).
+                            #
+                            # The noise list is a statement about EVENT TYPES
+                            # that are usually worthless, and two of the
+                            # signatures on it — "process spawned with elevated
+                            # privileges" and "failed attempt to perform a
+                            # privileged operation" — are exactly the events
+                            # SN 15 is built on. Measured on this deployment,
+                            # all 93 privileged operations in a two-minute
+                            # window were suppressed, so the misuse and
+                            # takeover detections could never have reached the
+                            # feed however correct they were.
+                            #
+                            # The override is deliberately narrow: not "the
+                            # event was privileged", which is common, but "the
+                            # engine attached a specific finding to it", which
+                            # is not. A privileged operation with no finding
+                            # stays suppressed.
+                            if _is_noise and _overrides_noise(result):
+                                _is_noise = False
+                                self.stats.setdefault("total_noise_overridden", 0)
+                                self.stats["total_noise_overridden"] += 1
 
                             # Analyst-FP suppression: if the rule description
                             # matches a stored FP pattern (created when an
@@ -1453,13 +1501,14 @@ class UEBAEngine:
         fp_suppressed = self.stats.get("total_fp_suppressed", 0)
         log.info(
             "Stats | processed: %d | alerts: %d (%.2f%%) | "
-            "suppressed_noise: %d | suppressed_fp: %d (%d patterns) | "
+            "suppressed_noise: %d (%d overridden) | suppressed_fp: %d (%d patterns) | "
             "errors: %d | rate: %.0f/sec | ae_cache: %d | "
             "rss: %.1fGB | threads: %d",
             self.stats["total_processed"],
             self.stats["total_alerts"],
             alert_rate,
             suppressed,
+            self.stats.get("total_noise_overridden", 0),
             fp_suppressed,
             self.fp_suppressor.pattern_count,
             self.stats["total_errors"],

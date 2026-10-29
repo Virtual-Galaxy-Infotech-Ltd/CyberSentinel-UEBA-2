@@ -200,6 +200,18 @@ def _read(path) -> dict:
     return index
 
 
+def normalise(value) -> str:
+    """The stored form of an entity name.
+
+    Public because callers have to match on it. `entries()` returns normalised
+    values, so comparing a raw name against them fails whenever the escaping
+    differs — which it does for half the domain-qualified names on this estate.
+    A console delete that got this wrong would 404 on a declaration that plainly
+    exists, and a re-declaration would duplicate instead of replace.
+    """
+    return _norm(value)
+
+
 def entries(path) -> list:
     """The operator list, for the console."""
     with _lock:
@@ -355,10 +367,19 @@ def assess(verdict: dict, presence: dict | None, host_count: int,
                 "different hosts" % (label, int(host_count)))
 
     # ── misuse ──
-    # Only when the event IS a privileged operation. Without that condition
-    # this fires on an administrator reading their email at 21:00, which is not
-    # what the serial asks about.
-    if privileged_event and business_hours is False:
+    # Three conditions, and each one removes a different false positive.
+    #
+    # The event must BE a privileged operation, or this fires on an
+    # administrator reading their email at 21:00.
+    #
+    # It must be out of hours, which is what makes it worth saying at all.
+    #
+    # And the account must be human, for the same reason sharing is human-only:
+    # a service account runs at 03:00 because that is when its job runs. Without
+    # this condition the single account NT AUTHORITY\\SYSTEM produces a finding
+    # on every one of its privileged operations — 43 of them per 75 seconds when
+    # measured on this estate — and the reason is worthless by the first morning.
+    if privileged_event and business_hours is False and klass == "human":
         out["findings"].append("misuse")
         out["reasons"].append(
             "Privileged operation by a %s account outside business hours" % label)
@@ -450,6 +471,8 @@ def selftest() -> int:
     save(lst3, [{"value": "host:jump-01", "level": "high"}])
 
     # ── escaping: half the real estate carries doubled backslashes ──
+    ok("normalise is the public name for it",
+       normalise("NT AUTHORITY\\\\SYSTEM") == _norm("NT AUTHORITY\\\\SYSTEM"))
     ok("doubled backslash collapses", _norm("NT AUTHORITY\\\\SYSTEM") == "nt authority\\system")
     ok("single backslash preserved", _norm("NT AUTHORITY\\SYSTEM") == "nt authority\\system")
     ok("triple collapses too", _norm("A\\\\\\user") == "a\\user")
@@ -538,6 +561,9 @@ def selftest() -> int:
     # ── misuse ──
     a = assess(hi, None, 0, True, False)
     ok("out-of-hours privileged op is misuse", "misuse" in a["findings"])
+    a = assess(svc, None, 0, True, False)
+    ok("service account is exempt from misuse", "misuse" not in a["findings"])
+    ok("a service account still gets a prior", a["boost"] > 0)
     a = assess(hi, None, 0, True, True)
     ok("in-hours privileged op is not misuse", "misuse" not in a["findings"])
     a = assess(hi, None, 0, False, False)
@@ -565,7 +591,7 @@ def selftest() -> int:
     ok("all three can fire together", len(a["findings"]) == 3)
     ok("three reasons produced", len(a["reasons"]) == 3)
 
-    total = 101
+    total = 104
     if failures:
         print("ueba_privilege selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

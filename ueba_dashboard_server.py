@@ -3896,7 +3896,11 @@ def api_privileged_add():
     path = _privileged_path()
     try:
         items = ueba_privilege.entries(path)
-        items = [e for e in items if e.get("value") != value.lower()]
+        # Compare on the stored form, not a bare lower-case: entity names reach
+        # us with inconsistent backslash escaping, so a raw comparison would
+        # append a duplicate instead of replacing the existing declaration.
+        target = ueba_privilege.normalise(value)
+        items = [e for e in items if e.get("value") != target]
         items.append({"value": value, "level": level, "class": klass,
                       "note": (body.get("note") or "")})
         ueba_privilege.save(path, items)
@@ -3916,7 +3920,8 @@ def api_privileged_remove(value):
     path = _privileged_path()
     try:
         items = ueba_privilege.entries(path)
-        kept = [e for e in items if e.get("value") != (value or "").strip().lower()]
+        target = ueba_privilege.normalise(value)
+        kept = [e for e in items if e.get("value") != target]
         if len(kept) == len(items):
             return jsonify({"ok": False, "error": "not declared"}), 404
         ueba_privilege.save(path, kept)
