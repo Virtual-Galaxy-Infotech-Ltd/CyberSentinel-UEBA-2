@@ -81,6 +81,14 @@ except Exception:
     ueba_egress = None
     EGRESS_AVAILABLE = False
 
+# Confirmed-incident history (RFP SN 48). Optional on the same terms.
+try:
+    import ueba_risk_history  # type: ignore
+    RISK_HISTORY_AVAILABLE = True
+except Exception:
+    ueba_risk_history = None
+    RISK_HISTORY_AVAILABLE = False
+
 # Watch lists. Optional on the same terms — an install that predates this module
 # keeps serving, with the watch-list endpoints reporting themselves unavailable
 # rather than 500ing.
@@ -698,7 +706,12 @@ _ARCHIVE_RE = re.compile(r"ueba_alerts_(\d{4}-\d{2}-\d{2})\.jsonl\.zip$")
 # RFP SN 54 (display threat BY MODEL) and SN 47 (account used for the first
 # time). Both were present on the engine's alert and dropped here, so the feed
 # table could never show or filter on them however the UI asked.
-_SLIM_VER = 3
+# v4 (2026-10-29) adds history_boost, for RFP SN 48 (an entity previously
+# involved in malicious behaviour stays flagged). Carried for the same reason
+# watch_boost is, two fields below: without it the badge shows on a
+# live-streamed alert and then disappears when the same alert comes back from
+# the cache as a slim record.
+_SLIM_VER = 4
 
 
 def _slim(a: dict) -> dict:
@@ -728,6 +741,7 @@ def _slim(a: dict) -> dict:
             "watchlist":       ueba.get("watchlist"),
             "model_score":     ueba.get("model_score"),
             "watch_boost":     ueba.get("watch_boost"),
+            "history_boost":   ueba.get("history_boost"),
             # Two strings, kept deliberately rather than the whole raw_scores
             # block: which autoencoder scored this row, and whether it was the
             # entity's own model or the global fallback.
@@ -1559,8 +1573,17 @@ def load_alerts(n: int | None = None, include_fp: bool = False,
 
 def _wants_include_fp() -> bool:
     """Read ?include_fp=1 from the current request."""
-    v = (request.args.get("include_fp") or "").strip().lower()
-    return v in ("1", "true", "yes", "y")
+    return _truthy(request.args.get("include_fp"))
+
+
+def _truthy(v) -> bool:
+    """The query-string truth convention used across this API."""
+    return str(v or "").strip().lower() in ("1", "true", "yes", "y")
+
+
+def _risk_history_cfg() -> dict:
+    """The detection.risk_history block (SN 48), or an empty default."""
+    return ((_RAW_CFG.get("detection") or {}).get("risk_history") or {})
 
 
 # ── Endpoint result cache + background warmer ────────────────────────────────
@@ -3041,6 +3064,7 @@ CAPABILITIES = {
     "export":           "viewer",
     "watchlist.edit":   "analyst",
     "fp.edit":          "analyst",
+    "incident.confirm": "analyst",
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
@@ -3879,6 +3903,124 @@ def api_audit():
         return jsonify({"ok": False, "error": str(e), "entries": []}), 500
     rows.reverse()
     return jsonify({"ok": True, "count": len(rows), "entries": rows})
+
+
+# ── Confirmed incidents (RFP SN 48) ──────────────────────────────────────────
+#
+# The positive counterpart to false-positive marking below. Until this existed
+# an analyst could only record that an alert was wrong; there was no way to
+# record that one was right, so "this account was involved in a confirmed
+# incident last month" lived nowhere and the next alert on that account looked
+# like the first one.
+
+def _risk_history_path():
+    """Where the confirmed-incident ledger lives.
+
+    Defaults next to the profile store, which is where the other SQLite state
+    (the profile db, the auth db) already sits. Resolved against the install
+    directory so a relative `profile_db` — which is how the shipped config
+    writes it — does not land wherever the service happened to be started from.
+    """
+    paths = (_RAW_CFG.get("paths") or {})
+    explicit = paths.get("risk_history_db") or ""
+    if explicit:
+        return str(_abs_install_path(explicit))
+    profile_db = paths.get("profile_db") or "profiles/user_profiles.db"
+    return str(_abs_install_path(profile_db).parent / "risk_history.db")
+
+
+def _abs_install_path(p) -> Path:
+    """Resolve a possibly-relative config path against the install directory."""
+    q = Path(str(p))
+    return q if q.is_absolute() else (Path(__file__).resolve().parent / q)
+
+
+@app.route("/api/incidents/confirm", methods=["POST"])
+@_require_cap("incident.confirm")
+def confirm_incident():
+    """Record an alert as genuinely malicious, against its entity.
+
+    The entity is resolved from the alert rather than taken from the request:
+    an analyst confirms an ALERT, and letting the caller name the entity
+    separately would let the two disagree and book history against the wrong
+    account.
+    """
+    if not RISK_HISTORY_AVAILABLE:
+        return jsonify({"ok": False, "error": "risk history unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    eid = (body.get("event_id") or "").strip()
+    if not eid:
+        return jsonify({"ok": False, "error": "event_id required"}), 400
+
+    raw = _read_all_alerts_for_lookup()
+    alert = next((a for a in raw if a.get("event_id") == eid), None)
+    if alert is None:
+        return jsonify({"ok": False, "error": "alert not found"}), 404
+
+    entity = get_user(alert)
+    if not entity or entity == "unknown":
+        return jsonify({"ok": False,
+                        "error": "this alert has no attributable entity"}), 400
+
+    ueba = alert.get("ueba") or {}
+    severity = (body.get("severity") or "").strip().lower()
+    if not severity:
+        # Default from the engine's own verdict, so the common case needs no
+        # decision from the analyst.
+        severity = {"highly_anomalous": "critical",
+                    "anomalous": "high",
+                    "suspicious": "medium"}.get(ueba.get("risk_verdict"), "high")
+    try:
+        rec = ueba_risk_history.confirm(
+            _risk_history_path(), entity,
+            severity=severity,
+            event_id=eid,
+            campaign_id=ueba.get("campaign_id") or "",
+            score=ueba.get("combined_score"),
+            summary=(body.get("summary") or
+                     (alert.get("security") or {}).get("signature") or ""),
+            confirmed_by=_current_username() or "",
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "incident": rec,
+                    "standing": ueba_risk_history.standing(
+                        _risk_history_path(), entity, _risk_history_cfg())})
+
+
+@app.route("/api/incidents/<incident_id>/retract", methods=["POST"])
+@_require_cap("incident.confirm")
+def retract_incident(incident_id):
+    """Withdraw a confirmation. Soft delete — the record of the change stays."""
+    if not RISK_HISTORY_AVAILABLE:
+        return jsonify({"ok": False, "error": "risk history unavailable"}), 503
+    done = ueba_risk_history.retract(_risk_history_path(), incident_id,
+                                     retracted_by=_current_username() or "")
+    return jsonify({"ok": bool(done)}), (200 if done else 404)
+
+
+@app.route("/api/incidents/history")
+def incident_history():
+    """Entities with confirmed malicious history, riskiest first.
+
+    Readable by any signed-in user: an analyst triaging an alert needs to know
+    the entity has form, and that is the whole point of the record.
+    """
+    if not RISK_HISTORY_AVAILABLE:
+        return jsonify([])
+    entity = (request.args.get("entity") or "").strip()
+    if entity:
+        return jsonify({
+            "entity":    entity,
+            "standing":  ueba_risk_history.standing(
+                _risk_history_path(), entity, _risk_history_cfg()),
+            "incidents": ueba_risk_history.incidents(
+                _risk_history_path(), entity,
+                include_retracted=_truthy(request.args.get("include_retracted"))),
+        })
+    return jsonify(ueba_risk_history.summary(
+        _risk_history_path(), _risk_history_cfg(),
+        limit=int(request.args.get("limit", 100) or 100)))
 
 
 @app.route("/api/false-positive", methods=["POST"])

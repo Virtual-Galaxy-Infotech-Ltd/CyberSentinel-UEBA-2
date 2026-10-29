@@ -42,6 +42,7 @@ import numpy as np
 import yaml
 
 import ueba_watchlist
+import ueba_risk_history
 from ueba_preprocessor import FeatureExtractor, UserProfileStore
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -183,20 +184,30 @@ class StreamState:
 # ── Score Fusion ──────────────────────────────────────────────────────────────
 
 def fuse_scores(if_result: dict, ae_result: dict, config: dict,
-                watch_boost: float = 0.0) -> dict:
+                watch_boost: float = 0.0, history_boost: float = 0.0) -> dict:
     """
     Combine Isolation Forest and Autoencoder scores into a final verdict.
 
-    `watch_boost` is an additive bump for watch-listed entities (see
-    ueba_watchlist). It is applied BEFORE the threshold and verdict tiers are
-    evaluated, which is the whole point: watching an entity should lower the bar
-    at which its behaviour becomes visible, not merely relabel alerts that would
-    have fired anyway.
+    Two additive priors, both applied BEFORE the threshold and verdict tiers
+    are evaluated, which is the whole point: a prior should lower the bar at
+    which an entity's behaviour becomes visible, not merely relabel alerts that
+    would have fired anyway.
+
+    `watch_boost`   — an analyst has flagged this entity for elevated scrutiny
+                      (see ueba_watchlist).
+    `history_boost` — this entity has confirmed malicious incidents on record
+                      (see ueba_risk_history, RFP SN 48).
+
+    They are reported separately because they answer different questions. "Did
+    this alert fire because someone is watching this account, or because the
+    account has form?" is the first thing an analyst asks about a boosted
+    alert, and a single combined figure cannot answer it.
 
     Returns dict with:
         combined_score  — 0-1 weighted average
-        model_score     — the same figure BEFORE any watch-list boost
+        model_score     — the same figure BEFORE any boost
         watch_boost     — how much the watch list contributed (0.0 if none)
+        history_boost   — how much confirmed history contributed (0.0 if none)
         risk_verdict    — 'suspicious' | 'anomalous' | 'highly_anomalous'
         confidence      — 'low' | 'medium' | 'high'
         is_alert        — bool (True if above alert_threshold)
@@ -214,11 +225,12 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
     combined = float(np.clip(combined, 0.0, 1.0))
 
     # Keep the unboosted figure. Without it there is no way to tell, after the
-    # fact, whether an alert was the models' judgement or the watch list's —
-    # which is exactly the question an analyst reviewing a watched user asks.
+    # fact, whether an alert was the models' judgement or a prior's — which is
+    # exactly the question an analyst reviewing a boosted user asks.
     model_score = combined
-    if watch_boost:
-        combined = float(np.clip(combined + float(watch_boost), 0.0, 1.0))
+    total_boost = float(watch_boost or 0.0) + float(history_boost or 0.0)
+    if total_boost:
+        combined = float(np.clip(combined + total_boost, 0.0, 1.0))
 
     threshold = fusion_cfg["alert_threshold"]
     is_alert  = combined >= threshold
@@ -236,6 +248,7 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
         "combined_score": round(combined, 4),
         "model_score":    round(model_score, 4),
         "watch_boost":    round(float(watch_boost or 0.0), 4),
+        "history_boost":  round(float(history_boost or 0.0), 4),
         "risk_verdict":   verdict,
         "confidence":     confidence,
         "is_alert":       is_alert,
@@ -356,9 +369,15 @@ def build_ueba_block(
     # the shape of an ordinary alert is unchanged. Without these two fields
     # combined_score is ambiguous — an analyst reviewing a watched user could
     # not tell the models' judgement from the watch list's thumb on the scale.
-    if fusion.get("watch_boost"):
+    # Either prior having fired is worth carrying, and model_score is what
+    # makes the boost auditable — it is the models' own verdict before anything
+    # was added to it.
+    if fusion.get("watch_boost") or fusion.get("history_boost"):
         ueba["model_score"] = fusion.get("model_score")
+    if fusion.get("watch_boost"):
         ueba["watch_boost"] = fusion["watch_boost"]
+    if fusion.get("history_boost"):
+        ueba["history_boost"] = fusion["history_boost"]
 
     if include_raw:
         ueba["raw_scores"] = {
@@ -690,6 +709,24 @@ class UEBAEngine:
         # watch list takes effect on the next event with no engine restart.
         self.watchlist_file = paths.get("watchlist_file") or ""
 
+        # Confirmed-incident history (SN 48). Same contract again: a store the
+        # dashboard writes when an analyst confirms an alert, re-read here on a
+        # file-signature change, so a confirmation takes effect on the next
+        # event without an engine restart.
+        # Defaulted, not merely read: if this were left empty when the key is
+        # absent, the engine would silently ignore a ledger the dashboard was
+        # still writing to, and confirmed incidents would have no effect at all.
+        # Must resolve to the same file the dashboard picks — see
+        # _risk_history_path there.
+        _rh = paths.get("risk_history_db") or ""
+        if not _rh:
+            _rh = str(Path(paths.get("profile_db")
+                           or "profiles/user_profiles.db").parent
+                      / "risk_history.db")
+        self.risk_history_db = _rh
+        self.risk_history_cfg = (
+            (cfg.get("detection") or {}).get("risk_history") or {})
+
         log.info("All components loaded successfully")
 
     def _maybe_reset_alerts_today(self) -> None:
@@ -755,9 +792,25 @@ class UEBAEngine:
                 # simply proceeds unboosted.
                 log.debug("watchlist lookup failed: %s", e)
 
-        # Fuse scores
-        fusion = fuse_scores(if_result, ae_result, self.config,
-                             watch_boost=(watch or {}).get("boost", 0.0))
+        # SN 48 — has this entity been involved in confirmed malicious activity
+        # before? Looked up before fusion for the same reason the watch list is:
+        # a prior should lower the bar at which this entity's behaviour becomes
+        # visible, not merely decorate an alert that would have fired anyway.
+        history = None
+        if self.risk_history_db and self.risk_history_cfg.get("enabled", True):
+            try:
+                history = ueba_risk_history.standing(
+                    self.risk_history_db, user, self.risk_history_cfg)
+            except Exception as e:
+                log.debug("risk history lookup failed: %s", e)
+
+        # Fuse scores. Both priors are additive and their sum is clipped inside
+        # fuse_scores, so an entity that is watch-listed AND has history cannot
+        # push the combined score past 1.0.
+        fusion = fuse_scores(
+            if_result, ae_result, self.config,
+            watch_boost=(watch or {}).get("boost", 0.0),
+            history_boost=(history or {}).get("boost", 0.0))
 
         # Transfer volume is recorded for EVERY event, before the alert gate
         # below, because the baseline it feeds (SN 12 / SN 46) describes what
@@ -858,6 +911,14 @@ class UEBAEngine:
         for reason in self._presence_reasons(presence):
             if reason not in anomaly_reasons:
                 anomaly_reasons.append(reason)
+
+        # RFP SN 48 — the entity's own history. Stated whenever any unretracted
+        # incident exists, independently of whether the boost has decayed to
+        # nothing: how much we amplify and whether we disclose are separate
+        # decisions, and an analyst should always learn that an entity has form.
+        if history and history.get("reason"):
+            if history["reason"] not in anomaly_reasons:
+                anomaly_reasons.append(history["reason"])
 
         # Build ueba block
         ueba_block = build_ueba_block(

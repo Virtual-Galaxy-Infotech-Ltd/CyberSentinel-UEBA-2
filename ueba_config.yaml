@@ -10,6 +10,10 @@ paths:
   training_data:        "/root/NEW_DRIVE/aditya_ueba/data/combined_training.jsonl"
   features_h5:          "/root/NEW_DRIVE/aditya_ueba/data/features.h5"
   profile_db:           "profiles/user_profiles.db"
+  # Confirmed-incident ledger (SN 48). Sits beside the profile and auth stores.
+  # If this key is absent both the engine and the dashboard derive the same
+  # default from profile_db's directory, so they cannot disagree.
+  risk_history_db:      "profiles/risk_history.db"
   models_dir:           "models/"
   isolation_forest:     "models/isolation_forest.pkl"
   scaler:               "models/scaler.pkl"
@@ -603,6 +607,32 @@ noise_suppression:
 
 # ── Detection tuning (RFP SN 12 / 46 / 47) ───────────────────────────────────
 detection:
+  # ── Risk history (RFP SN 48) ───────────────────────────────────────────────
+  #
+  # A user or device previously involved in confirmed malicious behaviour stays
+  # flagged. An analyst confirms an alert in the dashboard; it is recorded
+  # against that entity, and every later event on that entity carries a prior.
+  #
+  # The prior is additive and applied before the alert threshold, exactly like
+  # a watch-list hit: having form should lower the bar at which that entity's
+  # behaviour becomes visible, not just relabel alerts that would fire anyway.
+  #
+  # half_life_days  each incident's contribution halves over this period. An
+  #                 18-month-old incident should not weigh the same as one from
+  #                 Tuesday, or every entity that ever had a bad day sits at the
+  #                 top of the queue permanently and the ranking stops meaning
+  #                 anything.
+  # max_boost       the most that history alone can add to a score. Hard-capped
+  #                 at 0.50 in code regardless of what is set here.
+  #
+  # Decay governs the BOOST only. For as long as an entity has one unretracted
+  # incident, the alert still states that it has history — how much we amplify
+  # and whether we disclose are separate decisions.
+  risk_history:
+    enabled:         true
+    half_life_days:  90
+    max_boost:       0.25
+
   # SN 47 — an account seen for the first time, and one returning after a gap.
   # Annotates events that ALREADY cleared the alert threshold; it does not make
   # a new entity anomalous on its own, or every new laptop would alert.
