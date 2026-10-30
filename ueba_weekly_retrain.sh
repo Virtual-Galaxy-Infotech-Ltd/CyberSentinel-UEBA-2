@@ -42,6 +42,31 @@ SOC_SSH_KEY="${SOC_SSH_KEY:-/root/.ssh/id_ueba}"
 SOC_ENRICHED_DIR="${SOC_ENRICHED_DIR:-/home/vgipl/CyberSentinel-Event-Correlation-Kafka/data/enriched}"
 SSH_OPTS="-p ${SOC_PORT} -i ${SOC_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
 
+# Co-located mode. When UEBA runs ON the SIEM host the enriched chunks are a
+# local directory, and reaching them by SSH to localhost is both pointless and
+# fragile: on this deployment key auth to root@localhost is not configured, so
+# chunk discovery returned nothing and the retrain would have aborted at the
+# pull step — the second of two reasons it could not have completed.
+#
+# Detected rather than configured, so neither deployment shape needs a flag:
+# if the directory is readable here, read it here; otherwise fall back to SSH
+# for the split-host install. Same reasoning as install_ueba.sh's co-located
+# mode and the engine's agent_sync.mode=local.
+if [ -d "$SOC_ENRICHED_DIR" ] && [ -r "$SOC_ENRICHED_DIR" ]; then
+  COLOCATED=1
+else
+  COLOCATED=0
+fi
+
+# Run a command against the chunk directory, locally or over SSH.
+soc_sh() {
+  if [ "$COLOCATED" = "1" ]; then
+    sh -c "$1"
+  else
+    ssh $SSH_OPTS $SOC_HOST "$1"
+  fi
+}
+
 SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-90}
 # Rolling window for combined_training.jsonl — retrain.py only ever APPENDS to
 # it, so without trimming it grows unbounded (~11 GB/day here). Keep this aligned
@@ -79,6 +104,11 @@ exec >> "$LOG" 2>&1
 
 echo "==================================================================="
 echo "$(date '+%Y-%m-%d %H:%M:%S')  Weekly retrain start"
+if [ "$COLOCATED" = "1" ]; then
+  echo "  Chunk source: LOCAL $SOC_ENRICHED_DIR (co-located with the SIEM)"
+else
+  echo "  Chunk source: SSH $SOC_HOST:$SOC_ENRICHED_DIR"
+fi
 
 # ── 0.5 Prune combined_training.jsonl to a rolling window ───────────────────
 # MOVED HERE 2026-09-21 (was step 5.5, after the retrain).
@@ -160,23 +190,23 @@ PYPRUNE
 fi
 
 
-# ── 1. Discover new chunks on 23 ────────────────────────────────────────
+# ── 1. Discover new chunks ──────────────────────────────────────────────
 # Filenames are enriched_YYYY-MM-DD_HH-MM-SS.jsonl.gz, so lexicographic
 # comparison == chronological. State file holds the last-pulled basename.
 LAST_PULLED=$(cat "$LAST_PULL_STATE" 2>/dev/null || echo "")
 if [ -n "$LAST_PULLED" ]; then
   echo "  Last pulled: $LAST_PULLED"
-  REMOTE_FILES=$(ssh $SSH_OPTS $SOC_HOST \
+  REMOTE_FILES=$(soc_sh \
     "ls $SOC_ENRICHED_DIR/enriched_*.jsonl.gz 2>/dev/null | sort" \
     | awk -F/ -v last="$LAST_PULLED" '$NF > last { print $NF }')
 else
-  echo "  First run: pulling last 7 days of .gz from 23"
-  REMOTE_FILES=$(ssh $SSH_OPTS $SOC_HOST \
+  echo "  First run: taking the last 7 days of .gz"
+  REMOTE_FILES=$(soc_sh \
     "find $SOC_ENRICHED_DIR -maxdepth 1 -name 'enriched_*.jsonl.gz' -mtime -7 -printf '%f\n' | sort")
 fi
 
 if [ -z "$REMOTE_FILES" ]; then
-  echo "  No new .gz on 23 — skipping retrain (engine left running)"
+  echo "  No new .gz chunks — skipping retrain (engine left running)"
   exit 0
 fi
 
@@ -196,9 +226,9 @@ if [ -e "$SNAPSHOT_PATH" ]; then
   echo "  Today's snapshot exists; using ${SNAPSHOT}"
 fi
 
-echo "  Building $SNAPSHOT (zcat $CHUNK_COUNT remote chunks → gzip)..."
+echo "  Building $SNAPSHOT (zcat $CHUNK_COUNT chunk(s) → gzip)..."
 REMOTE_PATHS=$(echo "$REMOTE_FILES" | awk -v dir="$SOC_ENRICHED_DIR" '{print dir"/"$0}' | tr '\n' ' ')
-if ! ssh $SSH_OPTS $SOC_HOST "zcat $REMOTE_PATHS" | gzip > "$SNAPSHOT_PATH"; then
+if ! soc_sh "zcat $REMOTE_PATHS" | gzip > "$SNAPSHOT_PATH"; then
   echo "  ERROR: snapshot build failed — aborting (engine left running)"
   rm -f "$SNAPSHOT_PATH"
   exit 1
