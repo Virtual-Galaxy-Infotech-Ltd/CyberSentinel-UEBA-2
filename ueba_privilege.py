@@ -47,10 +47,18 @@ The three detections
   misuse    a privileged operation by a privileged account outside business
             hours, or at a rate well above that account's own norm.
 
-Privilege also contributes an additive scoring prior, the same mechanism as a
-watch-list hit or confirmed history: an administrator's unusual behaviour
-should become visible sooner than a standard user's. That is what "privilege
-level scored as an entity attribute" means in practice.
+Privilege contributes an additive scoring prior WHEN one of those three fires,
+the same mechanism as a watch-list hit or confirmed history, so a takeover or a
+shared credential on an administrator can raise an event that would not
+otherwise have alerted.
+
+It deliberately does NOT boost every event of a privileged account. That was
+the first design and it was wrong: measured on the deployment, a flat per-event
+prior put 914 of 1,500 alerts — 60.9% of the feed — into existence, 823 of them
+from one busy Administrator whose sub-threshold anomalies all crossed together.
+A flat boost does not surface the unusual behaviour of a privileged account, it
+surfaces all of it. The attribute is still scored: the level and the signal
+that produced it ride on every alert's evidence, where an analyst reads them.
 """
 
 # Annotations as strings, so this imports on the 3.9 the dev boxes still run
@@ -439,14 +447,28 @@ def assess(verdict: dict, presence: dict | None, host_count: int,
                 "Privileged operation by a %s account outside business hours"
                 % label)
 
-    # The prior. Applied whether or not one of the three fired: a privileged
-    # account's unusual behaviour should surface sooner than a standard user's,
-    # which is the attribute half of the serial.
-    max_boost = float(cfg.get("max_boost") or 0.15)
-    max_boost = min(max_boost, 0.40)
-    share = {"high": 1.0, "elevated": 0.6}.get(level, 0.0)
-    bump = 1.0 if out["findings"] else 0.5
-    out["boost"] = round(max_boost * share * bump, 4)
+    # The prior, and ONLY when one of the three findings fired.
+    #
+    # It used to apply on every event of a privileged entity, at half strength,
+    # on the reasoning that an administrator's unusual behaviour should surface
+    # sooner than a standard user's. Measured on the deployment, that was wrong
+    # in a way the reasoning hid: a flat per-event boost does not surface the
+    # UNUSUAL behaviour of a privileged account, it surfaces ALL of it. 914 of
+    # 1,500 alerts — 60.9% of the feed — existed only because of this boost,
+    # and 823 of those were one busy Administrator account whose sub-threshold
+    # anomalies all crossed the line together.
+    #
+    # Privilege is still scored as an entity attribute: the level and its
+    # source ride on every alert's evidence, and the three findings each carry
+    # the boost, so a takeover or a shared credential on a privileged account
+    # can still raise an event that would not otherwise have alerted. What it
+    # no longer does is lower the bar for everything that account ever does.
+    # Same shape as the throttle above, and as ueba_assets, which only boosts
+    # when it has something to say.
+    if out["findings"]:
+        max_boost = min(float(cfg.get("max_boost") or 0.15), 0.40)
+        share = {"high": 1.0, "elevated": 0.6}.get(level, 0.0)
+        out["boost"] = round(max_boost * share, 4)
     return out
 
 
@@ -618,7 +640,7 @@ def selftest() -> int:
     ok("out-of-hours privileged op is misuse", "misuse" in a["findings"])
     a = assess(svc, None, 0, True, False)
     ok("service account is exempt from misuse", "misuse" not in a["findings"])
-    ok("a service account still gets a prior", a["boost"] > 0)
+    ok("and with no finding, no prior either", a["boost"] == 0.0)
     a = assess(hi, None, 0, True, True)
     ok("in-hours privileged op is not misuse", "misuse" not in a["findings"])
     a = assess(hi, None, 0, False, False)
@@ -627,15 +649,20 @@ def selftest() -> int:
     ok("unknown business hours is not misuse", "misuse" not in a["findings"])
 
     # ── the prior ──
-    ok("high gets a prior with no finding", assess(hi, None, 0, False, True)["boost"] > 0)
-    ok("elevated prior is smaller than high",
-       assess(el, None, 0, False, True)["boost"] <
-       assess(hi, None, 0, False, True)["boost"])
-    ok("a finding raises the prior",
-       assess(hi, {"agent": {"first_time": True, "value": "X"}}, 0, False, True)["boost"] >
-       assess(hi, None, 0, False, True)["boost"])
+    # No finding, no boost. This is the fix for the 60.9%-of-the-feed defect
+    # described above the boost block; the old behaviour was a prior on every
+    # event, which lowered the bar for everything a privileged account did.
+    ok("no finding means no prior", assess(hi, None, 0, False, True)["boost"] == 0.0)
+    ok("no finding means no prior, elevated too",
+       assess(el, None, 0, False, True)["boost"] == 0.0)
+    ok("a finding carries the prior",
+       assess(hi, {"agent": {"first_time": True, "value": "X"}}, 0, False, True)["boost"] > 0)
+    ok("elevated prior is smaller than high, with a finding",
+       assess(el, {"agent": {"first_time": True, "value": "X"}}, 0, False, True)["boost"] <
+       assess(hi, {"agent": {"first_time": True, "value": "X"}}, 0, False, True)["boost"])
     ok("prior respects max_boost",
-       assess(hi, None, 0, False, True, {"max_boost": 0.05})["boost"] <= 0.05)
+       assess(hi, {"agent": {"first_time": True, "value": "X"}}, 0, False, True,
+              {"max_boost": 0.05})["boost"] <= 0.05)
     ok("prior is hard-capped",
        assess(hi, {"agent": {"first_time": True, "value": "X"}}, 0, True, False,
               {"max_boost": 99})["boost"] <= 0.40)
@@ -658,7 +685,7 @@ def selftest() -> int:
     ok("first out-of-hours op is a finding", "misuse" in a["findings"])
     a = assess(hi, None, 0, True, False, None, "carol", t2)
     ok("the next one is suppressed", "misuse" not in a["findings"])
-    ok("but the prior still applies", a["boost"] > 0)
+    ok("and the prior goes with it", a["boost"] == 0.0)
     a = assess(hi, None, 0, True, False, None, "dave", t2)
     ok("a different account still reports", "misuse" in a["findings"])
 
