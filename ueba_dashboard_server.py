@@ -81,6 +81,14 @@ except Exception:
     ueba_egress = None
     EGRESS_AVAILABLE = False
 
+# Trusted hosts and high-value assets (RFP SN 17 / SN 40). Optional likewise.
+try:
+    import ueba_assets  # type: ignore
+    ASSETS_AVAILABLE = True
+except Exception:
+    ueba_assets = None
+    ASSETS_AVAILABLE = False
+
 # Privileged-account declarations (RFP SN 15). Optional on the same terms.
 try:
     import ueba_privilege  # type: ignore
@@ -720,7 +728,8 @@ _ARCHIVE_RE = re.compile(r"ueba_alerts_(\d{4}-\d{2}-\d{2})\.jsonl\.zip$")
 # live-streamed alert and then disappears when the same alert comes back from
 # the cache as a slim record.
 # v5 (2026-10-29) adds privilege_boost, for RFP SN 15, on the same grounds.
-_SLIM_VER = 5
+# v6 (2026-10-30) adds asset_boost and asset_tier, for RFP SN 17 / SN 40.
+_SLIM_VER = 6
 
 
 def _slim(a: dict) -> dict:
@@ -752,6 +761,8 @@ def _slim(a: dict) -> dict:
             "watch_boost":     ueba.get("watch_boost"),
             "history_boost":   ueba.get("history_boost"),
             "privilege_boost": ueba.get("privilege_boost"),
+            "asset_boost":     ueba.get("asset_boost"),
+            "asset_tier":      ueba.get("asset_tier"),
             # Two strings, kept deliberately rather than the whole raw_scores
             # block: which autoencoder scored this row, and whether it was the
             # entity's own model or the global fallback.
@@ -3076,6 +3087,7 @@ CAPABILITIES = {
     "fp.edit":          "analyst",
     "incident.confirm": "analyst",
     "privileged.edit":  "admin",
+    "assets.edit":      "admin",
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
@@ -3840,6 +3852,112 @@ def _privileged_path():
     if not p:
         p = str(_abs_install_path("privileged.json"))
     return str(_abs_install_path(p))
+
+
+# ── Trusted hosts and high-value assets (RFP SN 17 / SN 40) ──────────────────
+#
+# One register, two roles. Editing is admin because a tag changes how every
+# event touching that entity scores; reading is open to any signed-in user,
+# because an analyst looking at an alert that cites an asset tier needs to see
+# what was tagged and at what value.
+
+def _assets_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    p = paths.get("assets_file") or ""
+    if not p:
+        p = "assets.json"
+    return str(_abs_install_path(p))
+
+
+@app.route("/api/assets")
+def api_assets_list():
+    """The register, optionally filtered by ?role=."""
+    if not ASSETS_AVAILABLE:
+        return jsonify({"ok": False, "error": "assets module unavailable",
+                        "entries": []}), 503
+    role = (request.args.get("role") or "").strip()
+    cfg = (_RAW_CFG.get("detection") or {}).get("assets") or {}
+    try:
+        items = ueba_assets.entries(_assets_path(), role)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "entries": []}), 500
+    rank = {"critical": 0, "high": 1, "normal": 2}
+    items.sort(key=lambda e: (e.get("role") or "", rank.get(e.get("tier"), 9),
+                              e.get("value") or ""))
+    return jsonify({
+        "ok":      True,
+        "count":   len(items),
+        "roles":   list(ueba_assets.ROLES),
+        "tiers":   list(ueba_assets.TIERS),
+        "config":  {
+            "window_secs":         cfg.get("window_secs", 3600),
+            "frequency_ratio":     cfg.get("frequency_ratio", 3.0),
+            "frequency_min_count": cfg.get("frequency_min_count", 5),
+            "download_min_bytes":  cfg.get("download_min_bytes", 10485760),
+            "max_boost":           cfg.get("max_boost", 0.20),
+        },
+        "entries": items,
+    })
+
+
+@app.route("/api/assets", methods=["POST"])
+@_require_cap("assets.edit")
+def api_assets_add():
+    """Tag an entity as a trusted host or a high-value asset."""
+    if not ASSETS_AVAILABLE:
+        return jsonify({"ok": False, "error": "assets module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    value = (body.get("value") or "").strip()
+    if not value:
+        return jsonify({"ok": False, "error": "value required"}), 400
+    role = (body.get("role") or "").strip().lower()
+    if role not in ueba_assets.ROLES:
+        return jsonify({"ok": False,
+                        "error": "role must be one of %s"
+                                 % list(ueba_assets.ROLES)}), 400
+    tier = (body.get("tier") or "high").strip().lower()
+    if tier not in ueba_assets.TIERS:
+        return jsonify({"ok": False,
+                        "error": "tier must be one of %s"
+                                 % list(ueba_assets.TIERS)}), 400
+    path = _assets_path()
+    try:
+        items = ueba_assets.entries(path)
+        # Match on the stored form and on the ROLE: the same address can
+        # legitimately be both a trusted host and a watched asset, so only the
+        # pair identifies an entry.
+        target = ueba_assets.normalise(value)
+        items = [e for e in items
+                 if not (e.get("value") == target and e.get("role") == role)]
+        items.append({"value": value, "role": role, "tier": tier,
+                      "label": (body.get("label") or ""),
+                      "note": (body.get("note") or "")})
+        ueba_assets.save(path, items)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "count": len(items),
+                    "entry": {"value": target, "role": role, "tier": tier}})
+
+
+@app.route("/api/assets/<role>/<path:value>", methods=["DELETE"])
+@_require_cap("assets.edit")
+def api_assets_remove(role, value):
+    """Untag one entity in one role."""
+    if not ASSETS_AVAILABLE:
+        return jsonify({"ok": False, "error": "assets module unavailable"}), 503
+    r = (role or "").strip().lower()
+    target = ueba_assets.normalise(value)
+    path = _assets_path()
+    try:
+        items = ueba_assets.entries(path)
+        kept = [e for e in items
+                if not (e.get("value") == target and e.get("role") == r)]
+        if len(kept) == len(items):
+            return jsonify({"ok": False, "error": "not tagged"}), 404
+        ueba_assets.save(path, kept)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "count": len(kept)})
 
 
 @app.route("/api/privileged")

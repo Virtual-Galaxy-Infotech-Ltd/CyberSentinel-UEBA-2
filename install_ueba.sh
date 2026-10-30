@@ -607,7 +607,7 @@ PYEOF
            ueba_auth.py ueba_prepare_training_data.py ueba_validate_models.py \
            ueba_source.py ueba_identity.py ueba_watchlist.py ueba_notify.py \
            ueba_nicknames.py ueba_egress.py ueba_risk_history.py \
-           ueba_privilege.py \
+           ueba_privilege.py ueba_assets.py \
            ueba_reports.py ueba_report_render.py ueba_report_store.py \
            ueba_housekeeping.py ueba_prune_corpus.py identity_diag.py \
            enrich_parallel.py retrain.py requirements.txt \

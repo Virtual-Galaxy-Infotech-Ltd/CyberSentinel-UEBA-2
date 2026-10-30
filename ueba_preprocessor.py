@@ -1571,6 +1571,64 @@ class UserProfileStore:
             return 0
         return self._privop_counts().get(user, 0)
 
+    def record_asset_access(self, user: str, asset: str) -> dict:
+        """Note one access by an entity to a TAGGED asset (SN 40).
+
+        Only called for assets an operator has tagged, never for every
+        destination. Keying a row on every (entity, destination) pair would add
+        a write to the hot loop for traffic nobody asked to watch, and the table
+        would grow without bound; tagging bounds it to the handful of assets the
+        SOC actually cares about.
+
+        Returns what the caller needs to say whether access is "increased":
+
+            {"events": n, "before": n-1, "span_secs": s, "ok": True}
+
+        `before` is the count PRIOR to this event, so a first access is
+        reportable as one. The rate itself is left to the caller — the window it
+        wants to compare against is its business, not the store's.
+
+        On failure `before` is -1, not 0, and `ok` is False. The distinction
+        matters: 0 means "this entity has never touched this asset", which is a
+        reportable finding, while a failed write means "we do not know". A
+        transient SQLite lock returning 0 would otherwise announce a first-ever
+        access that may be the thousandth.
+        """
+        out = {"events": 0, "before": -1, "span_secs": 0.0, "ok": False}
+        if not user or user == "unknown" or not asset:
+            return out
+        try:
+            now = datetime.now(timezone.utc)
+            iso = now.isoformat()
+            row = self.conn.execute(
+                """INSERT INTO entity_presence
+                       (username, kind, value, events, first_seen, last_seen)
+                   VALUES (?, 'asset', ?, 1, ?, ?)
+                   ON CONFLICT(username, kind, value) DO UPDATE SET
+                       events    = events + 1,
+                       last_seen = excluded.last_seen
+                   RETURNING events, first_seen""",
+                (user, asset, iso, iso)).fetchone()
+            events = int(row[0]) if row else 1
+            first = row[1] if row else iso
+            try:
+                f = datetime.fromisoformat(str(first).replace("Z", "+00:00"))
+                if f.tzinfo is None:
+                    f = f.replace(tzinfo=timezone.utc)
+                span = max(0.0, (now - f).total_seconds())
+            except (TypeError, ValueError):
+                span = 0.0
+            out = {"events": events, "before": events - 1,
+                   "span_secs": span, "ok": True}
+
+            self._presence_pending = getattr(self, "_presence_pending", 0) + 1
+            if self._presence_pending >= _PRESENCE_COMMIT_EVERY:
+                self.conn.commit()
+                self._presence_pending = 0
+        except Exception as e:
+            _log.debug("asset access not recorded for %s -> %s: %s", user, asset, e)
+        return out
+
     def distinct_host_count(self, user: str) -> int:
         """How many distinct hosts this entity has been seen on (SN 15)."""
         if not user:
