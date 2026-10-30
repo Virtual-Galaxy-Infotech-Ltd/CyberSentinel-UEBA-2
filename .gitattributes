@@ -1,1 +1,6 @@
 *.gz filter=lfs diff=lfs merge=lfs -text
+
+# Shell scripts must keep LF endings: a CRLF shebang fails on Linux with
+# "/usr/bin/env bash^M: bad interpreter", which is a confusing way to learn
+# that a deploy ran from a Windows checkout.
+*.sh text eol=lf
