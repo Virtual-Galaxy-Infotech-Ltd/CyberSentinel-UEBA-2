@@ -40,6 +40,9 @@ paths:
   # lists here. Same file-and-mtime contract as watchlist_file above, so naming
   # an account privileged takes effect on the next event with no restart.
   privileged_file:      "/root/NEW_DRIVE/aditya_ueba/privileged.json"
+  # Trusted hosts and high-value assets (SN 17 / SN 40). Operator-maintained,
+  # same file-and-mtime contract as the registers above.
+  assets_file:          "/root/NEW_DRIVE/aditya_ueba/assets.json"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -612,6 +615,40 @@ noise_suppression:
 
 # ── Detection tuning (RFP SN 12 / 46 / 47) ───────────────────────────────────
 detection:
+  # ── Trusted hosts and high-value assets (RFP SN 17 / SN 40) ────────────────
+  #
+  # Both serials come from one register, paths.assets_file, where each entry
+  # tags an entity with a role and a value tier:
+  #
+  #   trusted_host      a host the SOC declares load-bearing. Anomalous
+  #                     behaviour ON it is MORE serious, not less — trust is
+  #                     the premise of a compromise, not an excuse for one.
+  #   high_value_asset  a destination worth watching. Access to it is measured
+  #                     against what that entity normally does with it.
+  #
+  # Scope, measured on this feed: frequency of access is fully supported;
+  # file-level download tracking is NOT, because no file-path field exists
+  # anywhere in the events. Byte volume is used where the event carries it
+  # (about a sixth of events) and is a secondary signal by design.
+  #
+  # window_secs        the rolling window "increased frequency" is measured in.
+  # frequency_ratio    how many times its own normal rate an entity must hit
+  #                    before a surge is reported.
+  # frequency_min_count a floor, so an entity whose normal rate is 0.1 does not
+  #                    trigger on its second access of the week.
+  # download_min_bytes volume below this is not worth a sentence.
+  # max_tracked_pairs  bound on the in-memory (entity, asset) map, so a process
+  #                    running for weeks cannot leak.
+  # max_boost          the most this can add to a score. Capped at 0.40 in code.
+  assets:
+    enabled:             true
+    window_secs:         3600
+    frequency_ratio:     3.0
+    frequency_min_count: 5
+    download_min_bytes:  10485760
+    max_tracked_pairs:   20000
+    max_boost:           0.20
+
   # ── Privileged access (RFP SN 15) ──────────────────────────────────────────
   #
   # Privilege is scored as an entity attribute, and three behaviours are called
@@ -637,11 +674,18 @@ detection:
   #                       would make this reason worthless within a day.
   # max_boost             the most privilege alone can add to a score.
   #                       Hard-capped at 0.40 in code whatever is set here.
+  # finding_window_secs   misuse and sharing are standing conditions, not
+  #                       events: "privileged operation outside business hours"
+  #                       stays true until morning. Unthrottled that produced
+  #                       4,836 findings in one overnight run, 85.6% of the
+  #                       entire feed. One finding per entity per window.
   privilege:
     enabled:               true
     applies_from:          elevated
     min_privileged_events: 5
     sharing_min_hosts:     4
+    finding_window_secs:   3600
+    max_tracked_entities:  20000
     max_boost:             0.15
 
   # ── Risk history (RFP SN 48) ───────────────────────────────────────────────

@@ -60,6 +60,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 
 LEVELS = ("standard", "elevated", "high")
@@ -121,6 +122,52 @@ _PSEUDO_PATTERNS = (
 
 _lock = threading.Lock()
 _cache: dict = {}
+
+
+class FindingThrottle:
+    """At most one finding of a kind per entity per window.
+
+    Needed because "privileged operation outside business hours" is not an
+    event, it is a CONDITION — it stays true for every privileged operation
+    all night. Measured on this deployment the unthrottled version produced
+    4,836 misuse findings in one overnight run, 85.6% of every alert in the
+    feed, from a handful of accounts each doing hundreds of elevated-process
+    operations. The analyst needs to learn that an account is working
+    privileged out of hours once, not five hundred times.
+
+    Deliberately bounded, like AccessRates in ueba_assets: an unbounded map
+    keyed on entity is a slow leak in a process that runs for weeks.
+    """
+
+    def __init__(self, window_secs: int = 3600, max_keys: int = 20000):
+        self.window = max(60, int(window_secs))
+        self.max_keys = max(500, int(max_keys))
+        self._last: dict = {}
+
+    def allow(self, entity: str, finding: str, now=None) -> bool:
+        """True the first time in the window, False while it is still open."""
+        if not entity or not finding:
+            return True
+        now = time.time() if now is None else now
+        key = (entity, finding)
+        prev = self._last.get(key)
+        if prev is not None and (now - prev) < self.window:
+            return False
+        if len(self._last) >= self.max_keys:
+            cutoff = now - self.window
+            for k, t in list(self._last.items()):
+                if t < cutoff:
+                    self._last.pop(k, None)
+            if len(self._last) >= self.max_keys:
+                # Still full of live entries: drop the oldest half rather than
+                # suppress a real finding.
+                for k, _ in sorted(self._last.items(), key=lambda kv: kv[1])[: self.max_keys // 2]:
+                    self._last.pop(k, None)
+        self._last[key] = now
+        return True
+
+    def __len__(self) -> int:
+        return len(self._last)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -317,7 +364,8 @@ def is_privileged(verdict: dict, cfg: dict | None = None) -> bool:
 # ── the three detections ─────────────────────────────────────────────────────
 
 def assess(verdict: dict, presence: dict | None, host_count: int,
-           privileged_event: bool, business_hours, cfg: dict | None = None) -> dict:
+           privileged_event: bool, business_hours, cfg: dict | None = None,
+           entity: str = "", throttle=None) -> dict:
     """Misuse, sharing and takeover for one event.
 
     `presence`    this event's novelty verdict from record_presence (SN 19)
@@ -361,10 +409,13 @@ def assess(verdict: dict, presence: dict | None, host_count: int,
     if klass == "human":
         min_hosts = int(cfg.get("sharing_min_hosts") or 4)
         if int(host_count or 0) >= min_hosts:
-            out["findings"].append("sharing")
-            out["reasons"].append(
-                "Possible shared credential: this %s account has been used on %d "
-                "different hosts" % (label, int(host_count)))
+            # Standing property, not an event: throttled for the same reason
+            # as misuse below.
+            if throttle is None or throttle.allow(entity or label, "sharing"):
+                out["findings"].append("sharing")
+                out["reasons"].append(
+                    "Possible shared credential: this %s account has been used "
+                    "on %d different hosts" % (label, int(host_count)))
 
     # ── misuse ──
     # Three conditions, and each one removes a different false positive.
@@ -380,9 +431,13 @@ def assess(verdict: dict, presence: dict | None, host_count: int,
     # on every one of its privileged operations — 43 of them per 75 seconds when
     # measured on this estate — and the reason is worthless by the first morning.
     if privileged_event and business_hours is False and klass == "human":
-        out["findings"].append("misuse")
-        out["reasons"].append(
-            "Privileged operation by a %s account outside business hours" % label)
+        # Throttled: the condition holds for every privileged operation until
+        # morning, so emitting per event buries the feed. See FindingThrottle.
+        if throttle is None or throttle.allow(entity or label, "misuse"):
+            out["findings"].append("misuse")
+            out["reasons"].append(
+                "Privileged operation by a %s account outside business hours"
+                % label)
 
     # The prior. Applied whether or not one of the three fired: a privileged
     # account's unusual behaviour should surface sooner than a standard user's,
@@ -586,12 +641,51 @@ def selftest() -> int:
               {"max_boost": 99})["boost"] <= 0.40)
     ok("standard user gets no prior", assess(st, None, 0, True, False)["boost"] == 0.0)
 
+    # ── the throttle: these conditions hold continuously, so per-event
+    #    emission buries the feed (measured: 4,836 misuse findings overnight) ──
+    th = FindingThrottle(window_secs=100)
+    base = 5000.0
+    ok("throttle allows the first", th.allow("alice", "misuse", base))
+    ok("throttle blocks the second", not th.allow("alice", "misuse", base + 1))
+    ok("throttle blocks within the window", not th.allow("alice", "misuse", base + 99))
+    ok("throttle reopens after the window", th.allow("alice", "misuse", base + 101))
+    ok("a different finding is independent", th.allow("alice", "sharing", base + 101))
+    ok("a different entity is independent", th.allow("bob", "misuse", base + 101))
+    ok("no entity means no throttling", th.allow("", "misuse", base + 1))
+
+    t2 = FindingThrottle(window_secs=100)
+    a = assess(hi, None, 0, True, False, None, "carol", t2)
+    ok("first out-of-hours op is a finding", "misuse" in a["findings"])
+    a = assess(hi, None, 0, True, False, None, "carol", t2)
+    ok("the next one is suppressed", "misuse" not in a["findings"])
+    ok("but the prior still applies", a["boost"] > 0)
+    a = assess(hi, None, 0, True, False, None, "dave", t2)
+    ok("a different account still reports", "misuse" in a["findings"])
+
+    t3 = FindingThrottle(window_secs=100)
+    a = assess(hi, None, 9, False, True, None, "erin", t3)
+    ok("first sharing report lands", "sharing" in a["findings"])
+    a = assess(hi, None, 9, False, True, None, "erin", t3)
+    ok("repeat sharing is suppressed", "sharing" not in a["findings"])
+
+    # takeover is a genuine point-in-time event and self-limits: the second
+    # visit to a host is no longer a first sighting, so it needs no throttle.
+    t4 = FindingThrottle(window_secs=100)
+    a = assess(hi, {"agent": {"first_time": True, "value": "H1"}}, 0, False, True,
+               None, "frank", t4)
+    ok("takeover is not throttled away", "takeover" in a["findings"])
+
+    t5 = FindingThrottle(window_secs=100, max_keys=600)
+    for i in range(700):
+        t5.allow("e%d" % i, "misuse", base)
+    ok("throttle map stays bounded", len(t5) <= 600)
+
     # all three at once
     a = assess(hi, {"agent": {"first_time": True, "value": "NEW"}}, 6, True, False)
     ok("all three can fire together", len(a["findings"]) == 3)
     ok("three reasons produced", len(a["reasons"]) == 3)
 
-    total = 104
+    total = 119
     if failures:
         print("ueba_privilege selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

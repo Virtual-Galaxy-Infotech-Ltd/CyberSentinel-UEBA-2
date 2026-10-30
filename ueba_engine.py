@@ -44,6 +44,7 @@ import yaml
 import ueba_watchlist
 import ueba_risk_history
 import ueba_privilege
+import ueba_assets
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -186,7 +187,7 @@ class StreamState:
 
 def fuse_scores(if_result: dict, ae_result: dict, config: dict,
                 watch_boost: float = 0.0, history_boost: float = 0.0,
-                privilege_boost: float = 0.0) -> dict:
+                privilege_boost: float = 0.0, asset_boost: float = 0.0) -> dict:
     """
     Combine Isolation Forest and Autoencoder scores into a final verdict.
 
@@ -201,12 +202,15 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
                         (see ueba_risk_history, RFP SN 48).
     `privilege_boost` — this entity holds privilege, so its unusual behaviour
                         matters more (see ueba_privilege, RFP SN 15).
+    `asset_boost`     — a trusted host is misbehaving, or a tagged high-value
+                        asset is being accessed unusually (see ueba_assets,
+                        RFP SN 17 / SN 40).
 
     They are reported separately because they answer different questions. "Did
     this alert fire because someone is watching this account, because the
-    account has form, or because it is an administrator?" is the first thing an
-    analyst asks about a boosted alert, and one combined figure cannot answer
-    it.
+    account has form, because it is an administrator, or because of what it
+    touched?" is the first thing an analyst asks about a boosted alert, and one
+    combined figure cannot answer it.
 
     Returns dict with:
         combined_score  — 0-1 weighted average
@@ -214,6 +218,7 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
         watch_boost     — how much the watch list contributed (0.0 if none)
         history_boost   — how much confirmed history contributed (0.0 if none)
         privilege_boost — how much privilege contributed (0.0 if none)
+        asset_boost     — how much the asset / trusted-host tag contributed
         risk_verdict    — 'suspicious' | 'anomalous' | 'highly_anomalous'
         confidence      — 'low' | 'medium' | 'high'
         is_alert        — bool (True if above alert_threshold)
@@ -235,7 +240,7 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
     # exactly the question an analyst reviewing a boosted user asks.
     model_score = combined
     total_boost = (float(watch_boost or 0.0) + float(history_boost or 0.0)
-                   + float(privilege_boost or 0.0))
+                   + float(privilege_boost or 0.0) + float(asset_boost or 0.0))
     if total_boost:
         combined = float(np.clip(combined + total_boost, 0.0, 1.0))
 
@@ -257,6 +262,7 @@ def fuse_scores(if_result: dict, ae_result: dict, config: dict,
         "watch_boost":    round(float(watch_boost or 0.0), 4),
         "history_boost":  round(float(history_boost or 0.0), 4),
         "privilege_boost": round(float(privilege_boost or 0.0), 4),
+        "asset_boost":     round(float(asset_boost or 0.0), 4),
         "risk_verdict":   verdict,
         "confidence":     confidence,
         "is_alert":       is_alert,
@@ -357,6 +363,11 @@ def _overrides_noise(result: dict) -> bool:
     ueba = result.get("ueba") or {}
     if ueba.get("privilege_findings"):
         return True
+    # SN 17 / SN 40 — a trusted host compromised, or a surge against a tagged
+    # asset, on the same grounds: the event type being common does not make
+    # this instance of it uninteresting.
+    if ueba.get("asset_findings"):
+        return True
     # SN 48 — an entity with confirmed malicious history. If we know that much
     # about it, its anomalies should not be dropped on the event type alone.
     if ueba.get("history_boost"):
@@ -397,7 +408,7 @@ def build_ueba_block(
     # makes the boost auditable — it is the models' own verdict before anything
     # was added to it.
     if (fusion.get("watch_boost") or fusion.get("history_boost")
-            or fusion.get("privilege_boost")):
+            or fusion.get("privilege_boost") or fusion.get("asset_boost")):
         ueba["model_score"] = fusion.get("model_score")
     if fusion.get("watch_boost"):
         ueba["watch_boost"] = fusion["watch_boost"]
@@ -405,6 +416,8 @@ def build_ueba_block(
         ueba["history_boost"] = fusion["history_boost"]
     if fusion.get("privilege_boost"):
         ueba["privilege_boost"] = fusion["privilege_boost"]
+    if fusion.get("asset_boost"):
+        ueba["asset_boost"] = fusion["asset_boost"]
 
     if include_raw:
         ueba["raw_scores"] = {
@@ -769,6 +782,22 @@ class UEBAEngine:
         self.privilege_cfg = (
             (cfg.get("detection") or {}).get("privilege") or {})
 
+        # Trusted hosts and high-value assets (SN 17 / SN 40). Same
+        # file-and-mtime contract as the watch list and the privileged-account
+        # register, so tagging an asset takes effect on the next event.
+        self.assets_file = paths.get("assets_file") or ""
+        self.assets_cfg = (
+            (cfg.get("detection") or {}).get("assets") or {})
+        # One finding per entity per window. Misuse and sharing are standing
+        # CONDITIONS, not events — unthrottled they produced 4,836 findings in
+        # one overnight run, 85.6% of the whole feed.
+        self.finding_throttle = ueba_privilege.FindingThrottle(
+            window_secs=int(self.privilege_cfg.get("finding_window_secs") or 3600),
+            max_keys=int(self.privilege_cfg.get("max_tracked_entities") or 20000))
+        self.access_rates = ueba_assets.AccessRates(
+            window_secs=int(self.assets_cfg.get("window_secs") or 3600),
+            max_keys=int(self.assets_cfg.get("max_tracked_pairs") or 20000))
+
         log.info("All components loaded successfully")
 
     def _maybe_reset_alerts_today(self) -> None:
@@ -893,19 +922,60 @@ class UEBAEngine:
                     self.profile_store.distinct_host_count(user),
                     priv_event,
                     get_nested(log_entry, "enrich.temporal.is_business_hours", None),
-                    self.privilege_cfg) or {}
+                    self.privilege_cfg, entity=user,
+                    throttle=self.finding_throttle) or {}
             except Exception as e:
                 log.debug("privilege assessment skipped: %s", e)
                 privilege, priv_assess = None, {}
 
-        # Fuse scores. The three priors are additive and their sum is clipped
+        # SN 17 / SN 40 — a trusted host behaving anomalously, and access to a
+        # tagged high-value asset. Ahead of fusion for the same reason as the
+        # others: a surge against a critical asset should be able to make an
+        # event alert, not just annotate one.
+        asset_assess = {}
+        if self.assets_file and self.assets_cfg.get("enabled", True):
+            try:
+                target = ueba_assets.event_target(log_entry, get_nested)
+                tagged = ueba_assets.match_asset(self.assets_file, target)
+                wcount, before, rate = 0, 0, 0.0
+                if tagged:
+                    # Recorded only for tagged assets — see record_asset_access.
+                    hist = self.profile_store.record_asset_access(
+                        user, tagged["value"])
+                    before = hist["before"]
+                    wcount = self.access_rates.record(user, tagged["value"])
+                    span = hist["span_secs"]
+                    win = float(self.access_rates.window)
+                    if span > win and hist["events"] > 1:
+                        # Long-run accesses per window, which is what "normal
+                        # for this entity" has to mean for a ratio to be fair.
+                        rate = hist["events"] / (span / win)
+                moved = 0
+                try:
+                    from ueba_preprocessor import transfer_bytes
+                    moved = transfer_bytes(log_entry).get("received", 0)
+                except Exception:
+                    moved = 0
+                asset_assess = ueba_assets.assess(
+                    self.assets_file,
+                    get_nested(log_entry, "host.name", "") or "",
+                    user, target, wcount, rate, before,
+                    is_alert_anomalous=bool(if_result.get("is_anomalous")),
+                    bytes_down=moved, cfg=self.assets_cfg) or {}
+            except Exception as e:
+                log.debug("asset assessment skipped: %s", e)
+                asset_assess = {}
+
+        # Fuse scores. The four priors are additive and their sum is clipped
         # inside fuse_scores, so an entity that is watch-listed AND has history
-        # AND is privileged cannot push the combined score past 1.0.
+        # AND is privileged AND touched a critical asset cannot push the
+        # combined score past 1.0.
         fusion = fuse_scores(
             if_result, ae_result, self.config,
             watch_boost=(watch or {}).get("boost", 0.0),
             history_boost=(history or {}).get("boost", 0.0),
-            privilege_boost=priv_assess.get("boost", 0.0))
+            privilege_boost=priv_assess.get("boost", 0.0),
+            asset_boost=asset_assess.get("boost", 0.0))
 
         # Not anomalous — discard silently
         if not fusion["is_alert"]:
@@ -994,6 +1064,12 @@ class UEBAEngine:
             if reason not in anomaly_reasons:
                 anomaly_reasons.append(reason)
 
+        # RFP SN 17 / SN 40 — trusted-host compromise, and access to a tagged
+        # high-value asset.
+        for reason in (asset_assess.get("reasons") or []):
+            if reason not in anomaly_reasons:
+                anomaly_reasons.append(reason)
+
         # Build ueba block
         ueba_block = build_ueba_block(
             if_result, ae_result, fusion,
@@ -1035,6 +1111,10 @@ class UEBAEngine:
         # so it has to be a field and not a string match on prose.
         if priv_assess.get("findings"):
             ueba_block["privilege_findings"] = list(priv_assess["findings"])
+        if asset_assess.get("findings"):
+            ueba_block["asset_findings"] = list(asset_assess["findings"])
+        if asset_assess.get("tier"):
+            ueba_block["asset_tier"] = asset_assess["tier"]
         if privilege and privilege.get("level") != "standard":
             ueba_block["privilege_level"] = privilege.get("level")
 
