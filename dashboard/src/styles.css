@@ -3759,9 +3759,17 @@ body.nocap-ai-analyze [data-cap="ai.analyze"],
 body.nocap-reports-schedule [data-cap="reports.schedule"],
 body.nocap-devices-edit [data-cap="devices.edit"],
 body.nocap-notify-edit [data-cap="notify.edit"],
-body.nocap-audit-view [data-cap="audit.view"] {
+body.nocap-audit-view [data-cap="audit.view"],
+body.nocap-users-manage [data-cap="users.manage"] {
   display: none !important;
 }
+/* users.manage was missing from the list above, so the entire User Management
+   panel — create account, the account table, reset password, delete — rendered
+   for viewers and analysts. Every route behind it is @require_role("admin") on
+   the server, so it was never a privilege escalation; non-admins were simply
+   shown an admin console in which every control failed. Adding one selector
+   fixes all of it, because the panel is the single gated element and the table
+   and its buttons are nested inside it. */
 
 /* Role chip in the header, shown only once enforcement is actually on. */
 .role-chip {
@@ -3777,22 +3785,53 @@ body[data-role="admin"]   .role-chip { display: inline-block; }
 body[data-role="admin"]   .role-chip { border-color: var(--accent); color: var(--accent); }
 
 /* ── Settings page ────────────────────────────────────────────────────────── */
+/* The panels here are plain block siblings and .panel carries no margin of its
+   own, so without this My Account and User Management share an edge and read as
+   one box. 14px is the gap the rest of the dashboard uses between cards. */
+#page-settings.active {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* .panel has no padding — every child supplies its own gutter, and the two
+   built-in children both use 16px (.panel-header, .wl-form). #set-me is a bare
+   div, so each block below has to repeat that 16px or its content sits on the
+   panel border. Matching the header's gutter also lines the rows up with the
+   "MY ACCOUNT" title directly above them. */
+#set-me { padding: 4px 0 14px; }
+
 .set-kv {
   display: flex; justify-content: space-between; align-items: baseline;
-  gap: 16px; padding: 7px 0;
+  gap: 16px; padding: 9px 16px;
   border-bottom: 1px solid var(--border);
   font-family: var(--mono2); font-size: 13.5px;
 }
 .set-kv span { color: var(--text2); }
 .set-kv b    { color: var(--text); }
+
 .set-sub {
   font-family: var(--mono); font-size: 13px; letter-spacing: 0.6px;
   text-transform: uppercase; color: var(--text2);
-  margin: 16px 0 8px;
+  margin: 20px 0 10px; padding: 0 16px;
 }
+/* A rule above any sub-section that follows a note, which is how the second and
+   later forms (Change username after Change password) get separated. It cannot
+   simply go on every .set-sub: the first one already has the last .set-kv's
+   bottom border above it, and the two would stack into a double line. */
+.set-note + .set-sub {
+  margin-top: 20px; padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+/* .wl-form is built to sit full-bleed at the top of a panel: a 16px gutter plus
+   a divider underneath. Inside the already-sectioned My Account block that
+   divider would cut straight across, so it goes. */
+#set-me .wl-form { padding: 2px 16px 0; border-bottom: 0; }
+
 .set-note {
   font-family: var(--mono2); font-size: 12.5px; line-height: 1.6;
-  color: var(--text2); margin-top: 10px;
+  color: var(--text2); margin-top: 10px; padding: 0 16px;
 }
 .set-note code {
   font-family: var(--mono2); font-size: 12px;
@@ -3800,6 +3839,27 @@ body[data-role="admin"]   .role-chip { border-color: var(--accent); color: var(-
   border-radius: 4px; padding: 1px 5px; color: var(--accent);
 }
 #set-users-table select.set-role { min-width: 108px; padding: 3px 6px; }
+
+/* Narrow screens: the inputs in these forms carry flex-basis hints sized for a
+   desktop row. Below that they have to be allowed to stack, or the row overflows
+   the panel instead of wrapping inside it. */
+@media (max-width: 720px) {
+  #page-settings.active { gap: 10px; }
+  #set-me .wl-form,
+  #page-settings .wl-form { gap: 7px; }
+  #page-settings .wl-form .wl-input,
+  #page-settings .wl-form select.wl-input,
+  #page-settings .wl-form .wl-add-btn {
+    flex: 1 1 100% !important;
+    min-width: 0;
+    width: 100%;
+  }
+  .set-kv {
+    flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 8px 14px;
+  }
+  .set-sub, .set-note, #set-me .wl-form { padding-left: 14px; padding-right: 14px; }
+}
 
 /* ── Login gate ───────────────────────────────────────────────────────────── */
 /* Only ever shown when the server is enforcing AND nobody is signed in. */

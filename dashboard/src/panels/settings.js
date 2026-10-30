@@ -3,10 +3,14 @@
 //
 // Two panels with deliberately different audiences:
 //
-//   My Account      — every signed-in user. Local accounts need somewhere to
-//                     rotate their own password; SSO accounts are told plainly
-//                     that theirs lives in the SIEM rather than being shown a
-//                     form that cannot work.
+//   My Account      — every signed-in user, whatever their role. Local accounts
+//                     need somewhere to rotate their own password and to change
+//                     the name they sign in with; SSO accounts are told plainly
+//                     that both live in the SIEM rather than being shown forms
+//                     that cannot work.
+//                     Both changes require the current password: a username is
+//                     the login identifier here, so being able to change it from
+//                     a stolen session would lock out the real owner.
 //   User Management — admins only, and gated twice: this panel carries
 //                     data-cap="users.manage" so it is hidden without the
 //                     capability, and every endpoint behind it is
@@ -15,6 +19,7 @@
 
 import { showToast } from "../ui/toast.js";
 import { state } from "../state.js";
+import { refreshAccount } from "../ui/account-menu.js";
 
 let _users = [];
 let _roles = ["viewer", "analyst", "admin"];
@@ -29,6 +34,31 @@ function passwordProblem(pw) {
   if (!pw) return "Enter a password.";
   if (pw.length < MIN_PASSWORD) {
     return `Password must be at least ${MIN_PASSWORD} characters (that one is ${pw.length}).`;
+  }
+  return null;
+}
+
+// Mirrors username_problem() in ueba_auth.py, for the same reason as above: the
+// form should fail instantly on an obviously bad name. The server re-checks it
+// and owns the "is it taken?" question, which no client can answer.
+const MIN_USERNAME = 3;
+const MAX_USERNAME = 32;
+const USERNAME_OK = /^[A-Za-z0-9._\-@]+$/;
+
+function usernameProblem(name) {
+  const u = (name || "").trim();
+  if (!u) return "Enter a new username.";
+  if (u.length < MIN_USERNAME) {
+    return `Username must be at least ${MIN_USERNAME} characters (that one is ${u.length}).`;
+  }
+  if (u.length > MAX_USERNAME) {
+    return `Username must be at most ${MAX_USERNAME} characters (that one is ${u.length}).`;
+  }
+  if (!USERNAME_OK.test(u)) {
+    return "Username may use only letters, digits, dot, underscore, hyphen or @.";
+  }
+  if (!/[A-Za-z0-9]$/.test(u) || !/^[A-Za-z0-9]/.test(u)) {
+    return "Username must start and end with a letter or digit.";
   }
   return null;
 }
@@ -93,19 +123,33 @@ function renderMe() {
       <div class="set-sub">Change password</div>
       <div class="wl-form">
         <input id="set-pw-cur" class="wl-input" type="password" placeholder="Current password" autocomplete="current-password" style="flex:1 1 180px">
-        <input id="set-pw-new" class="wl-input" type="password" placeholder="New password (min 12 characters)" autocomplete="new-password" style="flex:1 1 220px">
+        <input id="set-pw-new" class="wl-input" type="password" placeholder="New password (min ${MIN_PASSWORD} characters)" autocomplete="new-password" style="flex:1 1 220px">
         <button id="set-pw-btn" class="export-btn wl-add-btn">Update password</button>
       </div>
       <div class="set-note">Changing it signs out your other sessions.</div>
+
+      <div class="set-sub">Change username</div>
+      <div class="wl-form">
+        <input id="set-un-new" class="wl-input" type="text" placeholder="New username" autocomplete="username" spellcheck="false" style="flex:1 1 180px">
+        <input id="set-un-pw" class="wl-input" type="password" placeholder="Current password" autocomplete="current-password" style="flex:1 1 220px">
+        <button id="set-un-btn" class="export-btn wl-add-btn">Update username</button>
+      </div>
+      <div class="set-note">
+        This is the name you sign in with, so your password is required to change
+        it. ${MIN_USERNAME}–${MAX_USERNAME} characters, using letters, digits,
+        dot, underscore, hyphen or @. Your other sessions are signed out.
+      </div>
     ` : `
       <div class="set-note">
-        This account signs in through CyberSentinel SIEM, so its password is
-        managed there rather than here.
+        This account signs in through CyberSentinel SIEM, so its password and
+        username are managed there rather than here.
       </div>
     `}`;
 
   const btn = document.getElementById("set-pw-btn");
   if (btn) btn.addEventListener("click", changeMyPassword);
+  const unBtn = document.getElementById("set-un-btn");
+  if (unBtn) unBtn.addEventListener("click", changeMyUsername);
 }
 
 async function changeMyPassword() {
@@ -130,6 +174,44 @@ async function changeMyPassword() {
     showToast("Password updated. Your other sessions have been signed out.", "success");
   } catch (e) {
     showToast("Could not change password: " + e.message, "error");
+  }
+}
+
+async function changeMyUsername() {
+  const nameEl = document.getElementById("set-un-new");
+  const pwEl   = document.getElementById("set-un-pw");
+  const new_username = ((nameEl && nameEl.value) || "").trim();
+  const current_password = (pwEl && pwEl.value) || "";
+
+  const problem = usernameProblem(new_username);
+  if (problem) { showToast(problem, "error"); return; }
+  if (!current_password) {
+    showToast("Enter your current password to confirm the change.", "error");
+    return;
+  }
+  if (_me && new_username === _me.username) {
+    showToast("That is already your username.", "error");
+    return;
+  }
+
+  try {
+    const r = await fetch("/api/auth/username", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_username, current_password }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
+    if (nameEl) nameEl.value = "";
+    if (pwEl) pwEl.value = "";
+    showToast(`You are now signed in as ${new_username}. Your other sessions have been signed out.`,
+              "success");
+    // The header shows the signed-in name, so it would otherwise keep showing
+    // the old one until the next reload.
+    await loadMe();
+    try { await refreshAccount(); } catch (e) { /* header is cosmetic here */ }
+  } catch (e) {
+    showToast("Could not change username: " + e.message, "error");
   }
 }
 

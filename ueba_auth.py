@@ -213,6 +213,16 @@ MAX_FAILED_LOGINS = 5
 LOCKOUT_SECS = 15 * 60
 MIN_PASSWORD_LEN = 12
 
+# Username rules. Tighter than passwords on purpose: a username is not a secret,
+# but it IS what local_sub() turns into a primary key, so it has to survive being
+# lowercased, put in a URL path and read aloud over a phone.
+MIN_USERNAME_LEN = 3
+MAX_USERNAME_LEN = 32
+# `@` is allowed because this estate already uses email-shaped identities, and a
+# local account should be able to match the name its owner is known by.
+_USERNAME_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@")
+
 
 def local_sub(username: str) -> str:
     """`sub` for a local account. Prefixed so it can never collide with an
@@ -262,6 +272,26 @@ def password_problem(password: str) -> str | None:
         return f"password must be at least {MIN_PASSWORD_LEN} characters"
     if password.strip() != password:
         return "password must not start or end with whitespace"
+    return None
+
+
+def username_problem(username: str) -> str | None:
+    """Why this username is unacceptable, or None.
+
+    Note what this does NOT check: whether the name is free. That is a race the
+    database has to settle, so it is enforced by the `sub` primary key inside
+    rename_local_user() / create_local_user() rather than here.
+    """
+    u = (username or "").strip()
+    if len(u) < MIN_USERNAME_LEN:
+        return f"username must be at least {MIN_USERNAME_LEN} characters"
+    if len(u) > MAX_USERNAME_LEN:
+        return f"username must be at most {MAX_USERNAME_LEN} characters"
+    if not set(u) <= _USERNAME_CHARS:
+        return ("username may use only letters, digits, dot, underscore "
+                "and hyphen")
+    if not (u[0].isalnum() and u[-1].isalnum()):
+        return "username must start and end with a letter or digit"
     return None
 
 
@@ -366,6 +396,54 @@ class AuthStore:
                 (hash_password(password), now, sub))
             self._conn.commit()
         return cur.rowcount > 0
+
+    def rename_local_user(self, old_sub: str, new_username: str) -> dict | None:
+        """Rename a local account, carrying its sessions with it.
+
+        This has to move the primary key, not just relabel the row. A local
+        account's `sub` is DERIVED from its name by local_sub(), and
+        verify_login() looks an account up by that derived key rather than by
+        the username column — so updating `username` alone would leave the user
+        able to sign in only under their old name, which is the opposite of what
+        they asked for.
+
+        sessions.sub is a foreign key in all but name, so it moves in the same
+        transaction. Without that, renaming yourself would sign you out of every
+        device you own as a side effect.
+
+        Returns the updated row, or None if old_sub does not exist. Raises
+        ValueError if the new name is taken — the `sub` primary key is what
+        settles that race, not a prior SELECT.
+        """
+        new_sub = local_sub(new_username)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE sub=?", (old_sub,)).fetchone()
+            if row is None:
+                return None
+            old = dict(row)
+            if new_sub != old_sub and self._conn.execute(
+                    "SELECT 1 FROM users WHERE sub=?", (new_sub,)).fetchone():
+                raise ValueError(f"the name {new_username!r} is already taken")
+            # display_name is seeded from the username at creation. Carry it
+            # along only while it still mirrors the old name — if the user set
+            # it to something of their own, that is theirs to keep.
+            disp = old.get("display_name")
+            new_disp = (new_username
+                        if (not disp or disp == old.get("username")) else disp)
+            try:
+                self._conn.execute(
+                    "UPDATE users SET sub=?, username=?, display_name=? WHERE sub=?",
+                    (new_sub, new_username, new_disp, old_sub))
+                self._conn.execute(
+                    "UPDATE sessions SET sub=? WHERE sub=?", (new_sub, old_sub))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            out = self._conn.execute(
+                "SELECT * FROM users WHERE sub=?", (new_sub,)).fetchone()
+        return dict(out) if out else None
 
     def verify_login(self, username: str, password: str) -> tuple[dict | None, str]:
         """(user, reason). user is None unless the password is correct AND the
@@ -986,6 +1064,72 @@ def auth_change_password():
         user_agent=request.headers.get("User-Agent", ""))
     log.info("password changed for %s (other sessions revoked)", me["sub"])
     return _set_session_cookie(jsonify({"ok": True}), fresh, ttl)
+
+
+@bp.route("/api/auth/username", methods=["POST"])
+def auth_change_username():
+    """Change your own username. Available to every signed-in local account
+    regardless of role — it is your own name, not a privileged setting.
+
+    The current password is required for the same reason it is on the password
+    change: a stolen session must not be enough to rename the account. A rename
+    is not cosmetic here, because the name is the login identifier — an attacker
+    who could change it would lock the real owner out of their own account.
+
+    SSO accounts are refused: their username arrives in the SIEM's token and is
+    re-applied on every login, so a local change would silently revert.
+    """
+    store = _store()
+    if store is None:
+        return jsonify({"ok": False, "error": "auth store unavailable"}), 503
+    me = current_user()
+    if me is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
+    if not is_local_sub(me.get("sub", "")):
+        return jsonify({"ok": False,
+                        "error": "SSO accounts are named by the SIEM, so the "
+                                 "username has to change there"}), 400
+
+    body = request.get_json(silent=True) or {}
+    new_username = (body.get("new_username") or "").strip()
+    current = body.get("current_password") or ""
+
+    problem = username_problem(new_username)
+    if problem:
+        return jsonify({"ok": False, "error": problem}), 400
+    if new_username == me.get("username"):
+        return jsonify({"ok": False,
+                        "error": "that is already your username"}), 400
+
+    ok, _ = store.verify_login(me["username"], current)
+    if ok is None:
+        log.warning("username change REJECTED for %s (bad current password)",
+                    me["sub"])
+        return jsonify({"ok": False, "error": "current password is incorrect"}), 403
+
+    old_sub = me["sub"]
+    try:
+        u = store.rename_local_user(old_sub, new_username)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    if u is None:
+        return jsonify({"ok": False, "error": "no such user"}), 404
+
+    new_sub = u["sub"]
+    # Same posture as the password change: keep the session that made the
+    # request, drop the rest. The sessions moved with the account above, so
+    # without this an old device would keep a live session under the new name
+    # having never re-authenticated as it.
+    store.revoke_all_for(new_sub)
+    ttl = int(_cfg().get("session_ttl_secs") or 28800)
+    fresh = store.create_session(
+        sub=new_sub, ttl=ttl,
+        remote_addr=request.headers.get("X-Forwarded-For", request.remote_addr or ""),
+        user_agent=request.headers.get("User-Agent", ""))
+    log.info("username changed: %s -> %s (other sessions revoked)",
+             old_sub, new_sub)
+    return _set_session_cookie(
+        jsonify({"ok": True, "user": _safe_user(u)}), fresh, ttl)
 
 
 @bp.route("/api/auth/me")
