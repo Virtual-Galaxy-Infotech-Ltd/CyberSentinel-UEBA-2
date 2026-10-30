@@ -93,6 +93,12 @@ _stg/
 # ── Session transcripts / scratch notes ──────────────────────────────────────
 claude_ueba_*.txt
 .ueba_guide_print_source.html
+# Chat exports for teammate handover. Credential-scrubbed, but they still carry
+# real usernames, internal addressing and the upstream product name — the same
+# reason the alert and profile data below is excluded. Never commit one.
+UEBA_chat_export_*.html
+UEBA_chat_export_*.md
+UEBA_session_transcript*.md
 
 # ── OS / editor ──────────────────────────────────────────────────────────────
 .DS_Store
