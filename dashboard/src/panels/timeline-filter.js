@@ -87,7 +87,7 @@ export function applyTimelineFilter() {
       else if (a.verdict === "suspicious")   aMap[h].suspicious++;
       if (!aMap[h].last_seen || a.processed_at > aMap[h].last_seen) aMap[h].last_seen = a.processed_at;
     });
-    // Endpoints are a fixed fleet (the Wazuh registry), not derived from the
+    // Endpoints are a fixed fleet (the SIEM agent registry), not derived from the
     // window. Show ALL of them even when windowed: start from the full
     // registry-backed list and overlay this window's counts (quiet endpoints
     // keep alert_count 0), then append any in-window hosts not in the registry.
