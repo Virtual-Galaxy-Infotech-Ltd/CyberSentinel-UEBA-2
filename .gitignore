@@ -24,6 +24,7 @@ profiles/
 data/
 training_zips/
 archive/
+claude_session/
 
 # Live alert + tuning state (real hostnames, usernames, signatures)
 ueba_alerts.jsonl
