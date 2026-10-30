@@ -55,14 +55,26 @@ SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-90}
 # for behavioural baselining in a bank (weekday/weekend and payroll rhythms).
 # Drop to 14 if disk pressure returns; below ~14 the weekly pattern gets thin.
 TRAINING_RETENTION_DAYS=${TRAINING_RETENTION_DAYS:-21}
-COMBINED=/data/ueba_training/combined_training.jsonl
+# Derived from BASE like every other path in this script, and overridable.
+#
+# It used to be hardcoded to /data/ueba_training/, which is a path from the
+# original host. On the co-located install there is no /data at all, and the
+# directory was not in the mkdir below either, so the first scheduled run would
+# have failed at the corpus step with the engine already stopped. Nothing had
+# caught it because the job is weekly and had not yet been due.
+#
+# paths.training_data in ueba_config.yaml names the same file; keep the two
+# aligned if either moves.
+COMBINED="${UEBA_TRAINING_CORPUS:-$BASE/data/combined_training.jsonl}"
 # Defined at top level, not inside step 0.5: the post-append prune at step
 # 4.5 needs it too, and a variable set inside a skipped block is unset.
 PRUNE_TOOL="$BASE/ueba_prune_corpus.py"
 # The corpus lives here; the space check must measure THIS volume.
 CORPUS_DIR="$(dirname "$COMBINED")"
 
-mkdir -p "$TRAINING_DIR" "$STATE_DIR" "$(dirname "$LOG")"
+# CORPUS_DIR included: retrain.py appends to the corpus and will not create
+# its parent, and on a fresh install nothing else has.
+mkdir -p "$TRAINING_DIR" "$STATE_DIR" "$(dirname "$LOG")" "$CORPUS_DIR"
 exec >> "$LOG" 2>&1
 
 echo "==================================================================="
