@@ -91,6 +91,14 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# Flow ingestion and network anomaly detection (RFP SN 28). Optional likewise.
+try:
+    import ueba_netflow  # type: ignore
+    NETFLOW_AVAILABLE = True
+except Exception:
+    ueba_netflow = None
+    NETFLOW_AVAILABLE = False
+
 # Supervised learning on analyst verdicts (RFP SN 20). Optional likewise.
 try:
     import ueba_supervised  # type: ignore
@@ -4371,6 +4379,53 @@ def _entities_path():
     if not p:
         p = "entities.json"
     return str(_abs_install_path(p))
+
+
+@app.route("/api/netflow")
+def api_netflow_status():
+    """Flow ingestion and the network anomalies seen in the window (SN 28).
+
+    Counts the network findings actually present in the alert feed, which is
+    the measurement needed to calibrate the thresholds — they ship as
+    conventional defaults because there were no flow records to fit them to.
+    """
+    if not NETFLOW_AVAILABLE:
+        return jsonify({"ok": False,
+                        "error": "netflow module unavailable"}), 503
+    cfg = (_RAW_CFG.get("detection") or {}).get("netflow") or {}
+    try:
+        st = ueba_netflow.status(None, cfg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # The firing rate, read from the feed rather than asserted.
+    counts = {d: 0 for d in ueba_netflow.DETECTIONS}
+    alerts_with = 0
+    total = 0
+    try:
+        for a in load_alerts(include_fp=_wants_include_fp()):
+            total += 1
+            hit = False
+            for r in ((a.get("ueba") or {}).get("anomaly_reasons") or []):
+                if str(r).startswith("NETWORK "):
+                    hit = True
+                    name = str(r)[8:].split(":", 1)[0].strip().lower()
+                    if name in counts:
+                        counts[name] += 1
+            if hit:
+                alerts_with += 1
+    except Exception:
+        pass
+
+    st["ok"] = True
+    st["enabled"] = bool(cfg.get("enabled", True))
+    st["observed"] = {
+        "alerts_in_window": total,
+        "alerts_with_a_network_finding": alerts_with,
+        "rate": round(alerts_with / total, 6) if total else 0.0,
+        "by_detection": counts,
+    }
+    return jsonify(st)
 
 
 @app.route("/api/supervised")

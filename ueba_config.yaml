@@ -749,6 +749,56 @@ detection:
   #                 The serial says a pattern STARTS deviating, which is a
   #                 statement about change, so the comparison is recent-window
   #                 against cohort, not all-time against cohort.
+  # ── Flow ingestion and network anomaly detection (RFP SN 28) ───────────────
+  #
+  # The sheet had this blocked on confirmation that NetFlow is collected and
+  # where a collector sits. The ingestion half does not need that answer: this
+  # reads the shapes collectors actually emit — nfdump, IPFIX / NetFlow v9
+  # JSON, Elastic Common Schema, the Logstash netflow module, and the firewall
+  # fields this deployment ALREADY carries (dstip/dstport about 84% of the
+  # enriched stream) — and reduces them to one canonical flow. Pointing a
+  # collector at us later adds no code.
+  #
+  # The design decision, and the measurement behind it: a network anomaly is
+  # NOT a property of one flow. Of 3,412 local alerts, ZERO carry both
+  # endpoints, and the firewall flow events that do are in
+  # noise_suppression.signature_ids by design, because individually they are
+  # policy enforcement firing thousands of times a day. So detection runs over
+  # the flow stream as a windowed AGGREGATE and raises its own findings:
+  # "firewall passed a connection" is uninteresting, "this host touched 200
+  # ports on three machines in ninety seconds" is a port scan. Reading flow
+  # ALERTS would have found nothing, because by design there are none.
+  #
+  # Detections: port_scan, address_sweep, data_egress, beaconing,
+  # asymmetric_flow. Each finding carries the numbers that produced it so an
+  # analyst can disagree with the threshold rather than the verdict.
+  #
+  # THESE THRESHOLDS ARE UNCALIBRATED. There are no flow records in the local
+  # sample, so none of them is fitted to this estate — they are conventional
+  # starting points. The first task once a flow feed is connected is to read
+  # the firing rate from /api/netflow and tune them.
+  #
+  # Findings are throttled to one per entity per detection per window: a
+  # scanning host is a standing condition, and unthrottled it would raise the
+  # same finding on every flow — the shape that caused two earlier floods.
+  netflow:
+    enabled: true
+    window_secs: 300
+    scan_min_ports: 20
+    scan_max_destinations: 3
+    scan_max_mean_bytes: 1024
+    sweep_min_destinations: 20
+    sweep_max_ports: 2
+    egress_min_bytes: 104857600
+    beacon_min_flows: 8
+    beacon_max_cv: 0.15
+    beacon_min_interval_secs: 5
+    asym_min_flows: 20
+    asym_min_ratio: 20
+    asym_min_sent: 1048576
+    max_tracked_sources: 20000
+    finding_window_secs: 3600
+
   # ── Supervised machine learning (RFP SN 20) ────────────────────────────────
   #
   # The sheet had this blocked on "a labelled incident dataset from the customer

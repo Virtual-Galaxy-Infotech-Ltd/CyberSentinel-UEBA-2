@@ -49,6 +49,7 @@ import ueba_entities
 import ueba_device_identity
 import ueba_peers
 import ueba_supervised
+import ueba_netflow
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -488,6 +489,7 @@ def build_evidence_block(
     device: dict | None = None,
     peer: dict | None = None,
     supervised: dict | None = None,
+    netflow: dict | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -625,6 +627,13 @@ def build_evidence_block(
             # misuse findings and then 914 privilege-only alerts. Classifying
             # and tracking entities is what SN 30 and SN 67 ask for; neither
             # asks for a score.
+            # RFP SN 28. Network anomalies are aggregate properties, so the
+            # findings describe the SOURCE's behaviour over the window rather
+            # than this one flow, and each carries the numbers behind it.
+            "network":              ({"findings": netflow.get("findings"),
+                                      "window": netflow.get("summary")}
+                                     if netflow and netflow.get("findings")
+                                     else None),
             # RFP SN 20. The supervised model's probability that this event
             # is malicious, learned from analyst verdicts. Carried beside the
             # unsupervised score rather than folded into it, so an analyst can
@@ -929,6 +938,24 @@ class UEBAEngine:
                 log.warning("supervised model not loaded: %s", e)
                 self.supervised_model = None
 
+        # Flow ingestion and network anomaly detection (SN 28). One window and
+        # one throttle per process: both have to persist across events, because
+        # every detection here is an aggregate over a window and a scanning
+        # host is a standing condition rather than an event.
+        self.netflow_cfg = (cfg.get("detection") or {}).get("netflow") or {}
+        self.flow_window = None
+        self.flow_throttle = None
+        if self.netflow_cfg.get("enabled", True):
+            try:
+                self.flow_window = ueba_netflow.FlowWindow(self.netflow_cfg)
+                self.flow_throttle = ueba_netflow.make_throttle(self.netflow_cfg)
+                log.info("Flow anomaly detection on (window %.0fs, shapes: %s)",
+                         self.flow_window.window,
+                         ", ".join(n for n, _ in ueba_netflow._SHAPES))
+            except Exception as e:
+                log.warning("flow anomaly detection disabled: %s", e)
+                self.flow_window = None
+
         self.peer_recent = None
         if self.peers_cfg.get("enabled", True) and self.peer_groups_file:
             self.peer_recent = ueba_peers.RecentProfiles(
@@ -1079,6 +1106,24 @@ class UEBAEngine:
             except Exception as e:
                 log.debug("entity extraction skipped: %s", e)
                 entities, entity_presence = [], {}
+
+        # SN 28 — if this event is a flow record, fold it into the window and
+        # ask whether the source is now doing something anomalous in the
+        # aggregate. Runs ahead of fusion for the same reason the other
+        # assessments do: a port scan should be able to MAKE an event alert,
+        # not merely annotate one that alerted anyway.
+        netflow = None
+        if self.flow_window is not None:
+            try:
+                flow = ueba_netflow.normalise(log_entry)
+                if flow:
+                    self.flow_window.record(flow)
+                    netflow = ueba_netflow.assess(
+                        self.flow_window, flow["src"], cfg=self.netflow_cfg,
+                        throttle=self.flow_throttle)
+            except Exception as e:
+                log.debug("flow assessment skipped: %s", e)
+                netflow = None
 
         # SN 20 — the supervised model's own opinion on this event, from the
         # same feature vector the unsupervised layers scored. Reported beside
@@ -1296,6 +1341,13 @@ class UEBAEngine:
         if peer and peer.get("deviating"):
             anomaly_reasons.append("PEER DEVIATION: %s" % peer.get("reason"))
 
+        # Network anomalies become reasons on the same terms, and are already
+        # throttled to one per source per detection per window inside assess().
+        for nf in ((netflow or {}).get("findings") or []):
+            anomaly_reasons.append(
+                "NETWORK %s: %s" % (str(nf.get("detection", "")).upper(),
+                                    nf.get("detail")))
+
         for reason in self._presence_reasons(presence):
             if reason not in anomaly_reasons:
                 anomaly_reasons.append(reason)
@@ -1345,6 +1397,7 @@ class UEBAEngine:
             device=device,
             peer=peer,
             supervised=supervised,
+            netflow=netflow,
         )
 
         # Append ueba block + evidence to original log
