@@ -3091,13 +3091,21 @@
   @media (max-width: 1200px) { .row-mitre-health { grid-template-columns: 1fr; } }
 
   /* MITRE matrix */
-  .mitre-matrix-body { padding: 10px 14px 14px; overflow-x: auto; }
+  /* The matrix grows a row per tactic and a cell per technique, so on a busy
+     estate it was the tallest thing on the page by a wide margin. It scrolls
+     inside its own panel now rather than stretching the row it shares with
+     Engine Health, and the tactic column is no longer a fixed 200px. */
+  .mitre-matrix-body {
+    padding: var(--gap-sm) var(--pad-x) var(--pad-x);
+    overflow: auto;
+    max-height: clamp(180px, calc(26 * var(--svh)), 340px);
+  }
   .mitre-row-grid {
     display: grid;
-    grid-template-columns: 200px 1fr;
+    grid-template-columns: clamp(110px, calc(11 * var(--svw)), 200px) 1fr;
     align-items: start;
-    gap: 12px;
-    padding: 8px 0;
+    gap: var(--gap);
+    padding: var(--gap-sm) 0;
     border-bottom: 1px dashed rgba(26, 40, 56, 0.5);
   }
   .mitre-row-grid:last-child { border-bottom: 0; }
@@ -3126,8 +3134,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    min-width: 82px;
-    padding: 8px 10px;
+    min-width: 66px;
+    padding: var(--gap-sm) var(--gap);
     background: rgba(0, 212, 255, 0.05);
     border: 1px solid rgba(0, 212, 255, 0.18);
     border-radius: 4px;
@@ -3144,7 +3152,7 @@
   .mitre-cell-id    { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }
   .mitre-cell-count {
     font-family: var(--mono);
-    font-size: 16.5px;
+    font-size: 14.5px;
     color: var(--text3);
     margin-top: 2px;
   }

@@ -226,39 +226,39 @@
           <span class="panel-title">⬡ Behavioural Risk Meter</span>
           <span id="risk-gauge-agent-label" style="font-family:var(--mono2);font-size:12.5px;color:var(--accent);letter-spacing:1px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);padding:2px 7px;border-radius:3px;">GLOBAL</span>
         </div>
-        <div style="padding:14px 16px;display:flex;flex-direction:column;align-items:center;gap:0;flex:1;">
+        <div style="padding:10px 14px;display:flex;flex-direction:column;align-items:center;gap:0;flex:1;">
           <!-- Gauge canvas — explicit aspect ratio keeps the top "50" tick label inside the canvas -->
-          <canvas id="risk-gauge" style="width:100%;max-width:280px;aspect-ratio:280/170;display:block;"></canvas>
+          <canvas id="risk-gauge" style="width:100%;max-width:clamp(150px,calc(20 * var(--svh)),250px);aspect-ratio:280/170;display:block;"></canvas>
           <!-- Score value -->
           <div style="text-align:center;margin-top:-4px;">
-            <div id="risk-score-val" style="font-family:var(--mono);font-size:44px;line-height:1;font-weight:700;color:var(--green)">—</div>
+            <div id="risk-score-val" style="font-family:var(--mono);font-size:clamp(26px,calc(4.4 * var(--svh)),44px);line-height:1;font-weight:700;color:var(--green)">—</div>
             <div style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);margin-top:3px;letter-spacing:2px">RISK SCORE / 100</div>
           </div>
           <!-- Verdict pill -->
-          <div id="risk-label-pill" class="risk-pill risk-low" style="margin-top:10px;font-size:14.5px;padding:5px 20px;letter-spacing:1.5px;">Calculating...</div>
+          <div id="risk-label-pill" class="risk-pill risk-low" style="margin-top:7px;font-size:14.5px;padding:4px 16px;letter-spacing:1.5px;">Calculating...</div>
           <!-- Zone legend -->
-          <div style="width:100%;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
-            <div style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px;text-align:center;">RISK ZONE REFERENCE</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;">
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(6,214,160,0.06);border:1px solid rgba(6,214,160,0.2);border-radius:4px;">
+          <div style="width:100%;margin-top:10px;border-top:1px solid var(--border);padding-top:9px;">
+            <div style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px;text-align:center;">RISK ZONE REFERENCE</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(6,214,160,0.06);border:1px solid rgba(6,214,160,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#06d6a0;flex-shrink:0;"></div>
                 <div><div style="font-family:var(--mono2);font-size:12.5px;color:#06d6a0;font-weight:600;">LOW</div><div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);">0 – 24</div></div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,209,102,0.06);border:1px solid rgba(255,209,102,0.2);border-radius:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(255,209,102,0.06);border:1px solid rgba(255,209,102,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#ffd166;flex-shrink:0;"></div>
                 <div><div style="font-family:var(--mono2);font-size:12.5px;color:#ffd166;font-weight:600;">MODERATE</div><div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);">25 – 49</div></div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,140,66,0.06);border:1px solid rgba(255,140,66,0.2);border-radius:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(255,140,66,0.06);border:1px solid rgba(255,140,66,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#ff8c42;flex-shrink:0;"></div>
                 <div><div style="font-family:var(--mono2);font-size:12.5px;color:#ff8c42;font-weight:600;">HIGH</div><div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);">50 – 74</div></div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,59,92,0.06);border:1px solid rgba(255,59,92,0.2);border-radius:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(255,59,92,0.06);border:1px solid rgba(255,59,92,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#ff3b5c;flex-shrink:0;"></div>
                 <div><div style="font-family:var(--mono2);font-size:12.5px;color:#ff3b5c;font-weight:600;">CRITICAL</div><div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);">75 – 100</div></div>
               </div>
             </div>
             <!-- Score breakdown -->
-            <div style="margin-top:10px;padding:8px;background:rgba(0,0,0,0.2);border-radius:4px;border:1px solid var(--border);">
+            <div style="margin-top:8px;padding:7px 8px;background:rgba(0,0,0,0.2);border-radius:4px;border:1px solid var(--border);">
               <div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);letter-spacing:1px;margin-bottom:6px;">SCORE COMPOSITION</div>
               <div id="gauge-score-breakdown" style="display:flex;flex-direction:column;gap:4px;">
                 <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12.5px;">
@@ -282,7 +282,7 @@
       <!-- Radar Panel -->
       <div class="panel" style="display:flex;flex-direction:column;">
         <div class="panel-header"><span class="panel-title">⬡ Security Activity Pattern</span></div>
-        <div style="padding:8px;display:flex;align-items:center;justify-content:center;flex:1;min-height:340px;overflow:visible;">
+        <div style="padding:8px;display:flex;align-items:center;justify-content:center;flex:1;min-height:clamp(190px,calc(27 * var(--svh)),330px);overflow:visible;">
           <canvas id="radar-chart" style="width:100%;height:100%;display:block;"></canvas>
         </div>
       </div>
@@ -293,8 +293,8 @@
           <span class="panel-title">↗ Alert Timeline</span>
           <span class="panel-badge" id="timeline-range">Loading...</span>
         </div>
-        <div style="padding:12px 16px;flex:1;min-height:280px;display:flex;flex-direction:column;">
-          <canvas id="timeline-chart" style="width:100%;flex:1;display:block;min-height:220px;"></canvas>
+        <div style="padding:10px 14px;flex:1;min-height:clamp(170px,calc(24 * var(--svh)),280px);display:flex;flex-direction:column;">
+          <canvas id="timeline-chart" style="width:100%;flex:1;display:block;min-height:clamp(130px,calc(19 * var(--svh)),220px);"></canvas>
         </div>
       </div>
     </div>
