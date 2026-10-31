@@ -45,6 +45,7 @@ import ueba_watchlist
 import ueba_risk_history
 import ueba_privilege
 import ueba_assets
+import ueba_entities
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -480,6 +481,7 @@ def build_evidence_block(
     alerts_today: int | None,
     presence: dict | None = None,
     privilege: dict | None = None,
+    entities: list | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -606,6 +608,23 @@ def build_evidence_block(
                                       "class": privilege.get("class"),
                                       "source": privilege.get("source")}
                                      if privilege else None),
+            # RFP SN 30 / SN 67. The other entities this event touched, each
+            # with the signal that classified it, for the same reason the
+            # privilege verdict carries its source.
+            #
+            # Reported, deliberately NOT scored. A first sighting of an
+            # application is novel for almost every entity early in its life,
+            # so a flat prior on it would be a constant applied to a condition
+            # that is nearly always true — the exact shape that produced 4,836
+            # misuse findings and then 914 privilege-only alerts. Classifying
+            # and tracking entities is what SN 30 and SN 67 ask for; neither
+            # asks for a score.
+            "entities_touched":     [{"kind": e.get("kind"),
+                                      "value": e.get("value"),
+                                      "source": e.get("source"),
+                                      "field": e.get("field"),
+                                      "why": e.get("why")}
+                                     for e in (entities or [])],
             "autoencoder_error":    round(ae_result["reconstruction_error"], 4),
             "autoencoder_threshold": round(ae_result["threshold"], 4),
             "error_vs_threshold":   f"{round(ae_result['reconstruction_error'] / max(ae_result['threshold'], 0.0001), 1)}x above threshold",
@@ -798,6 +817,19 @@ class UEBAEngine:
             window_secs=int(self.assets_cfg.get("window_secs") or 3600),
             max_keys=int(self.assets_cfg.get("max_tracked_pairs") or 20000))
 
+        # Entity kinds beyond the account (SN 30 / SN 67). Same file-and-mtime
+        # contract again, so an operator nominating a field takes effect on the
+        # next event with no restart.
+        self.entities_file = paths.get("entities_file") or ""
+        self.entities_cfg = (
+            (cfg.get("detection") or {}).get("entities") or {})
+        # One guard per process. A field an operator picked badly is unbounded,
+        # and the guard is what stops it growing entity_presence without limit;
+        # it has to persist across events to be able to notice that.
+        self.entity_guard = ueba_entities.CardinalityGuard(
+            cap=int(self.entities_cfg.get("max_cardinality")
+                    or ueba_entities.DEFAULT_MAX_CARDINALITY))
+
         log.info("All components loaded successfully")
 
     def _maybe_reset_alerts_today(self) -> None:
@@ -903,6 +935,35 @@ class UEBAEngine:
             presence = self.profile_store.record_presence(user, log_entry) or {}
         except Exception:
             presence = {}
+
+        # SN 30 / SN 67 — the other entities this event touched: the host as a
+        # server or an endpoint, the program that ran, and anything the
+        # operator nominated. Recorded for every event, like presence above and
+        # for the same reason: "this account has never run this program before"
+        # is only a true statement if the set of programs it HAS run was built
+        # from all of its traffic, not from the 0.03% that alerted.
+        #
+        # These are SECONDARY entities. The primary key stays whatever
+        # resolve_entity() returned, because that is what names the model file
+        # on disk; nothing here may change which model scores the event.
+        entities = []
+        entity_presence = {}
+        if self.entities_cfg.get("enabled", True):
+            try:
+                host_name = ueba_entities.event_host(log_entry)
+                entities = ueba_entities.extract(
+                    log_entry,
+                    ueba_entities.register(self.entities_file)
+                    if self.entities_file else None,
+                    accounts_seen=self.profile_store.distinct_account_count(
+                        host_name) if host_name else 0,
+                    guard=self.entity_guard)
+                if entities:
+                    entity_presence = self.profile_store.record_entities(
+                        user, entities) or {}
+            except Exception as e:
+                log.debug("entity extraction skipped: %s", e)
+                entities, entity_presence = [], {}
 
         # SN 15 — privilege as an entity attribute, and the three behaviours
         # the serial names: misuse, sharing and takeover.
@@ -1092,6 +1153,7 @@ class UEBAEngine:
             alerts_today=alerts_today_for_user,
             presence=presence_summary,
             privilege=privilege,
+            entities=entities,
         )
 
         # Append ueba block + evidence to original log

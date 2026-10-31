@@ -1517,6 +1517,14 @@ class UserProfileStore:
                 # already known, so that question never costs a query.
                 if kind == "agent" and distinct:
                     self._host_counts()[user] = distinct
+                    # first_time was computed against this account's own host
+                    # set, but `events == 1` means the (account, host) pair is
+                    # new whichever way it is read — so the host has gained an
+                    # account. See distinct_account_count.
+                    if seen == 1:
+                        counts = self._account_counts()
+                        key = value.strip().casefold()
+                        counts[key] = counts.get(key, 0) + 1
 
                 out[kind] = {"value": value, "first_time": first_time,
                              "distinct": distinct, "events": seen}
@@ -1629,6 +1637,82 @@ class UserProfileStore:
             _log.debug("asset access not recorded for %s -> %s: %s", user, asset, e)
         return out
 
+    def record_entities(self, user: str, entities: list) -> dict:
+        """Note the secondary entities one event touched (SN 30, SN 67).
+
+        `entities` is what ueba_entities.extract() returned: the host as a
+        server or an endpoint, the program that ran, and anything the operator
+        nominated. They go into entity_presence under their own kinds, beside
+        the country/agent/privop/asset rows already there — the table is keyed
+        (username, kind, value), so new kinds need no schema change and no
+        migration.
+
+        Returns {kind: {"value", "first_time", "events"}} so the caller can say
+        "this account has never run this program before" from the write it is
+        already doing. Only ONE entry per kind is returned: extract() yields at
+        most one host and one application per event, and for a custom kind the
+        last value wins, which is the same convention record_presence uses.
+
+        Never raises, for the same reason record_presence does not: a novelty
+        signal is worth less than the pipeline it would take down.
+        """
+        out: dict = {}
+        if not user or user == "unknown" or not entities:
+            return out
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            for ent in entities:
+                kind = str((ent or {}).get("kind") or "").strip()
+                value = str((ent or {}).get("value") or "").strip()
+                if not kind or not value:
+                    continue
+                row = self.conn.execute(
+                    """INSERT INTO entity_presence
+                           (username, kind, value, events, first_seen, last_seen)
+                       VALUES (?, ?, ?, 1, ?, ?)
+                       ON CONFLICT(username, kind, value) DO UPDATE SET
+                           events    = events + 1,
+                           last_seen = excluded.last_seen
+                       RETURNING events""",
+                    (user, kind, value, now, now)).fetchone()
+                seen = int(row[0]) if row else 1
+                out[kind] = {"value": value, "first_time": (seen == 1),
+                             "events": seen,
+                             "source": (ent or {}).get("source") or "",
+                             "why": (ent or {}).get("why") or ""}
+
+            self._presence_pending = getattr(self, "_presence_pending", 0) + 1
+            if self._presence_pending >= _PRESENCE_COMMIT_EVERY:
+                self.conn.commit()
+                self._presence_pending = 0
+        except Exception as e:
+            _log.debug("entities not recorded for %s: %s", user, e)
+        return out
+
+    def entities_by_kind(self, kind: str, limit: int = 200) -> list:
+        """[{'value', 'entities', 'events', 'first_seen', 'last_seen'}] for one
+        kind, busiest first — what the console lists for SN 30.
+
+        `entities` is how many distinct accounts touched that value, which is
+        the column that makes a server look like a server.
+        """
+        out: list = []
+        try:
+            for row in self.conn.execute(
+                    """SELECT value, COUNT(*) AS actors, SUM(events) AS events,
+                              MIN(first_seen), MAX(last_seen)
+                         FROM entity_presence
+                        WHERE kind = ?
+                     GROUP BY value
+                     ORDER BY events DESC
+                        LIMIT ?""", (str(kind), max(1, int(limit)))):
+                out.append({"value": row[0], "entities": int(row[1] or 0),
+                            "events": int(row[2] or 0),
+                            "first_seen": row[3], "last_seen": row[4]})
+        except Exception as e:
+            _log.debug("entities_by_kind(%s) failed: %s", kind, e)
+        return out
+
     def distinct_host_count(self, user: str) -> int:
         """How many distinct hosts this entity has been seen on (SN 15)."""
         if not user:
@@ -1649,6 +1733,46 @@ class UserProfileStore:
         except Exception as e:
             _log.debug("host counts unavailable: %s", e)
         self._host_cache = cached
+        return cached
+
+    def distinct_account_count(self, host: str) -> int:
+        """How many distinct accounts have been seen on this host (SN 30).
+
+        The mirror image of distinct_host_count, off the same kind='agent'
+        rows: that table stores (account, host) pairs, so grouping by account
+        answers "how many hosts has this person used" and grouping by host
+        answers "how many people have used this host" — which is the signal
+        that makes a multi-user host look like a server.
+        """
+        if not host:
+            return 0
+        # Casefolded, because the same host arrives as DC_AD_srv, dc_ad_srv and
+        # DC_AD_SRV depending on which agent reported it. Counting those
+        # separately would understate every multi-user host and make the
+        # observed-breadth signal in ueba_entities unreliable.
+        return self._account_counts().get(str(host).strip().casefold(), 0)
+
+    def _account_counts(self) -> dict:
+        """Host -> distinct account count, read from disk once per process.
+
+        Kept live by record_presence, which already knows when it has created
+        a new (account, host) pair, so this never has to be re-read.
+        """
+        cached = getattr(self, "_account_cache", None)
+        if cached is not None:
+            return cached
+        cached = {}
+        try:
+            # GROUP BY the casefolded value, so two spellings of one host are
+            # one host. See distinct_account_count.
+            for value, n in self.conn.execute(
+                    "SELECT LOWER(value), COUNT(DISTINCT username) "
+                    "FROM entity_presence WHERE kind = 'agent' "
+                    "GROUP BY LOWER(value)"):
+                cached[value] = int(n or 0)
+        except Exception as e:
+            _log.debug("account counts unavailable: %s", e)
+        self._account_cache = cached
         return cached
 
     def _privop_counts(self) -> dict:

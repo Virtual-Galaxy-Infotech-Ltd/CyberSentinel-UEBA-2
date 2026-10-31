@@ -43,6 +43,11 @@ paths:
   # Trusted hosts and high-value assets (SN 17 / SN 40). Operator-maintained,
   # same file-and-mtime contract as the registers above.
   assets_file:          "/root/NEW_DRIVE/aditya_ueba/assets.json"
+  # Entity kinds beyond the account (SN 30 / SN 67). Holds two things: host
+  # role overrides, and the field-to-kind mappings an operator nominates.
+  # Optional — with no file, the built-in kinds still classify and SN 67 is
+  # simply unconfigured. Same file-and-mtime contract as the registers above.
+  entities_file:        "/root/NEW_DRIVE/aditya_ueba/entities.json"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -615,6 +620,48 @@ noise_suppression:
 
 # ── Detection tuning (RFP SN 12 / 46 / 47) ───────────────────────────────────
 detection:
+  # ── Entity kinds beyond the account (RFP SN 30 / SN 67) ────────────────────
+  #
+  # One event touches several things: a person, the host they are on, the
+  # program that ran. Only the first has ever been an entity here. These are
+  # recorded as SECONDARY entities in entity_presence, under their own kinds,
+  # beside the country/agent/privop/asset rows already there — the table is
+  # keyed (username, kind, value), so there is no schema change.
+  #
+  # The PRIMARY entity key is untouched. That key names the autoencoder file on
+  # disk, so nothing here may change which model scores an event.
+  #
+  # Reported, deliberately not scored. SN 30 asks for classification and SN 67
+  # for operator-defined entities; neither asks for a score, and a flat prior
+  # on "first time this entity ran this program" would be a constant applied to
+  # a condition that is nearly always true for a young entity. That shape has
+  # already cost us two alert floods.
+  #
+  # Built-in kinds: server, endpoint, application.
+  #   server / endpoint  host role. Precedence: paths.entities_file override,
+  #                      then name shape, then observed breadth, then endpoint.
+  #                      host.type is NOT used — it reads "server" on 100% of
+  #                      sampled events including the laptops, so it carries no
+  #                      information. See ueba_entities.py for the measurement.
+  #   application        the program named on the event. Active-response script
+  #                      paths are excluded: that is the platform acting on
+  #                      itself, and it is 523 of 661 process events.
+  #
+  # No data-asset kind is offered. object.type == "file" appears on 9 of 3,412
+  # sampled alerts and all nine are web-attack URL paths, so the namespace
+  # would be empty. Data assets are covered by the operator-tagged high-value
+  # asset register above (SN 40), which is honest about being operator-supplied.
+  #
+  # SN 67: an operator adds {field, kind} through /api/entities/mappings. A
+  # field whose values are unbounded (a pid, a hash, a timestamp) is refused on
+  # the way in with the reason; anything that slips past the name check is
+  # suspended at runtime by max_cardinality below.
+  entities:
+    enabled: true
+    # Distinct values one kind may accumulate before it is suspended. Guards
+    # entity_presence against a badly chosen field, per process.
+    max_cardinality: 5000
+
   # ── Trusted hosts and high-value assets (RFP SN 17 / SN 40) ────────────────
   #
   # Both serials come from one register, paths.assets_file, where each entry

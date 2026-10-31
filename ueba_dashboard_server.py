@@ -26,6 +26,7 @@ import gzip
 import json
 import os
 import re
+import sqlite3
 import time
 import uuid
 import zipfile
@@ -88,6 +89,14 @@ try:
 except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
+
+# Entity kinds beyond the account (RFP SN 30 / SN 67). Optional likewise.
+try:
+    import ueba_entities  # type: ignore
+    ENTITIES_AVAILABLE = True
+except Exception:
+    ueba_entities = None
+    ENTITIES_AVAILABLE = False
 
 # Privileged-account declarations (RFP SN 15). Optional on the same terms.
 try:
@@ -3088,6 +3097,7 @@ CAPABILITIES = {
     "incident.confirm": "analyst",
     "privileged.edit":  "admin",
     "assets.edit":      "admin",
+    "entities.edit":    "admin",
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
@@ -3958,6 +3968,201 @@ def api_assets_remove(role, value):
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "count": len(kept)})
+
+
+def _profile_db_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    return str(_abs_install_path(
+        paths.get("profile_db") or "profiles/user_profiles.db"))
+
+
+def _presence_query(sql, args=()):
+    """Run one read-only query against entity_presence.
+
+    Opened read-only (mode=ro) and through its own short-lived connection: the
+    engine holds the same database open in WAL mode, so a reader cannot block
+    it, and read-only means a dashboard bug cannot write to the engine's state.
+    Importing UserProfileStore here instead would pull numpy and h5py into the
+    web process to read two columns.
+    """
+    path = _profile_db_path()
+    if not Path(path).exists():
+        return []
+    conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=5.0)
+    try:
+        return list(conn.execute(sql, args))
+    finally:
+        conn.close()
+
+
+def _entities_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    p = paths.get("entities_file") or ""
+    if not p:
+        p = "entities.json"
+    return str(_abs_install_path(p))
+
+
+@app.route("/api/entities")
+def api_entities_status():
+    """What kinds exist, what the operator has configured, and what the feed
+    supports (RFP SN 30 / SN 67)."""
+    if not ENTITIES_AVAILABLE:
+        return jsonify({"ok": False, "error": "entities module unavailable",
+                        "mappings": []}), 503
+    cfg = (_RAW_CFG.get("detection") or {}).get("entities") or {}
+    try:
+        st = ueba_entities.status(_entities_path())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "mappings": []}), 500
+    st["ok"] = True
+    st["enabled"] = bool(cfg.get("enabled", True))
+    st["max_cardinality"] = cfg.get(
+        "max_cardinality", ueba_entities.DEFAULT_MAX_CARDINALITY)
+    st["host_roles"] = list(ueba_entities.HOST_ROLES)
+    st["role_sources"] = list(ueba_entities.ROLE_SOURCES)
+    return jsonify(st)
+
+
+@app.route("/api/entities/kind/<kind>")
+def api_entities_by_kind(kind):
+    """The entities recorded under one kind, busiest first.
+
+    `entities` on each row is how many distinct accounts touched that value —
+    the column that makes a multi-user host look like a server.
+    """
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 200), 2000))
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        rows = [{"value": r[0], "entities": int(r[1] or 0),
+                 "events": int(r[2] or 0), "first_seen": r[3],
+                 "last_seen": r[4]}
+                for r in _presence_query(
+                    """SELECT value, COUNT(*), SUM(events),
+                              MIN(first_seen), MAX(last_seen)
+                         FROM entity_presence
+                        WHERE kind = ?
+                     GROUP BY value
+                     ORDER BY SUM(events) DESC
+                        LIMIT ?""", (str(kind), limit))]
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "rows": []}), 500
+    return jsonify({"ok": True, "kind": str(kind), "count": len(rows),
+                    "rows": rows})
+
+
+@app.route("/api/entities/mappings", methods=["POST"])
+@_require_cap("entities.edit")
+def api_entities_mapping_add():
+    """Nominate a field as an entity kind (SN 67).
+
+    Refuses an unbounded field and says why, rather than accepting it and
+    letting the runtime guard suspend it later.
+    """
+    if not ENTITIES_AVAILABLE:
+        return jsonify({"ok": False, "error": "entities module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    field = (body.get("field") or "").strip()
+    kind = (body.get("kind") or "").strip()
+    if not field or not kind:
+        return jsonify({"ok": False, "error": "field and kind are required"}), 400
+    try:
+        entry, err = ueba_entities.add_mapping(
+            _entities_path(), field, kind,
+            note=(body.get("note") or ""),
+            added_by=_current_username(),
+            max_cardinality=body.get("max_cardinality"))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if entry is None:
+        # 422, not 400: the request was well formed and was refused on its
+        # merits, and the reason is the useful part of the response.
+        return jsonify({"ok": False, "error": err}), 422
+    return jsonify({"ok": True, "entry": entry, "note": err or None})
+
+
+@app.route("/api/entities/mappings", methods=["DELETE"])
+@_require_cap("entities.edit")
+def api_entities_mapping_remove():
+    """Stop tracking a nominated field.
+
+    Takes field and kind in the body rather than the path: a dotted field path
+    in a URL segment is ambiguous against Flask's own path converter.
+    """
+    if not ENTITIES_AVAILABLE:
+        return jsonify({"ok": False, "error": "entities module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    field = (body.get("field") or request.args.get("field") or "").strip()
+    kind = (body.get("kind") or request.args.get("kind") or "").strip()
+    if not field or not kind:
+        return jsonify({"ok": False, "error": "field and kind are required"}), 400
+    try:
+        gone = ueba_entities.remove_mapping(_entities_path(), field, kind)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if not gone:
+        return jsonify({"ok": False, "error": "no such mapping"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/entities/hosts", methods=["POST"])
+@_require_cap("entities.edit")
+def api_entities_host_role():
+    """Override one host's role, or clear the override with role: "".
+
+    The override outranks name shape and observed breadth, which is the point:
+    the classifier is a default, and the operator is the authority.
+    """
+    if not ENTITIES_AVAILABLE:
+        return jsonify({"ok": False, "error": "entities module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    host = (body.get("host") or "").strip()
+    if not host:
+        return jsonify({"ok": False, "error": "host required"}), 400
+    try:
+        entry, err = ueba_entities.set_host_role(
+            _entities_path(), host, body.get("role") or "")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if entry is None:
+        return jsonify({"ok": False, "error": err}), 400
+    return jsonify({"ok": True, "entry": entry})
+
+
+@app.route("/api/entities/classify")
+def api_entities_classify():
+    """Why one host is classified the way it is — ?host=NAME.
+
+    A verdict an analyst cannot question is a verdict they cannot act on, so
+    this returns the signal that decided it, not just the answer.
+    """
+    if not ENTITIES_AVAILABLE:
+        return jsonify({"ok": False, "error": "entities module unavailable"}), 503
+    host = (request.args.get("host") or "").strip()
+    if not host:
+        return jsonify({"ok": False, "error": "host required"}), 400
+    try:
+        seen = 0
+        try:
+            # COLLATE NOCASE: the agent rows keep whatever case the
+            # reporting agent used, and an operator typing a host name into
+            # the console should not have to reproduce it.
+            got = _presence_query(
+                "SELECT COUNT(DISTINCT username) FROM entity_presence "
+                "WHERE kind = 'agent' AND value = ? COLLATE NOCASE", (host,))
+            seen = int(got[0][0] or 0) if got else 0
+        except Exception:
+            seen = 0
+        verdict = ueba_entities.classify_host(
+            host, ueba_entities.register(_entities_path()), seen)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    verdict["ok"] = True
+    verdict["host"] = host
+    verdict["accounts_seen"] = seen
+    return jsonify(verdict)
 
 
 @app.route("/api/privileged")
