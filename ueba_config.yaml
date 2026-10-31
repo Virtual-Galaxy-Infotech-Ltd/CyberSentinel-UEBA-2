@@ -56,6 +56,13 @@ paths:
   device_bindings_file: "/root/NEW_DRIVE/aditya_ueba/device_bindings.json"
   # Which device held which address, when. Defaults beside the profile store.
   device_trail_db:      "profiles/device_trail.db"
+  # Published peer-group assignment (SN 42), written by build_peer_groups.py
+  # beside the weekly retrain and mtime-reloaded by the engine.
+  peer_groups_file:     "profiles/peer_groups.json"
+  # Operator-assigned cohorts, highest precedence. THIS IS WHERE AN HR OR AD
+  # FEED LANDS if one ever arrives: {entity: cohort_name}. Until then the
+  # grouping is inferred and this file is simply absent.
+  peer_cohorts_file:    "/root/NEW_DRIVE/aditya_ueba/peer_cohorts.json"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -703,6 +710,55 @@ detection:
     enabled: true
     grace_secs: 900
     stale_secs: 172800
+
+  # ── Peer-group deviation (RFP SN 42) ───────────────────────────────────────
+  #
+  # The tracking sheet had this blocked on department, role and business-unit
+  # attributes from HR or Active Directory. Those make one KIND of peer group,
+  # not the only kind. Splunk UBA builds four — HR, AD organisational unit,
+  # behavioural, and device — and Exabeam's dynamic peer analysis is explicitly
+  # behavioural, computing a divergence metric over each entity's access
+  # frequency distribution. Neither treats an HR feed as a prerequisite.
+  #
+  # So the grouping here is inferred, with HR left as a plug: precedence is
+  # paths.peer_cohorts_file (operator, where an HR feed lands), then the
+  # account's own domain prefix, then behavioural clustering. An attribute feed
+  # arriving later outranks the inference automatically.
+  #
+  # Only PERSON-class entities are grouped, and this is the guard that matters
+  # most: measured locally, 103 of 135 accounts with activity are SSH
+  # brute-force username guesses that behave identically to each other. Grouped
+  # naively they form one cohort of a hundred "peers", none of them a person,
+  # and a real user's drift would then be measured against attackers.
+  #
+  # Deviation is scored against the cohort's OWN spread, never a fixed
+  # threshold: an entity deviates when it sits more than deviation_sigma
+  # standard deviations beyond the mean member-to-cohort distance recorded at
+  # build time. A fixed number would fire constantly for a diverse group and
+  # never for a tight one.
+  #
+  # min_size        a cohort smaller than this is not a peer group; its members
+  #                 are reported unplaced rather than given a weak verdict.
+  # min_events      an entity with less history than this has no profile worth
+  #                 clustering, and none worth judging a drift from.
+  # max_distance    the divergence ceiling for two entities to be peers. 0.45
+  #                 means peers must share MORE THAN HALF their activity: an
+  #                 even split between one shared asset and one private asset
+  #                 each scores exactly 0.50.
+  # window_secs     the rolling window the "recent" profile is measured over.
+  #                 The serial says a pattern STARTS deviating, which is a
+  #                 statement about change, so the comparison is recent-window
+  #                 against cohort, not all-time against cohort.
+  peers:
+    enabled: true
+    min_size: 4
+    min_events: 20
+    max_distance: 0.45
+    deviation_sigma: 2.5
+    window_secs: 86400
+    max_entities: 5000
+    max_tracked_entities: 20000
+    use_directory: true
 
   # ── Trusted hosts and high-value assets (RFP SN 17 / SN 40) ────────────────
   #

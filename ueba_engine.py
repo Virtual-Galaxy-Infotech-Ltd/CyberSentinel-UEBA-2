@@ -47,6 +47,7 @@ import ueba_privilege
 import ueba_assets
 import ueba_entities
 import ueba_device_identity
+import ueba_peers
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -484,6 +485,7 @@ def build_evidence_block(
     privilege: dict | None = None,
     entities: list | None = None,
     device: dict | None = None,
+    peer: dict | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -621,6 +623,20 @@ def build_evidence_block(
             # misuse findings and then 914 privilege-only alerts. Classifying
             # and tracking entities is what SN 30 and SN 67 ask for; neither
             # asks for a score.
+            # RFP SN 42. Whether this entity's recent pattern has drifted
+            # from its peer group, which group, and how far out it sits
+            # relative to that group's OWN spread. `membership` is carried so
+            # a verdict about an entity sitting at the edge of its cohort can
+            # be weighed accordingly rather than read as confident.
+            "peer_group":           ({"cohort": peer.get("cohort"),
+                                      "source": peer.get("source"),
+                                      "size": peer.get("size"),
+                                      "membership": peer.get("membership"),
+                                      "deviating": peer.get("deviating"),
+                                      "distance": peer.get("distance"),
+                                      "sigma": peer.get("z"),
+                                      "reason": peer.get("reason")}
+                                     if peer and peer.get("cohort") else None),
             # RFP SN 5. Which machine this is, how we know, and whether the
             # identity survives a DHCP change. `stable` is the field that
             # matters: False means the key is an address and WILL break when
@@ -869,6 +885,17 @@ class UEBAEngine:
                 log.warning("device identity disabled: %s", e)
                 self.device_trail = None
 
+        # Peer groups (SN 42). The assignment is built offline by
+        # build_peer_groups.py and only READ here, mtime-reloaded; clustering
+        # is O(n·k) over every entity and has no business on the event path.
+        self.peers_cfg = (cfg.get("detection") or {}).get("peers") or {}
+        self.peer_groups_file = paths.get("peer_groups_file") or ""
+        self.peer_recent = None
+        if self.peers_cfg.get("enabled", True) and self.peer_groups_file:
+            self.peer_recent = ueba_peers.RecentProfiles(
+                window_secs=float(self.peers_cfg.get("window_secs") or 86400),
+                max_keys=int(self.peers_cfg.get("max_tracked_entities") or 20000))
+
         log.info("All components loaded successfully")
 
     def _maybe_reset_alerts_today(self) -> None:
@@ -987,9 +1014,11 @@ class UEBAEngine:
         # on disk; nothing here may change which model scores the event.
         entities = []
         entity_presence = {}
+        # Bound unconditionally: the peer-deviation block below reads it, and
+        # it must not depend on whether entity extraction happens to be on.
+        host_name = ueba_entities.event_host(log_entry)
         if self.entities_cfg.get("enabled", True):
             try:
-                host_name = ueba_entities.event_host(log_entry)
                 entities = ueba_entities.extract(
                     log_entry,
                     ueba_entities.register(self.entities_file)
@@ -1011,6 +1040,37 @@ class UEBAEngine:
             except Exception as e:
                 log.debug("entity extraction skipped: %s", e)
                 entities, entity_presence = [], {}
+
+        # SN 42 — has this entity's pattern started to drift from its peers?
+        #
+        # The assets are the ones the entity touched on this event, namespaced
+        # exactly as build_peer_groups namespaces them from entity_presence
+        # ("agent:<host>", "application:<app>") — if the two disagreed, every
+        # recent profile would be disjoint from every cohort profile and every
+        # entity would read as deviating.
+        peer = None
+        if self.peer_recent is not None:
+            try:
+                assignment = ueba_peers.load(self.peer_groups_file)
+                if assignment.get("members"):
+                    now_ts = time.time()
+                    if host_name:
+                        self.peer_recent.record(
+                            user, "agent:%s" % host_name.casefold(), now_ts)
+                    for e in entities:
+                        if e.get("kind") == "application":
+                            self.peer_recent.record(
+                                user, "application:%s" % e.get("value"), now_ts)
+                    peer = ueba_peers.deviation(
+                        assignment, user,
+                        self.peer_recent.profile(user, now_ts),
+                        sigma=float(self.peers_cfg.get("deviation_sigma")
+                                    or ueba_peers.DEFAULT_DEVIATION_SIGMA),
+                        min_events=int(self.peers_cfg.get("min_events")
+                                       or ueba_peers.DEFAULT_MIN_EVENTS))
+            except Exception as e:
+                log.debug("peer deviation skipped: %s", e)
+                peer = None
 
         # SN 5 — which MACHINE this event came from, stably, even though its
         # address may have changed. Resolved for every event because the trail
@@ -1175,6 +1235,15 @@ class UEBAEngine:
         # before. seen_countries / seen_agents were collected on the profile and
         # read by nothing in the scoring path; this reads the all-traffic
         # presence table instead, for the reason recorded in record_presence.
+        # Reported as a reason, deliberately NOT as a score prior. A deviation
+        # is rare by construction — it has to clear 2.5 sd within its own
+        # cohort — but "rare by construction" is an argument, not a
+        # measurement, and every prior this project added without measuring
+        # its firing rate first caused an alert flood. The prior is a separate
+        # step, gated on measuring this rate against live traffic.
+        if peer and peer.get("deviating"):
+            anomaly_reasons.append("PEER DEVIATION: %s" % peer.get("reason"))
+
         for reason in self._presence_reasons(presence):
             if reason not in anomaly_reasons:
                 anomaly_reasons.append(reason)
@@ -1222,6 +1291,7 @@ class UEBAEngine:
             privilege=privilege,
             entities=entities,
             device=device,
+            peer=peer,
         )
 
         # Append ueba block + evidence to original log

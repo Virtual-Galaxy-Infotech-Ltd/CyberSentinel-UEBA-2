@@ -332,6 +332,27 @@ else
   echo "  Engine restart launched (new PID: $NEW_PID, takes ~35s to be fully ready)"
 fi
 
+# ── 5.5 Rebuild peer groups (RFP SN 42) ──────────────────────────────────
+# After the engine is back, so it picks the new assignment up on its next event
+# through the mtime reload rather than needing another restart.
+#
+# Non-fatal on purpose. Clustering reads entity_presence, which is independent
+# of the models this script just rebuilt, so a failure here must not mark the
+# retrain itself as failed and must not leave the engine stopped. The builder
+# refuses to overwrite a good assignment with an empty one, so the worst case
+# of a failed run is that last week's grouping stays in force.
+PEER_TOOL="$BASE/build_peer_groups.py"
+if [ -f "$PEER_TOOL" ]; then
+  echo "  Rebuilding peer groups..."
+  if "$VENV_PY" "$PEER_TOOL" --config "$BASE/ueba_config.yaml" 2>&1 | sed 's/^/    /'; then
+    echo "  Peer groups rebuilt"
+  else
+    echo "  WARNING: peer group rebuild failed — the previous assignment stays in force"
+  fi
+else
+  echo "  No build_peer_groups.py — skipping peer group rebuild"
+fi
+
 # ── 6. Prune snapshots older than N days ─────────────────────────────────
 DELETED=$(find "$TRAINING_DIR" -maxdepth 1 -name 'enriched-weekly-*.json.gz' \
             -mtime "+${SNAPSHOT_RETENTION_DAYS}" -print -delete 2>/dev/null || true)

@@ -91,6 +91,14 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# Peer groups built from observed behaviour (RFP SN 42). Optional likewise.
+try:
+    import ueba_peers  # type: ignore
+    PEERS_AVAILABLE = True
+except Exception:
+    ueba_peers = None
+    PEERS_AVAILABLE = False
+
 # Stable machine identity across DHCP changes (RFP SN 5). Optional likewise.
 try:
     import ueba_device_identity  # type: ignore
@@ -4355,6 +4363,75 @@ def _entities_path():
     if not p:
         p = "entities.json"
     return str(_abs_install_path(p))
+
+
+def _peer_groups_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    return str(_abs_install_path(
+        paths.get("peer_groups_file") or "profiles/peer_groups.json"))
+
+
+@app.route("/api/peers")
+def api_peers_status():
+    """The published peer groups (RFP SN 42).
+
+    Reports when it was built and how many entities were excluded and why,
+    because "only four entities are in a peer group" needs the reason beside it
+    to be read correctly.
+    """
+    if not PEERS_AVAILABLE:
+        return jsonify({"ok": False, "error": "peers module unavailable",
+                        "cohorts": []}), 503
+    try:
+        st = ueba_peers.status(_peer_groups_path())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "cohorts": []}), 500
+    st["ok"] = True
+    if not st.get("built_at"):
+        st["note"] = ("no assignment has been published yet — run "
+                      "build_peer_groups.py, which the weekly retrain also "
+                      "does")
+    st["cohorts"].sort(key=lambda c: -(c.get("size") or 0))
+    return jsonify(st)
+
+
+@app.route("/api/peers/<path:entity>")
+def api_peers_entity(entity):
+    """One entity's peer group, its peers, and how central it is to them."""
+    if not PEERS_AVAILABLE:
+        return jsonify({"ok": False, "error": "peers module unavailable"}), 503
+    try:
+        asg = ueba_peers.load(_peer_groups_path())
+        info = ueba_peers.cohort_of(asg, entity)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if not info:
+        unplaced = (asg.get("unplaced") or {})
+        reason = unplaced.get(entity) or ""
+        if not reason:
+            low = str(entity).casefold()
+            for k, v in unplaced.items():
+                if k.casefold() == low:
+                    reason = v
+                    break
+        return jsonify({"ok": True, "entity": entity, "in_group": False,
+                        "reason": reason or "entity is not in a peer group"})
+    cohort = (asg.get("cohorts") or {}).get(info["cohort"]) or {}
+    members = [m for m in (cohort.get("members") or []) if m != entity]
+    return jsonify({
+        "ok": True, "entity": entity, "in_group": True,
+        "cohort": info["cohort"], "source": info["source"],
+        "size": info["size"],
+        "membership": info["membership"],
+        "distance": info["distance"],
+        "peers": members[:100],
+        "cohort_mean_distance": cohort.get("mean_distance"),
+        "cohort_distance_sd": cohort.get("distance_sd"),
+        "profile": dict(list((cohort.get("profile") or {}).items())[:25]),
+        "basis": ("grouped on the divergence between entities' access "
+                  "frequency distributions; a drift is measured against this "
+                  "group's own spread, not a fixed threshold"),
+    })
 
 
 def _device_trail_path():
