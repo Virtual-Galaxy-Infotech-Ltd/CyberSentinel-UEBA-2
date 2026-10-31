@@ -48,6 +48,14 @@ paths:
   # Optional — with no file, the built-in kinds still classify and SN 67 is
   # simply unconfigured. Same file-and-mtime contract as the registers above.
   entities_file:        "/root/NEW_DRIVE/aditya_ueba/entities.json"
+  # Stable machine identity across DHCP changes (SN 5). Optional operator
+  # bindings of an address or name to a device label, for agentless devices the
+  # IP trail cannot reach. Same file-and-mtime contract as the registers above.
+  # This is also where a CMDB or MAC-derived asset list lands if one arrives:
+  # the format is {address_or_name: device_label} and nothing else changes.
+  device_bindings_file: "/root/NEW_DRIVE/aditya_ueba/device_bindings.json"
+  # Which device held which address, when. Defaults beside the profile store.
+  device_trail_db:      "profiles/device_trail.db"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -661,6 +669,40 @@ detection:
     # Distinct values one kind may accumulate before it is suspended. Guards
     # entity_presence against a badly chosen field, per process.
     max_cardinality: 5000
+
+  # ── Stable machine identity across DHCP changes (RFP SN 5) ─────────────────
+  #
+  # The tracking sheet recorded this as blocked on a MAC source or asset
+  # registry from the customer. Measured on 3,412 alerts it is not: the agent
+  # id is already a stable per-machine identifier (12 ids, none ever reporting
+  # a second hostname, 5 of them seen on multiple addresses). Replaying the
+  # feed through the resolver collapses those 5 back to one identity each, with
+  # 0% of events falling back to an address-keyed identity.
+  #
+  # A MAC or CMDB source would still ADD something: coverage of agentless
+  # devices, which appear only as an address. Until one exists those are
+  # resolved through the time-bounded IP trail, learned from events where a
+  # stable key and an address appear together. An address with no prior binding
+  # is reported as an UNSTABLE identity rather than guessed at.
+  #
+  # Reported and recorded, not yet the primary key. The key resolve_entity()
+  # returns names the autoencoder file on disk, so promoting the device
+  # identity to that role would strand every existing per-entity model until
+  # the next retrain — the same constraint that makes identity_resolution
+  # .typed_keys a retrain-gated change. That promotion is deliberately left as
+  # a separate, retrain-scheduled step rather than slipped in here.
+  #
+  # grace_secs  looking BACKWARD: an event timestamped just outside an
+  #             interval is still attributed to it, because events arrive out
+  #             of order. Reported as ip_recent, the weaker claim.
+  # stale_secs  looking FORWARD: an open interval means "this device holds this
+  #             address now", and an event after the last confirmed sighting
+  #             belongs to it while that is still credible. Past this, the
+  #             event gets an unstable address identity instead.
+  device_identity:
+    enabled: true
+    grace_secs: 900
+    stale_secs: 172800
 
   # ── Trusted hosts and high-value assets (RFP SN 17 / SN 40) ────────────────
   #

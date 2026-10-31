@@ -91,6 +91,14 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# Stable machine identity across DHCP changes (RFP SN 5). Optional likewise.
+try:
+    import ueba_device_identity  # type: ignore
+    DEVICE_ID_AVAILABLE = True
+except Exception:
+    ueba_device_identity = None
+    DEVICE_ID_AVAILABLE = False
+
 # Entity kinds beyond the account (RFP SN 30 / SN 67). Optional likewise.
 try:
     import ueba_entities  # type: ignore
@@ -4347,6 +4355,103 @@ def _entities_path():
     if not p:
         p = "entities.json"
     return str(_abs_install_path(p))
+
+
+def _device_trail_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    p = paths.get("device_trail_db") or ""
+    if not p:
+        p = str(Path(paths.get("profile_db") or "profiles/user_profiles.db").parent
+                / "device_trail.db")
+    return str(_abs_install_path(p))
+
+
+def _trail_query(sql, args=()):
+    """One read-only query against the device trail.
+
+    Read-only and short-lived for the same reason the presence queries are:
+    the engine holds this database open in WAL mode, and a dashboard bug must
+    not be able to write to the engine's state.
+    """
+    path = _device_trail_path()
+    if not Path(path).exists():
+        return []
+    conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=5.0)
+    try:
+        return list(conn.execute(sql, args))
+    finally:
+        conn.close()
+
+
+@app.route("/api/device-trail")
+def api_device_trail():
+    """Which device held which address, when (RFP SN 5).
+
+    ?device=agent:065  every address that machine has held
+    ?address=10.0.0.5  every machine that has held that address
+    neither            the summary: how many machines changed address, and how
+                       many addresses were reassigned
+
+    Keys are the resolver's own (agent:<id>, name:<host>, addr:<ip>), not the
+    hostname the alert table shows, because the whole point of the serial is
+    that those are different things.
+    """
+    device = (request.args.get("device") or "").strip().lower()
+    address = (request.args.get("address") or "").strip().lower()
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 100), 1000))
+    except (TypeError, ValueError):
+        limit = 100
+
+    def rows(sql, args):
+        return [{"device": r[0], "address": r[1], "first_seen": r[2],
+                 "last_seen": r[3], "events": int(r[4] or 0),
+                 "current": not int(r[5] or 0)}
+                for r in _trail_query(sql, args)]
+
+    try:
+        if device:
+            out = rows("SELECT device, address, first_seen, last_seen, events, "
+                       "closed FROM ip_trail WHERE device = ? "
+                       "ORDER BY last_seen DESC LIMIT ?", (device, limit))
+            return jsonify({"ok": True, "device": device, "count": len(out),
+                            "addresses_held": len({r["address"] for r in out}),
+                            "trail": out})
+        if address:
+            out = rows("SELECT device, address, first_seen, last_seen, events, "
+                       "closed FROM ip_trail WHERE address = ? "
+                       "ORDER BY last_seen DESC LIMIT ?", (address, limit))
+            return jsonify({"ok": True, "address": address, "count": len(out),
+                            "devices_seen": len({r["device"] for r in out}),
+                            "trail": out})
+
+        got = _trail_query(
+            "SELECT COUNT(DISTINCT address), COUNT(DISTINCT device), COUNT(*) "
+            "FROM ip_trail")
+        addrs, devs, intervals = (got[0] if got else (0, 0, 0))
+        roamed = _trail_query(
+            "SELECT COUNT(*) FROM (SELECT device FROM ip_trail GROUP BY device "
+            "HAVING COUNT(DISTINCT address) > 1)")
+        reassigned = _trail_query(
+            "SELECT COUNT(*) FROM (SELECT address FROM ip_trail GROUP BY address "
+            "HAVING COUNT(DISTINCT device) > 1)")
+        top = rows("SELECT device, address, first_seen, last_seen, events, closed "
+                   "FROM ip_trail ORDER BY last_seen DESC LIMIT ?", (limit,))
+        return jsonify({
+            "ok": True,
+            "addresses": int(addrs or 0),
+            "devices": int(devs or 0),
+            "intervals": int(intervals or 0),
+            "devices_that_changed_address": int(roamed[0][0] if roamed else 0),
+            "addresses_reassigned": int(reassigned[0][0] if reassigned else 0),
+            "sources": (list(ueba_device_identity.SOURCES)
+                        if DEVICE_ID_AVAILABLE else []),
+            "note": (ueba_device_identity.status()["mac_note"]
+                     if DEVICE_ID_AVAILABLE else ""),
+            "recent": top,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/entities")

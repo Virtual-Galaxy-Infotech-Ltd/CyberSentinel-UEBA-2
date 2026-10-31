@@ -46,6 +46,7 @@ import ueba_risk_history
 import ueba_privilege
 import ueba_assets
 import ueba_entities
+import ueba_device_identity
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -482,6 +483,7 @@ def build_evidence_block(
     presence: dict | None = None,
     privilege: dict | None = None,
     entities: list | None = None,
+    device: dict | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -619,6 +621,17 @@ def build_evidence_block(
             # misuse findings and then 914 privilege-only alerts. Classifying
             # and tracking entities is what SN 30 and SN 67 ask for; neither
             # asks for a score.
+            # RFP SN 5. Which machine this is, how we know, and whether the
+            # identity survives a DHCP change. `stable` is the field that
+            # matters: False means the key is an address and WILL break when
+            # the lease moves, which is worth saying rather than implying.
+            "device_identity":      ({"device": device.get("device"),
+                                      "source": device.get("source"),
+                                      "stable": device.get("stable"),
+                                      "address": device.get("address"),
+                                      "moved_from": device.get("moved_from"),
+                                      "why": device.get("why")}
+                                     if device and device.get("device") else None),
             "entities_touched":     [{"kind": e.get("kind"),
                                       "value": e.get("value"),
                                       "source": e.get("source"),
@@ -830,6 +843,32 @@ class UEBAEngine:
             cap=int(self.entities_cfg.get("max_cardinality")
                     or ueba_entities.DEFAULT_MAX_CARDINALITY))
 
+        # Stable machine identity across DHCP changes (SN 5). The trail is
+        # learned from events that carry both a stable key and an address, and
+        # consumed by the agentless events that carry only an address.
+        self.device_cfg = (
+            (cfg.get("detection") or {}).get("device_identity") or {})
+        self.device_bindings_file = paths.get("device_bindings_file") or ""
+        self.device_trail = None
+        if self.device_cfg.get("enabled", True):
+            try:
+                trail_path = paths.get("device_trail_db") or ""
+                if not trail_path:
+                    # Beside the profile store, where the other SQLite state is.
+                    trail_path = str(Path(
+                        paths.get("profile_db") or "profiles/user_profiles.db"
+                    ).parent / "device_trail.db")
+                self.device_trail = ueba_device_identity.DeviceTrail(
+                    trail_path,
+                    grace_secs=float(self.device_cfg.get("grace_secs") or
+                                     ueba_device_identity.DEFAULT_GRACE_SECS),
+                    stale_secs=float(self.device_cfg.get("stale_secs") or
+                                     ueba_device_identity.DEFAULT_STALE_SECS))
+                log.info("Device identity trail open: %s", trail_path)
+            except Exception as e:
+                log.warning("device identity disabled: %s", e)
+                self.device_trail = None
+
         log.info("All components loaded successfully")
 
     def _maybe_reset_alerts_today(self) -> None:
@@ -972,6 +1011,26 @@ class UEBAEngine:
             except Exception as e:
                 log.debug("entity extraction skipped: %s", e)
                 entities, entity_presence = [], {}
+
+        # SN 5 — which MACHINE this event came from, stably, even though its
+        # address may have changed. Resolved for every event because the trail
+        # is built from the events that CAN be identified and spent on the ones
+        # that cannot; skipping the easy ones would leave nothing to resolve
+        # the hard ones against.
+        #
+        # Reported, not used as the scoring key. resolve_entity() still names
+        # the model file — see detection.device_identity in the config for why
+        # promoting this is a retrain-gated change rather than a free one.
+        device = None
+        if self.device_trail is not None or self.device_bindings_file:
+            try:
+                device = ueba_device_identity.resolve(
+                    log_entry, self.device_trail,
+                    ueba_device_identity.register(self.device_bindings_file)
+                    if self.device_bindings_file else None)
+            except Exception as e:
+                log.debug("device identity skipped: %s", e)
+                device = None
 
         # SN 15 — privilege as an entity attribute, and the three behaviours
         # the serial names: misuse, sharing and takeover.
@@ -1162,6 +1221,7 @@ class UEBAEngine:
             presence=presence_summary,
             privilege=privilege,
             entities=entities,
+            device=device,
         )
 
         # Append ueba block + evidence to original log
