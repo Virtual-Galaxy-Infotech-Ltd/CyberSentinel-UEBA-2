@@ -5,6 +5,7 @@ import { state } from "../state.js";
 import { navigate } from "../router.js";
 import { scoreColor } from "../helpers.js";
 import { renderFeed, feedRows } from "./feed.js";
+import { loadDeviceProfile } from "./device-profile.js";
 
 export function renderOverviewAgents() {
   const el = document.getElementById("overview-agents");
@@ -257,6 +258,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
     <div class="agent-tabs">
       <div class="agent-tab active" onclick="switchAgentTab('analytics')">◈ ANALYTICS</div>
       <div class="agent-tab" onclick="switchAgentTab('events')">◈ EVENTS</div>
+      <div class="agent-tab" onclick="switchAgentTab('profile')">◈ PROFILE</div>
     </div>
     <div id="agent-pane-analytics" class="agent-pane" style="padding:14px;">
 
@@ -337,6 +339,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
         <div class="ep-chart-card"><div class="ep-chart-title">Top Users</div><div style="padding:4px 0">${topUsers.length ? topUsers.map(([u, c]) => hBar(u, c, topUsers[0][1], "var(--purple)")).join("") : '<div style="color:var(--text3);font-family:var(--mono2);font-size:11px;padding:12px">No data</div>'}</div></div>
       </div>
     </div>
+    <div id="agent-pane-profile" class="agent-pane" style="display:none;padding:14px;"></div>
     <div id="agent-pane-events" class="agent-pane" style="display:none;">
       <div class="feed-table-wrap" style="max-height:520px;">
         <table>
@@ -449,4 +452,12 @@ export function switchAgentTab(tab) {
   );
   document.getElementById("agent-pane-analytics").style.display = tab === "analytics" ? "block" : "none";
   document.getElementById("agent-pane-events").style.display    = tab === "events"    ? "block" : "none";
+  const prof = document.getElementById("agent-pane-profile");
+  if (prof) prof.style.display = tab === "profile" ? "block" : "none";
+  // Fetched on first open only (RFP SN 56). The two calls behind this pane
+  // aggregate the whole window server-side, so paying for them on every agent
+  // click would slow the two panes an analyst opens first.
+  if (tab === "profile" && state.selectedAgent) {
+    loadDeviceProfile(state.selectedAgent);
+  }
 }

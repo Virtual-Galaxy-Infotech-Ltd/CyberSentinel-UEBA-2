@@ -961,6 +961,14 @@ class UEBAEngine:
                 if entities:
                     entity_presence = self.profile_store.record_entities(
                         user, entities) or {}
+                    # File the device-facing half against the device too, so
+                    # "which programs ran on this machine" is answerable for
+                    # SN 56. Keyed device:<host> in the same table — the first
+                    # column has never been required to be an account.
+                    dev = ueba_entities.device_key(host_name)
+                    if dev:
+                        self.profile_store.record_entities(
+                            dev, ueba_entities.device_facing(entities))
             except Exception as e:
                 log.debug("entity extraction skipped: %s", e)
                 entities, entity_presence = [], {}

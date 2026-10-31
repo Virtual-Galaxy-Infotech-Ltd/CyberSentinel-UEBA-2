@@ -1689,6 +1689,34 @@ class UserProfileStore:
             _log.debug("entities not recorded for %s: %s", user, e)
         return out
 
+    def entities_for(self, entity: str, kinds=None, limit: int = 100) -> dict:
+        """{kind: [{'value','events','first_seen','last_seen'}]} for one entity.
+
+        Used by the device page (SN 56) to answer "which programs ran on this
+        machine" from the device:<host> rows the engine files, and by the
+        entity drilldown for the account side of the same question.
+        """
+        out: dict = {}
+        if not entity:
+            return out
+        sql = ("SELECT kind, value, events, first_seen, last_seen "
+               "FROM entity_presence WHERE username = ?")
+        args: list = [str(entity)]
+        wanted = [str(k) for k in (kinds or []) if str(k)]
+        if wanted:
+            sql += " AND kind IN (%s)" % ",".join("?" * len(wanted))
+            args.extend(wanted)
+        sql += " ORDER BY events DESC"
+        try:
+            for kind, value, events, first, last in self.conn.execute(sql, args):
+                rows = out.setdefault(kind, [])
+                if len(rows) < max(1, int(limit)):
+                    rows.append({"value": value, "events": int(events or 0),
+                                 "first_seen": first, "last_seen": last})
+        except Exception as e:
+            _log.debug("entities_for(%s) failed: %s", entity, e)
+        return out
+
     def entities_by_kind(self, kind: str, limit: int = 200) -> list:
         """[{'value', 'entities', 'events', 'first_seen', 'last_seen'}] for one
         kind, busiest first — what the console lists for SN 30.

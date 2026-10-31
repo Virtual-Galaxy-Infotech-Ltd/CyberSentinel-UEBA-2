@@ -555,6 +555,34 @@ class CardinalityGuard:
         }
 
 
+DEVICE_PREFIX = "device:"
+
+
+def device_key(host) -> str:
+    """The entity key a device's own presence rows are filed under.
+
+    entity_presence is (username, kind, value), and nothing requires the first
+    column to be an account — the primary namespace already files userless
+    traffic under endpoint:/host: keys. So a device gets its own rows under
+    device:<host>, and "which programs ran on this machine" becomes a lookup
+    rather than a field the slim cache would have to start carrying.
+    """
+    n = normalise(host)
+    return (DEVICE_PREFIX + n) if n else ""
+
+
+def device_facing(entities: list) -> list:
+    """The subset of extract()'s output that describes the DEVICE.
+
+    The host's own server/endpoint row is excluded: filing a device under
+    itself says nothing. What is left is the program that ran and anything the
+    operator nominated, both of which are properties of the machine as much as
+    of the account.
+    """
+    return [e for e in (entities or [])
+            if str(e.get("kind") or "") not in HOST_ROLES]
+
+
 def extract(log: dict, reg: "dict | None" = None, accounts_seen: int = 0,
             guard: "CardinalityGuard | None" = None) -> list:
     """Secondary entities this one event touches.
