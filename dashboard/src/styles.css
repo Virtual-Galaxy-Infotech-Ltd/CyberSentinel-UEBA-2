@@ -34,15 +34,19 @@
      was collapsing three-column rows that had 2200px of layout room.
   */
   :root {
-    --ui-scale: 0.90;
+    /* Stepped down 10% from 0.88-1.00 at the operator's request: the layout
+       read as too zoomed in at those values. Still well clear of the old
+       0.62 floor, and still above the point where body text drops under 12px
+       on screen. */
+    --ui-scale: 0.81;
     --svh: calc(1vh / var(--ui-scale));
     --svw: calc(1vw / var(--ui-scale));
   }
-  @media (min-width: 1600px)                         { :root { --ui-scale: 1.00; } }
-  @media (min-width: 1440px) and (max-width: 1599px) { :root { --ui-scale: 0.96; } }
-  @media (min-width: 1300px) and (max-width: 1439px) { :root { --ui-scale: 0.92; } }
-  @media (min-width: 1150px) and (max-width: 1299px) { :root { --ui-scale: 0.88; } }
-  @media (max-width: 1149px)                         { :root { --ui-scale: 0.86; } }
+  @media (min-width: 1600px)                         { :root { --ui-scale: 0.90; } }
+  @media (min-width: 1440px) and (max-width: 1599px) { :root { --ui-scale: 0.87; } }
+  @media (min-width: 1300px) and (max-width: 1439px) { :root { --ui-scale: 0.83; } }
+  @media (min-width: 1150px) and (max-width: 1299px) { :root { --ui-scale: 0.80; } }
+  @media (max-width: 1149px)                         { :root { --ui-scale: 0.78; } }
 
   html { zoom: var(--ui-scale); }
 
@@ -85,7 +89,7 @@
     /* Fixed chrome. On a 768px-tall laptop the header, time-window strip and
        footer together ate 210px - 27% of the screen - before a single row of
        data. */
-    --header-h: clamp(56px, calc(7.6 * var(--svh)), 92px);
+    --header-h: clamp(66px, calc(9.2 * var(--svh)), 104px);
     --topbar-h: clamp(32px, calc(4.2 * var(--svh)), 46px);
     --footer-h: clamp(36px, calc(4.8 * var(--svh)), 54px);
     /* How tall a panel's own scroller may grow before it scrolls internally
@@ -830,7 +834,7 @@
        the mark overflowing it. The 44px floor is not cosmetic: the wordmark and
        its "User and Entity Behavioral Analysis" strapline are baked into the
        PNG, and below about that height the strapline stops resolving. */
-    height: clamp(44px, calc(5.4 * var(--svh)), 64px);
+    height: clamp(52px, calc(7.1 * var(--svh)), 82px);
     width: auto;
     display: block;
     flex-shrink: 0;
@@ -1342,6 +1346,17 @@
 
   /* Reasons */
   .reasons-list { margin-top: 4px; }
+  /* The eight rows in this list were the tallest thing in the KPI banner, and
+     because the banner is a stretch grid they set the height of all seven stat
+     cards beside it -- which is what made those cards look tall and elongated
+     for the sake of one number each. The list scrolls on its own now, so the
+     row is sized by the cards instead. */
+  .banner-reasons .reasons-list {
+    flex: 1 1 auto;
+    min-height: 0;        /* a flex child defaults to its min-content height */
+    overflow-y: auto;
+    padding-right: 4px;
+  }
   .reason-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
   .reason-label { font-family: var(--mono2); font-size: 13.5px; color: var(--text2); width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
   .reason-bar-wrap { flex: 1; height: 3px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
