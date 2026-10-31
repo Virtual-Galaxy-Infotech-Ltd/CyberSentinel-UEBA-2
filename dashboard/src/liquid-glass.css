@@ -205,7 +205,7 @@ html.light .threat-ticker {
 }
 
 /* Threat-map fills viewport minus chrome; header grew 58→104px (+46) → subtract +46 */
-.tm-wrap { height: calc(125vh - 251px) !important; }
+.tm-wrap { height: calc(100 * var(--svh) - 251px) !important; }
 
 /* ============================================================================
    BORDER GLOW — cursor-tracking gradient border ring (reactbits <BorderGlow>).
@@ -716,7 +716,7 @@ html.light .tab.active {
   font-family: "Orbitron", var(--mono) !important;
   font-weight: 700 !important;
   letter-spacing: 0.2px !important;
-  font-size: clamp(17px, 2.625vw, 27px) !important;    /* bigger Orbitron KPI digits (was 15/1.95/25) */
+  font-size: clamp(17px, calc(2.1 * var(--svw)), 27px) !important;    /* bigger Orbitron KPI digits (was 15/1.95/25) */
   line-height: 1.05 !important;
 }
 

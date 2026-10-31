@@ -4,19 +4,45 @@
      the whole UI down once, instead of touching hundreds of individual px
      values.
 
-     CSS `zoom` scales layout the same way browser zoom does, with one
-     important difference: viewport units still resolve against the UNZOOMED
-     viewport. So every vh/vw in this file (and in liquid-glass.css) is
-     pre-multiplied by 1.25 (= 1/0.8) to compensate — otherwise `100vh` would
-     paint at 80% of the window and leave a gap at the bottom.
+     WHY THIS IS A LADDER AND NO LONGER ONE NUMBER
+     A single 0.8 assumed a single screen size. `zoom` divides the width you
+     have: at scale s, a viewport of W real px offers W/s LAYOUT px to lay out
+     in. This design needs roughly 2200 layout px before things start colliding,
+     so 0.8 fits a 1920-wide screen (2400 available) and does NOT fit a
+     1536-wide laptop (1920 available) — which is why that machine had to be
+     dropped to 80% browser zoom to see everything, and why the type then became
+     unreadable. Scaling with the viewport lets the browser stay at 100% on
+     every screen, at the largest scale that still fits.
 
-     Width-based media queries are deliberately NOT rescaled: they are all
-     max-width <= 1400px and only fire on narrow windows, where having the
-     responsive layout kick in slightly early is harmless.
+     THE ONE KNOB. If text is still small on a particular machine, raise the
+     scale for that bucket; if something is clipped, lower it. Nothing else has
+     to change — the viewport units follow automatically, which was not true
+     before.
 
-     To revert: set --ui-scale to 1 and divide those vh/vw values by 1.25.
+     VIEWPORT UNITS. `zoom` scales layout, but vh/vw still resolve against the
+     UNZOOMED viewport, so a bare 100vh paints at 1/scale of the window.
+     --svh/--svw pre-divide by the scale, so `calc(100 * var(--svh))` means "the
+     full visual viewport" at ANY scale. They are what makes the ladder safe:
+     previously every vh/vw was hand-multiplied by 1.25 and therefore silently
+     assumed a scale of 0.8 forever.
+
+     Width-based media queries elsewhere in this file are deliberately NOT
+     rescaled: they are all max-width <= 1400px and only fire on narrow windows,
+     where having the responsive layout kick in slightly early is harmless.
   */
-  :root { --ui-scale: 0.8; }
+  :root {
+    --ui-scale: 0.80;
+    --svh: calc(1vh / var(--ui-scale));
+    --svw: calc(1vw / var(--ui-scale));
+  }
+  @media (min-width: 2400px)                         { :root { --ui-scale: 1.00; } }
+  @media (min-width: 2000px) and (max-width: 2399px) { :root { --ui-scale: 0.92; } }
+  @media (min-width: 1800px) and (max-width: 1999px) { :root { --ui-scale: 0.85; } }
+  @media (min-width: 1650px) and (max-width: 1799px) { :root { --ui-scale: 0.78; } }
+  @media (min-width: 1500px) and (max-width: 1649px) { :root { --ui-scale: 0.72; } }
+  @media (min-width: 1360px) and (max-width: 1499px) { :root { --ui-scale: 0.66; } }
+  @media (max-width: 1359px)                         { :root { --ui-scale: 0.62; } }
+
   html { zoom: var(--ui-scale); }
 
   :root {
@@ -455,8 +481,8 @@
     border: 1px solid rgba(0,212,255,0.15);
     border-radius: 12px;
     box-shadow: 0 24px 80px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05);
-    width: min(860px, 115vw);
-    max-height: 102.5vh;
+    width: min(860px, calc(92 * var(--svw)));
+    max-height: calc(82 * var(--svh));
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -629,7 +655,7 @@
     color: var(--text);
     font-family: var(--sans);
     font-size: 14px;
-    min-height: 125vh;
+    min-height: calc(100 * var(--svh));
     overflow-x: hidden;
     transition: background 0.3s ease, color 0.25s ease;
   }
@@ -1072,7 +1098,7 @@
     flex-direction: column;
     gap: 2px;
     padding: 10px 0 16px;
-    min-height: calc(125vh - 50px - 58px); /* fill under toggle, above footer */
+    min-height: calc(100 * var(--svh) - 50px - 58px); /* fill under toggle, above footer */
   }
 
   /* Expand on hover (unpinned) or when pinned. Overlays content when unpinned. */
@@ -1687,9 +1713,9 @@
     .threat-ticker { display: none; }
   }
   /* Zoom resilience — use relative font sizes and fluid widths */
-  main { padding: clamp(10px, 2.5vw, 24px); }
-  .banner-stat-value { font-size: clamp(20px, 3.125vw, 32px); }
-  .banner-stat-label { font-size: clamp(8px, 0.875vw, 9px); }
+  main { padding: clamp(10px, calc(2 * var(--svw)), 24px); }
+  .banner-stat-value { font-size: clamp(20px, calc(2.5 * var(--svw)), 32px); }
+  .banner-stat-label { font-size: clamp(8px, calc(0.7 * var(--svw)), 9px); }
 
   /* ══ Unified Banner ══ */
   .unified-banner {
@@ -3131,7 +3157,7 @@
   #kbd-help-overlay[hidden] { display: none; }
   .kbd-help-card {
     width: min(560px, 100%);
-    max-height: 100vh;
+    max-height: calc(80 * var(--svh));
     overflow-y: auto;
     background: var(--bg2);
     border: 1px solid var(--border2);
@@ -3263,7 +3289,7 @@
     .stat-banner { grid-template-columns: 1fr 1fr !important; }
     .stat-value { font-size: 22px !important; }
     .feed-table th:nth-child(6), .feed-table td:nth-child(6) { display: none; }
-    .kbd-help-card { max-height: 110vh; }
+    .kbd-help-card { max-height: calc(88 * var(--svh)); }
   }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -3285,7 +3311,7 @@
 .tm-wrap {
   display: flex;
   gap: 14px;
-  height: calc(125vh - 205px);   /* header 58 + nav ~50 + footer 56 + main pad ~40 */
+  height: calc(100 * var(--svh) - 205px);   /* header 58 + nav ~50 + footer 56 + main pad ~40 */
   min-height: 500px;
 }
 .tm-globe-col {
@@ -3564,7 +3590,7 @@
 
 @media (max-width: 980px) {
   .tm-wrap { flex-direction: column; height: auto; }
-  .tm-globe-col { height: 75vh; }
+  .tm-globe-col { height: calc(60 * var(--svh)); }
   .tm-side { flex-basis: auto; }
 }
 
@@ -3862,38 +3888,292 @@ body[data-role="admin"]   .role-chip { border-color: var(--accent); color: var(-
 }
 
 /* ── Login gate ───────────────────────────────────────────────────────────── */
-/* Only ever shown when the server is enforcing AND nobody is signed in. */
+/* Only ever shown when the server is enforcing AND nobody is signed in.
+
+   SIZING. Everything below is in `em` off one anchor on .lg-wrap, which divides
+   by --ui-scale so the gate paints at true browser size whatever the dashboard's
+   scale is set to. The sign-in screen is the first thing anyone sees and is not
+   dense, so it has no reason to inherit the compression the data views need. */
 #login-overlay {
   display: none;
   position: fixed; inset: 0; z-index: 20000;
-  align-items: center; justify-content: center;
-  background: radial-gradient(ellipse at 50% 35%, #06121f 0%, #01030a 70%, #000 100%);
+  overflow: auto;
+  background: #02060c;
 }
-#login-overlay.show { display: flex; }
+#login-overlay.show { display: block; }
 /* Hide the app behind the gate so no stale data is readable through it. */
 body.login-gated > *:not(#login-overlay) { filter: blur(3px); pointer-events: none; }
+body.login-gated { overflow: hidden; }
 
-.login-card {
-  width: min(380px, calc(100vw - 48px));
-  padding: 28px 26px;
-  background: var(--bg2);
-  border: 1px solid var(--border2);
-  border-radius: 12px;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+/* Backdrop. The gradients stand alone, and an optional photograph layers over
+   them: drop a file at dashboard/public/login-bg.jpg and it is picked up with
+   no CSS change. While that file is absent nothing paints and the gradients
+   below show through, so a missing asset is never a broken screen. */
+.lg-bg { position: absolute; inset: 0; pointer-events: none; }
+.lg-bg::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    radial-gradient(60% 55% at 72% 42%, rgba(0,140,220,0.20) 0%, transparent 70%),
+    radial-gradient(45% 50% at 20% 25%, rgba(0,90,170,0.16) 0%, transparent 70%),
+    radial-gradient(80% 80% at 50% 110%, rgba(0,40,80,0.30) 0%, transparent 70%),
+    linear-gradient(160deg, #061522 0%, #030a12 45%, #01050a 100%);
 }
-.login-brand {
-  font-family: var(--mono); font-size: 22px; letter-spacing: 1px;
-  color: var(--text2); margin-bottom: 4px;
+.lg-bg::after {
+  content: ""; position: absolute; inset: 0;
+  background-image: url("/login-bg.jpg");
+  background-size: cover; background-position: center;
+  opacity: 0.45;
+  filter: saturate(1.1);
 }
-.login-brand b { color: var(--accent); }
-.login-sub {
-  font-family: var(--mono2); font-size: 13px; color: var(--text2);
-  margin-bottom: 18px;
+
+.lg-wrap {
+  position: relative;
+  min-height: 100%;
+  box-sizing: border-box;
+  font-size: calc(16px / var(--ui-scale));
+  font-family: var(--sans, inherit);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 3em;
+  max-width: 96em;
+  margin: 0 auto;
+  padding: 3em 4.5em;
 }
-#login-form { display: flex; flex-direction: column; gap: 10px; }
-#login-form .wl-input { width: 100%; }
-#login-form button { margin-top: 4px; }
+
+/* ── left: brand panel ── */
+.lg-left { flex: 1 1 44%; max-width: 34em; min-width: 0; }
+
+.lg-logo { display: flex; align-items: center; gap: 1.1em; }
+.lg-mark { width: 5.2em; height: auto; flex: 0 0 auto; }
+.lg-word-main {
+  font-size: 1.95em; font-weight: 700; letter-spacing: -0.01em;
+  color: #e8f2fb; line-height: 1.05;
+}
+.lg-word-main span { color: #3b9dff; }
+.lg-word-ueba {
+  font-size: 1.22em; font-weight: 600; letter-spacing: 0.42em;
+  color: #cfe3f5; line-height: 1.5;
+}
+.lg-word-sub {
+  font-family: var(--mono2); font-size: 0.6em; letter-spacing: 0.17em;
+  text-transform: uppercase; color: #7fa6c8;
+}
+
+.lg-rule {
+  width: 3.6em; height: 2px; margin: 1.9em 0 1.6em;
+  background: linear-gradient(90deg, #00d4ff, rgba(0,212,255,0.1));
+}
+
+.lg-head {
+  margin: 0 0 0.7em;
+  font-size: 2.55em; font-weight: 700; line-height: 1.16;
+  letter-spacing: -0.02em; color: #ffffff;
+}
+.lg-head span { color: #35c4f0; }
+
+.lg-copy {
+  margin: 0 0 2.4em;
+  font-size: 1.02em; line-height: 1.65; color: #a9c2d8;
+  max-width: 24em;
+}
+
+.lg-feats { list-style: none; margin: 0; padding: 0; }
+.lg-feats li {
+  display: flex; align-items: center; gap: 1em;
+  padding: 0.85em 0;
+  border-bottom: 1px solid rgba(120,170,210,0.14);
+  font-size: 0.97em; color: #cfe0ef;
+}
+.lg-feats li:first-child { border-top: 1px solid rgba(120,170,210,0.14); }
+.lg-feat-ico {
+  flex: 0 0 auto;
+  width: 2.3em; height: 2.3em; border-radius: 0.5em;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(10,40,70,0.55);
+  border: 1px solid rgba(70,150,210,0.28);
+  color: #4bb4ea;
+}
+.lg-feat-ico svg { width: 1.2em; height: 1.2em; }
+
+/* ── right: sign-in card ── */
+.lg-card {
+  flex: 0 0 auto;
+  width: min(38em, 100%);
+  box-sizing: border-box;
+  padding: 2.9em 2.9em 2.4em;
+  border-radius: 1.1em;
+  background: linear-gradient(165deg, rgba(10,22,36,0.93) 0%, rgba(5,13,22,0.96) 100%);
+  border: 1px solid rgba(90,170,220,0.22);
+  box-shadow:
+    0 2em 5em rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(140,200,240,0.10);
+  backdrop-filter: blur(14px);
+}
+
+.lg-eyebrow {
+  display: flex; align-items: center; gap: 0.7em;
+  font-family: var(--mono2); font-size: 0.78em; font-weight: 600;
+  letter-spacing: 0.22em; text-transform: uppercase; color: #8fb6d4;
+  margin-bottom: 1.4em;
+}
+.lg-dot {
+  width: 0.62em; height: 0.62em; border-radius: 50%;
+  background: #00d4ff; box-shadow: 0 0 0.7em rgba(0,212,255,0.9);
+}
+
+.lg-title {
+  margin: 0 0 0.25em;
+  font-size: 2.7em; font-weight: 700; letter-spacing: -0.02em; color: #ffffff;
+  line-height: 1.1;
+}
+.lg-sub { margin: 0 0 1.9em; font-size: 1.02em; color: #9db6cc; }
+
+#login-form { display: block; }
+.lg-label {
+  display: block;
+  font-family: var(--mono2); font-size: 0.7em; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase; color: #8aa9c2;
+  margin: 0 0 0.75em;
+}
+
+.lg-field {
+  display: flex; align-items: center; gap: 0.75em;
+  height: 3.5em; padding: 0 1em;
+  border-radius: 0.6em;
+  background: rgba(6,16,26,0.75);
+  border: 1px solid rgba(90,150,200,0.26);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  margin-bottom: 1.35em;
+}
+.lg-field:focus-within {
+  border-color: #2ea8e0;
+  box-shadow: 0 0 0 3px rgba(0,160,230,0.16);
+}
+.lg-field-ico { display: flex; color: #7fa8c8; flex: 0 0 auto; }
+.lg-field-ico svg { width: 1.25em; height: 1.25em; }
+.lg-field input {
+  flex: 1 1 auto; min-width: 0;
+  background: transparent; border: 0; outline: none;
+  color: #e9f3fb; font-size: 1em; font-family: inherit;
+}
+.lg-field input::placeholder { color: #67839b; }
+/* Chrome paints its own colour over autofilled fields; the inset shadow is the
+   only way to repaint it without losing the value. */
+.lg-field input:-webkit-autofill,
+.lg-field input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #e9f3fb;
+  -webkit-box-shadow: 0 0 0 100px #0a1724 inset;
+  caret-color: #e9f3fb;
+}
+.lg-eye {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 2em; height: 2em; padding: 0;
+  background: none; border: 0; cursor: pointer; color: #7fa8c8;
+  border-radius: 0.3em;
+}
+.lg-eye:hover { color: #35c4f0; }
+.lg-eye svg { width: 1.3em; height: 1.3em; }
+
+.lg-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1em; margin: 0.2em 0 1.7em;
+}
+.lg-check {
+  display: flex; align-items: center; gap: 0.65em;
+  font-size: 0.95em; color: #b9cfe2; cursor: pointer; user-select: none;
+}
+.lg-check input { position: absolute; opacity: 0; width: 0; height: 0; }
+.lg-box {
+  width: 1.15em; height: 1.15em; border-radius: 0.25em;
+  border: 1px solid rgba(120,170,210,0.45);
+  background: rgba(6,16,26,0.6);
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.lg-check input:checked + .lg-box {
+  background: #0a84c8; border-color: #28a8e0;
+}
+.lg-check input:checked + .lg-box::after {
+  content: ""; width: 0.32em; height: 0.6em;
+  border: solid #fff; border-width: 0 2px 2px 0;
+  transform: translateY(-0.08em) rotate(45deg);
+}
+.lg-check input:focus-visible + .lg-box { box-shadow: 0 0 0 3px rgba(0,160,230,0.3); }
+
+.lg-forgot {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: inherit; font-size: 0.95em; color: #3ba9e8;
+}
+.lg-forgot:hover { color: #7fd0ff; text-decoration: underline; }
+
+.lg-submit {
+  width: 100%; height: 4em;
+  display: flex; align-items: center; gap: 0.8em;
+  padding: 0 1.4em;
+  border: 0; border-radius: 0.6em; cursor: pointer;
+  font-family: inherit; font-size: 1.05em; font-weight: 700;
+  color: #04121d;
+  background: linear-gradient(95deg, #2bb8f0 0%, #58d0f7 55%, #8fe3ff 100%);
+  box-shadow: 0 0.6em 1.8em rgba(20,160,230,0.3);
+  transition: filter 0.15s ease, transform 0.08s ease;
+}
+.lg-submit:hover { filter: brightness(1.07); }
+.lg-submit:active { transform: translateY(1px); }
+.lg-submit:disabled { opacity: 0.6; cursor: default; }
+.lg-submit.is-busy .lg-submit-text::after {
+  content: "…";
+}
+.lg-submit svg { width: 1.3em; height: 1.3em; }
+.lg-submit-ico { display: flex; flex: 0 0 auto; }
+.lg-submit-text { flex: 1 1 auto; text-align: left; }
+.lg-submit-arrow { display: flex; flex: 0 0 auto; }
+
 .login-error {
-  font-family: var(--mono2); font-size: 12.5px; line-height: 1.5;
-  color: var(--red); min-height: 18px;
+  font-family: var(--mono2); font-size: 0.85em; line-height: 1.5;
+  color: #ff6b85; min-height: 1.6em; margin-top: 0.9em;
+}
+
+.lg-foot {
+  margin-top: 1.6em; text-align: center;
+  font-size: 0.85em; color: #7e99b0;
+}
+.lg-foot b { color: #cfe3f5; font-weight: 600; }
+.lg-foot b i { color: #3b9dff; font-style: normal; }
+
+/* Below this the brand column is dropped rather than stacked: on a narrow
+   window it is the sign-in box that matters, and a marketing column above it
+   only pushes the fields off the first screen. */
+@media (max-width: 1050px) {
+  .lg-wrap { justify-content: center; padding: 2.5em; }
+  .lg-left { display: none; }
+  .lg-card { width: min(34em, 100%); }
+}
+@media (max-width: 560px) {
+  .lg-wrap { padding: 1.5em; font-size: calc(15px / var(--ui-scale)); }
+  .lg-card { padding: 2em 1.5em 1.7em; }
+  .lg-title { font-size: 2.2em; }
+}
+
+/* ── Compact chrome on smaller screens ────────────────────────────────────────
+   Companion to the --ui-scale ladder at the top of this file. The scale trades
+   type size against fit uniformly: shrink it enough for a laptop and the text
+   goes with it, which is exactly the complaint this is here to fix.
+
+   These rules trim the FIXED chrome instead — header height, page gutter, the
+   threat-map sidebar — none of which carries information in proportion to the
+   space it takes. Recovering that width lets the ladder above sit a step higher
+   than it otherwise could, so the text ends up larger than simply scaling down
+   would have left it.
+
+   Scoped to <=1649px on purpose: a large monitor has the room already, and this
+   must not alter what is currently signed off on those. */
+@media (max-width: 1649px) {
+  header { height: 78px; gap: 12px; padding: 0 16px; }
+  main   { padding: clamp(8px, calc(1.4 * var(--svw)), 16px); }
+  .tm-side { flex: 0 0 360px; }
+}
+
+@media (max-width: 1359px) {
+  header { height: 70px; gap: 10px; padding: 0 12px; }
+  .tm-side { flex: 0 0 320px; }
 }
