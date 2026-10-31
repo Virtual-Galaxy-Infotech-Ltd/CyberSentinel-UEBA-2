@@ -28,7 +28,7 @@ let _me = null;
 // Mirrors password_problem() in ueba_auth.py. Checked client-side purely so a
 // too-short password fails instantly in the form rather than after a round
 // trip — the server remains the authority and rejects it regardless.
-const MIN_PASSWORD = 12;
+const MIN_PASSWORD = 6;
 
 function passwordProblem(pw) {
   if (!pw) return "Enter a password.";

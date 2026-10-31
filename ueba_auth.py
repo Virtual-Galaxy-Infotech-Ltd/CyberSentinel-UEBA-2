@@ -211,7 +211,15 @@ _SCRYPT_MAXMEM = 64 * 1024 * 1024
 LOCAL_SUB_PREFIX = "local:"
 MAX_FAILED_LOGINS = 5
 LOCKOUT_SECS = 15 * 60
-MIN_PASSWORD_LEN = 12
+# Lowered from 12 at the operator's request: 6 is the floor, i.e. anything
+# longer than five characters is accepted. Worth knowing what that costs — a
+# 6-character password is brute-forceable offline in seconds if the auth DB is
+# ever read, and scrypt only slows that down, it does not stop it. The controls
+# that still stand between an attacker and an account are MAX_FAILED_LOGINS and
+# LOCKOUT_SECS above, which throttle guessing over the network; they do nothing
+# for an attacker who has the file. Raise this back towards 12 when the estate
+# allows it.
+MIN_PASSWORD_LEN = 6
 
 # Username rules. Tighter than passwords on purpose: a username is not a secret,
 # but it IS what local_sub() turns into a primary key, so it has to survive being
