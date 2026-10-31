@@ -91,6 +91,22 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# SOAR and SIEM integration (RFP SN 3). Optional likewise.
+try:
+    import ueba_soar  # type: ignore
+    SOAR_AVAILABLE = True
+except Exception:
+    ueba_soar = None
+    SOAR_AVAILABLE = False
+
+# Connection detail and application-layer decoding (RFP SN 57). Optional too.
+try:
+    import ueba_appdecode  # type: ignore
+    APPDECODE_AVAILABLE = True
+except Exception:
+    ueba_appdecode = None
+    APPDECODE_AVAILABLE = False
+
 # Flow ingestion and network anomaly detection (RFP SN 28). Optional likewise.
 try:
     import ueba_netflow  # type: ignore
@@ -3476,6 +3492,7 @@ CAPABILITIES = {
     "privileged.edit":  "admin",
     "assets.edit":      "admin",
     "entities.edit":    "admin",
+    "soar.manage":      "admin",
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
@@ -4379,6 +4396,433 @@ def _entities_path():
     if not p:
         p = "entities.json"
     return str(_abs_install_path(p))
+
+
+def _iter_full_alerts(byte_budget: int):
+    """Parsed FULL alert records — live file first, then the archives.
+
+    load_alerts() cannot be used here. It serves the .slimN projection, and
+    _slim drops context.raw_event entirely, which is where the URL, the DNS
+    question, the SNI and the user agent live. Measured: the connection search
+    found 0 records through load_alerts() and 9 through this, on the same feed.
+    Bounded by a byte budget so a multi-GB history cannot turn one search into
+    an unbounded scan.
+    """
+    used = 0
+    try:
+        if ALERTS_FILE.exists():
+            with open(ALERTS_FILE, "r", encoding="utf-8",
+                      errors="replace") as fh:
+                for line in fh:
+                    used += len(line)
+                    if used > byte_budget:
+                        return
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        yield json.loads(line)
+                    except Exception:
+                        continue
+    except OSError:
+        pass
+    adir = Path(CFG.get("archive_dir") or "")
+    if not str(adir) or not adir.exists():
+        return
+    for path in sorted(adir.glob("ueba_alerts_*.jsonl.zip"), reverse=True):
+        if used > byte_budget:
+            return
+        try:
+            with zipfile.ZipFile(path) as zf:
+                for name in zf.namelist():
+                    with zf.open(name) as fh:
+                        for raw in fh:
+                            used += len(raw)
+                            if used > byte_budget:
+                                return
+                            line = raw.decode("utf-8", "replace").strip()
+                            if not line:
+                                continue
+                            try:
+                                yield json.loads(line)
+                            except Exception:
+                                continue
+        except Exception:
+            continue
+
+
+def _soar_cfg():
+    return (_RAW_CFG.get("detection") or {}).get("soar") or {}
+
+
+def _soar_queue_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    p = paths.get("soar_queue_db") or ""
+    if not p:
+        p = str(Path(_profile_db_path()).parent / "soar_queue.db")
+    return str(_abs_install_path(p))
+
+
+_soar_queue = None
+_soar_replay_cache = None
+
+
+def _soar_q():
+    """The outbound queue, opened once per process."""
+    global _soar_queue
+    if _soar_queue is None and SOAR_AVAILABLE:
+        _soar_queue = ueba_soar.OutboundQueue(_soar_queue_path(), _soar_cfg())
+    return _soar_queue
+
+
+def _soar_secret():
+    """From the environment only, never from the config file."""
+    return os.environ.get("UEBA_SOAR_SECRET", "")
+
+
+def _soar_send(url, payload, headers):
+    """POST one incident. Separated so the queue stays transport-agnostic."""
+    import urllib.request
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.status
+
+
+@app.route("/api/soar")
+def api_soar_status():
+    """The SOAR integration's state, including what it will not do (SN 3)."""
+    if not SOAR_AVAILABLE:
+        return jsonify({"ok": False, "error": "soar module unavailable"}), 503
+    cfg = _soar_cfg()
+    try:
+        q = _soar_q() if cfg.get("enabled", False) else None
+        st = ueba_soar.status(q, cfg.get("url") or "",
+                              bool(_soar_secret()), cfg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    st["ok"] = True
+    st["enabled"] = bool(cfg.get("enabled", False))
+    st["queue_path"] = _soar_queue_path()
+    if not st["enabled"]:
+        st["note"] = ("disabled: set detection.soar.enabled and a url. The "
+                      "integration is built and tested; it is off because no "
+                      "SOAR destination has been agreed yet.")
+    return jsonify(st)
+
+
+@app.route("/api/soar/queue")
+def api_soar_queue():
+    """Queue contents, for seeing what is stuck and why."""
+    if not SOAR_AVAILABLE:
+        return jsonify({"ok": False, "error": "soar module unavailable"}), 503
+    state = (request.args.get("state") or "").strip().lower() or None
+    if state and state not in ueba_soar.STATES:
+        return jsonify({"ok": False,
+                        "error": "state must be one of %s"
+                                 % list(ueba_soar.STATES)}), 400
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 100), 1000))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        q = _soar_q()
+        if q is None:
+            return jsonify({"ok": True, "stats": {}, "items": []})
+        return jsonify({"ok": True, "stats": q.stats(),
+                        "items": q.items(state, limit)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/soar/replay", methods=["POST"])
+@_require_cap("soar.manage")
+def api_soar_replay():
+    """Put a dead or blocked incident back in line. Operator action."""
+    if not SOAR_AVAILABLE:
+        return jsonify({"ok": False, "error": "soar module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    key = (body.get("key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "key required"}), 400
+    try:
+        q = _soar_q()
+        if q is None or not q.replay(key):
+            return jsonify({"ok": False,
+                            "error": "no dead, blocked or failed item with "
+                                     "that key"}), 404
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "key": key})
+
+
+@app.route("/api/soar/callback", methods=["POST"])
+def api_soar_callback():
+    """What the SOAR did with a case (SN 3).
+
+    Deliberately NOT behind _require_cap: the caller is a machine, not a
+    console session, and it authenticates with an HMAC signature over
+    timestamp.body instead. Session auth and machine auth are different
+    problems and mixing them would mean issuing a console account to a SOAR.
+
+    close_false_positive and confirm_incident are recorded as analyst
+    verdicts, which is the label supply the supervised model trains on.
+    """
+    if not SOAR_AVAILABLE:
+        return jsonify({"ok": False, "error": "soar module unavailable"}), 503
+    global _soar_replay_cache
+    cfg = _soar_cfg()
+    raw = request.get_data() or b""
+
+    if _soar_replay_cache is None:
+        _soar_replay_cache = ueba_soar.ReplayCache(
+            int(cfg.get("replay_cache_size")
+                or ueba_soar.DEFAULTS["replay_cache_size"]))
+    v = ueba_soar.verify(
+        _soar_secret(), dict(request.headers), raw,
+        window_secs=int(cfg.get("callback_window_secs")
+                        or ueba_soar.DEFAULTS["callback_window_secs"]),
+        replay=_soar_replay_cache)
+    if not v["ok"]:
+        # 401 with the reason: a SOAR integrator debugging a signature needs to
+        # know which of the five refusals they hit. Nothing secret is leaked by
+        # saying "timestamp outside the window".
+        return jsonify({"ok": False, "error": v["reason"]}), 401
+
+    p = ueba_soar.parse_callback(raw)
+    if not p["ok"]:
+        return jsonify({"ok": False, "error": p["reason"]}), 400
+
+    # The callback names an idempotency key; the stores here are keyed by
+    # event_id, so the queue is the lookup between them.
+    event_id = ""
+    try:
+        q = _soar_q()
+        if q is not None:
+            for row in q.items(limit=1000):
+                if row["key"] == p["key"]:
+                    event_id = row["event_id"] or ""
+                    break
+    except Exception:
+        event_id = ""
+    if not event_id:
+        return jsonify({"ok": False,
+                        "error": "no incident was reported with that "
+                                 "idempotency_key"}), 404
+
+    applied = {"action": p["action"], "event_id": event_id, "recorded": False}
+    actor = p["actor"] or "soar"
+    try:
+        if p["action"] == "close_false_positive":
+            # The same two writes /api/false-positive makes: the per-event
+            # record, and the derived suppression pattern. Done here rather
+            # than by calling that route so the SOAR path does not depend on
+            # Flask request context it does not have.
+            rec = {"event_id": event_id,
+                   "reason": (p["comment"]
+                              or "closed in the SOAR by %s" % actor),
+                   "marked_at": datetime.now(timezone.utc).isoformat()}
+            with _fp_lock:
+                _fp_dict[event_id] = rec
+                save_fps()
+            alert = next((a for a in _read_all_alerts_for_lookup()
+                          if a.get("event_id") == event_id), None)
+            if alert is not None:
+                _add_pattern_if_new(_pattern_from_alert(alert, rec["reason"]))
+            applied["recorded"] = True
+            applied["label"] = "benign"
+
+        elif p["action"] == "confirm_incident":
+            if not RISK_HISTORY_AVAILABLE:
+                applied["error"] = "risk history module unavailable"
+            else:
+                alert = next((a for a in _read_all_alerts_for_lookup()
+                              if a.get("event_id") == event_id), None)
+                if alert is None:
+                    return jsonify({"ok": False,
+                                    "error": "the alert for that incident is "
+                                             "no longer in the retained "
+                                             "history"}), 404
+                entity = get_user(alert)
+                if not entity or entity == "unknown":
+                    return jsonify({"ok": False,
+                                    "error": "that alert has no attributable "
+                                             "entity"}), 400
+                ueba = alert.get("ueba") or {}
+                severity = {"highly_anomalous": "critical",
+                            "anomalous": "high",
+                            "suspicious": "medium"}.get(
+                                ueba.get("risk_verdict"), "high")
+                ueba_risk_history.confirm(
+                    _risk_history_path(), entity, severity=severity,
+                    event_id=event_id,
+                    campaign_id=str(ueba.get("campaign_id") or ""),
+                    score=ueba.get("combined_score"),
+                    summary=(p["comment"] or "confirmed in the SOAR"),
+                    confirmed_by=actor)
+                applied["recorded"] = True
+                applied["label"] = "malicious"
+                applied["entity"] = entity
+        # acknowledge / comment / assign are accepted and audited without
+        # changing detection state: they are case bookkeeping on the SOAR's
+        # side, and inventing local state for them would be inventing a second
+        # case store, which is the decision SN 50/60/61 is waiting on.
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    return jsonify({"ok": True, "applied": applied})
+
+
+def _soar_drain_once():
+    """One pass over the due queue. Returns how many were attempted."""
+    cfg = _soar_cfg()
+    if not (SOAR_AVAILABLE and cfg.get("enabled", False) and cfg.get("url")):
+        return 0
+    q = _soar_q()
+    if q is None:
+        return 0
+    n = 0
+    for item in q.due(limit=int(cfg.get("batch_size") or 25)):
+        q.deliver(item, cfg.get("url"), _soar_send)
+        n += 1
+    return n
+
+
+def _start_soar_dispatcher():
+    """Drain the outbound queue in the background.
+
+    Here rather than in the engine: the dashboard already runs the other
+    dispatchers, and keeping every outbound HTTP call in one process means one
+    place to reason about egress. The engine only enqueues.
+    """
+    cfg = _soar_cfg()
+    if not (SOAR_AVAILABLE and cfg.get("enabled", False) and cfg.get("url")):
+        return
+    poll = max(5, int(cfg.get("poll_secs") or 15))
+
+    def loop():
+        while True:
+            try:
+                time.sleep(poll)
+                _soar_drain_once()
+            except Exception:
+                time.sleep(poll)
+
+    t = __import__("threading").Thread(target=loop, name="soar-dispatcher",
+                                       daemon=True)
+    t.start()
+
+
+@app.route("/api/search/connections")
+def api_search_connections():
+    """Advanced search over connection detail, with the application layer
+    decoded (RFP SN 57).
+
+    `q` uses field:value terms — app:smb, dport>=445, url.indicators:traversal,
+    host!=intranet — joined implicitly by AND, with anything unqualified
+    treated as free text. There is no query language to learn beyond that, and
+    it is the same evaluator SN 26's plain-language search will translate onto.
+
+    Every decoded value carries whether it was OBSERVED in the log or INFERRED
+    from the port, because an analyst who cannot tell those apart will
+    eventually report SMB about something that merely used 445.
+    """
+    if not APPDECODE_AVAILABLE:
+        return jsonify({"ok": False,
+                        "error": "appdecode module unavailable",
+                        "rows": []}), 503
+    q = (request.args.get("q") or "").strip()
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 100), 1000))
+    except (TypeError, ValueError):
+        limit = 100
+    parsed = ueba_appdecode.parse_query(q)
+    try:
+        budget = max(8 * 1024 * 1024,
+                     min(int(request.args.get("budget")
+                             or _DEEP_DEFAULT_BUDGET),
+                         2 * 1024 * 1024 * 1024))
+    except (TypeError, ValueError):
+        budget = _DEEP_DEFAULT_BUDGET
+
+    started = time.time()
+    rows = []
+    scanned = decoded = 0
+    facets = {"app": defaultdict(int), "protocol": defaultdict(int),
+              "provenance": defaultdict(int), "indicators": defaultdict(int)}
+    try:
+        for a in _iter_full_alerts(budget):
+            scanned += 1
+            flow = (ueba_netflow.normalise(a) if NETFLOW_AVAILABLE else None)
+            d = ueba_appdecode.decode(a, flow)
+            # A record with nothing application-layer and no connection is not
+            # a connection record; including it would make the result set the
+            # whole feed with empty columns.
+            if not d.get("decoders") and not flow:
+                continue
+            decoded += 1
+            view = ueba_appdecode.searchable(a, flow, d)
+            if not ueba_appdecode.matches(view, parsed):
+                continue
+            facets["app"][d.get("app") or "(none)"] += 1
+            facets["protocol"][d.get("protocol") or "(none)"] += 1
+            facets["provenance"][d.get("app_provenance") or "none"] += 1
+            for ind in (d.get("url", {}) or {}).get("indicators", []):
+                facets["indicators"][ind] += 1
+            if len(rows) < limit:
+                rows.append({
+                    "event_id": a.get("event_id"),
+                    "time": ((a.get("ueba") or {}).get("processed_at")
+                             or a.get("event_time")),
+                    "entity": get_user(a),
+                    "host": ((a.get("host") or {}).get("name") or ""),
+                    "connection": flow,
+                    "app": d.get("app"),
+                    "app_provenance": d.get("app_provenance"),
+                    "protocol": d.get("protocol"),
+                    "protocol_provenance": d.get("protocol_provenance"),
+                    "decoders": d.get("decoders"),
+                    "url": d.get("url"),
+                    "dns": d.get("dns"),
+                    "tls": d.get("tls"),
+                    "http": d.get("http"),
+                    "decoded_from": d.get("fields"),
+                })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "rows": []}), 500
+
+    return jsonify({
+        "ok": True,
+        "query": q,
+        "parsed": parsed,
+        "scanned": scanned,
+        "byte_budget": budget,
+        "connection_records": decoded,
+        "matched": sum(facets["app"].values()),
+        "returned": len(rows),
+        "elapsed_ms": int((time.time() - started) * 1000),
+        "facets": {k: dict(sorted(v.items(), key=lambda kv: -kv[1])[:20])
+                   for k, v in facets.items()},
+        "rows": rows,
+        "help": {
+            "operators": list(ueba_appdecode.OPERATORS),
+            "examples": ["app:smb", "dport>=445", "url.indicators:traversal",
+                         "dns.dga_suspect=true", "http.agent_class:scanner",
+                         'url.path:"/etc/passwd"'],
+        },
+    })
+
+
+@app.route("/api/appdecode")
+def api_appdecode_status():
+    """What the application-layer decoder does and does not claim (SN 57)."""
+    if not APPDECODE_AVAILABLE:
+        return jsonify({"ok": False,
+                        "error": "appdecode module unavailable"}), 503
+    st = ueba_appdecode.status()
+    st["ok"] = True
+    return jsonify(st)
 
 
 @app.route("/api/netflow")
@@ -6195,6 +6639,7 @@ def main() -> None:
     _start_result_warm_thread()
     _start_report_scheduler()
     _start_notify_dispatcher()
+    _start_soar_dispatcher()
     # threaded=True: serve requests concurrently so one slow scan (e.g. a wide
     # hours=N feed query over the multi-GB enriched file) can't block every other
     # endpoint and freeze the whole dashboard.

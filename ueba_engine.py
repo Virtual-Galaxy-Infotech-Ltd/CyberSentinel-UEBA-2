@@ -50,6 +50,7 @@ import ueba_device_identity
 import ueba_peers
 import ueba_supervised
 import ueba_netflow
+import ueba_soar
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -956,6 +957,24 @@ class UEBAEngine:
                 log.warning("flow anomaly detection disabled: %s", e)
                 self.flow_window = None
 
+        # SOAR reporting (SN 3). The engine ENQUEUES; the dashboard drains the
+        # queue, because it already runs the background dispatchers and owns
+        # the egress-checked outbound path. Shared through SQLite in WAL mode,
+        # so the engine only inserts and the dispatcher only updates.
+        self.soar_cfg = (cfg.get("detection") or {}).get("soar") or {}
+        self.soar_queue = None
+        if self.soar_cfg.get("enabled", False) and self.soar_cfg.get("url"):
+            try:
+                qp = paths.get("soar_queue_db") or str(Path(
+                    paths.get("profile_db") or "profiles/user_profiles.db"
+                ).parent / "soar_queue.db")
+                self.soar_queue = ueba_soar.OutboundQueue(qp, self.soar_cfg)
+                log.info("SOAR reporting queued to %s (min_score %.2f)",
+                         qp, float(self.soar_cfg.get("min_score") or 0.0))
+            except Exception as e:
+                log.warning("SOAR reporting disabled: %s", e)
+                self.soar_queue = None
+
         self.peer_recent = None
         if self.peers_cfg.get("enabled", True) and self.peer_groups_file:
             self.peer_recent = ueba_peers.RecentProfiles(
@@ -1427,6 +1446,19 @@ class UEBAEngine:
         output_log = dict(log_entry)
         output_log["ueba"] = ueba_block
         output_log["evidence"] = evidence_block
+
+        # SN 3 — report the anomaly to the SOAR. Queued, never sent from here:
+        # a blocking HTTP call on the event path would couple detection
+        # throughput to a third party's availability, and the queue is what
+        # makes a SOAR outage cost nothing. Idempotent on the alert's own id,
+        # so a replay of this event cannot open a second case.
+        if self.soar_queue is not None:
+            try:
+                score = float(ueba_block.get("combined_score") or 0.0)
+                if score >= float(self.soar_cfg.get("min_score") or 0.0):
+                    self.soar_queue.enqueue(output_log)
+            except Exception as e:
+                log.debug("SOAR enqueue skipped: %s", e)
 
         return output_log
 

@@ -63,6 +63,9 @@ paths:
   # FEED LANDS if one ever arrives: {entity: cohort_name}. Until then the
   # grouping is inferred and this file is simply absent.
   peer_cohorts_file:    "/root/NEW_DRIVE/aditya_ueba/peer_cohorts.json"
+  # Durable outbound queue for the SOAR integration (SN 3). Defaults beside
+  # the profile store with the other SQLite state.
+  soar_queue_db:        "profiles/soar_queue.db"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -749,6 +752,58 @@ detection:
   #                 The serial says a pattern STARTS deviating, which is a
   #                 statement about change, so the comparison is recent-window
   #                 against cohort, not all-time against cohort.
+  # ── SOAR and SIEM integration (RFP SN 3) ───────────────────────────────────
+  #
+  # The "same OEM" half of SN 3 is a commercial and bid decision, not an
+  # engineering one, and is tracked as such — no implementation makes two
+  # products share a vendor. The SIEM half is already live: the engine consumes
+  # the SIEM's enriched event stream, which is where every detection here comes
+  # from. This block is the SOAR half.
+  #
+  # Not a webhook. Three differences, each a defect if skipped:
+  #   DURABILITY     outbound incidents are queued in SQLite and retried with
+  #                  exponential backoff; what cannot be delivered after
+  #                  max_attempts lands in a visible dead-letter state that an
+  #                  operator can replay, rather than being dropped.
+  #   IDEMPOTENCY    every item carries a stable key derived from the alert's
+  #                  own event_id, in the payload and in a header, so a retry
+  #                  cannot create a second case on either side.
+  #   BIDIRECTIONAL  the SOAR can tell us what it did. Callbacks are
+  #                  HMAC-authenticated, replay-protected and mapped onto state
+  #                  this platform already keeps.
+  #
+  # The inbound half matters more than it looks: close_false_positive records a
+  # BENIGN label and confirm_incident records a MALICIOUS one, which is exactly
+  # the label supply the supervised model (SN 20) is waiting for. An analyst
+  # working a case in the SOAR labels our training data at no extra cost.
+  #
+  # EGRESS AND SN 64. A SOAR push is an outbound call, so every delivery is
+  # checked against the egress policy on EVERY attempt — not once when the
+  # destination was configured, because the policy can be tightened afterwards.
+  # Under the default on_premises mode an internal SOAR is reachable and a
+  # cloud one is refused and held in the 'blocked' state with the reason. That
+  # is correct rather than limiting: a cloud SOAR and SN 64's on-premises
+  # requirement cannot both be satisfied, and the operator must choose
+  # knowingly.
+  #
+  # The callback secret comes from the environment (UEBA_SOAR_SECRET), never
+  # from this file.
+  #
+  # min_score  only alerts at or above this are reported. 0 reports them all,
+  #            which is almost certainly wrong for a real SOAR queue — set it
+  #            once the volume is known.
+  soar:
+    enabled: false
+    url: ""
+    min_score: 0.0
+    max_attempts: 8
+    backoff_base_secs: 30
+    backoff_max_secs: 3600
+    batch_size: 25
+    callback_window_secs: 300
+    replay_cache_size: 4096
+    poll_secs: 15
+
   # ── Flow ingestion and network anomaly detection (RFP SN 28) ───────────────
   #
   # The sheet had this blocked on confirmation that NetFlow is collected and
