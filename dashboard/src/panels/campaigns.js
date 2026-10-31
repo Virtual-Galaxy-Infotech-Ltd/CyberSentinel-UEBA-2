@@ -48,7 +48,7 @@ export function renderCampaigns() {
         </div>
         ${c.signatures.length ? `<div class="campaign-sigs">${c.signatures.map((s) => `<div class="sig-item">⚡ ${s}</div>`).join("")}</div>` : ""}
         <div class="campaign-timeline">${tlBars}</div>
-        <div style="margin-top:6px;font-family:var(--mono2);font-size:10px;color:var(--text3)">Top reason: <span style="color:var(--text2)">${(c.top_reason || "—").replace(/_/g, " ")}</span></div>
+        <div style="margin-top:6px;font-family:var(--mono2);font-size:11px;color:var(--text3)">Top reason: <span style="color:var(--text2)">${(c.top_reason || "—").replace(/_/g, " ")}</span></div>
       </div>
     </div>`;
   }).join("");

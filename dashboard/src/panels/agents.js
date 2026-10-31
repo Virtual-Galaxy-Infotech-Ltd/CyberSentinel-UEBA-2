@@ -28,13 +28,13 @@ export function renderOverviewAgents() {
     return `<div class="agent-item" onclick="goToAgent('${safeName}')" style="padding:10px 14px;">
       <div style="display:flex;align-items:center;flex:1;min-width:0;">${dot}
         <div style="min-width:0;">
-          <div class="agent-name" style="color:${nameColor};font-size:12px">${a.agent}</div>
+          <div class="agent-name" style="color:${nameColor};font-size:12.5px">${a.agent}</div>
           <div class="agent-ip">${a.ip || ""}${a.os ? " · " + a.os : ""}</div>
         </div>
       </div>
       <div style="text-align:right;flex-shrink:0;">
         <span class="agent-alert-count ${cntCls}">${a.alert_count}</span>
-        ${a.highly_anomalous > 0 ? `<div style="font-family:var(--mono2);font-size:9px;color:var(--red);margin-top:2px">${a.highly_anomalous} critical</div>` : ""}
+        ${a.highly_anomalous > 0 ? `<div style="font-family:var(--mono2);font-size:10px;color:var(--red);margin-top:2px">${a.highly_anomalous} critical</div>` : ""}
       </div>
     </div>`;
   }).join("");
@@ -55,7 +55,7 @@ export function renderAgents() {
     const safeName = a.agent.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
     return `<div class="agent-item ${cls} ${isActive}" onclick="loadAgentDetail('${safeName}')">
       <div>
-        <div class="agent-name">${a.agent}${a.agent_id ? ` <span style="color:var(--text3);font-size:9px">#${a.agent_id}</span>` : ""}</div>
+        <div class="agent-name">${a.agent}${a.agent_id ? ` <span style="color:var(--text3);font-size:10px">#${a.agent_id}</span>` : ""}</div>
         <div class="agent-ip">${a.ip || ""}${a.os ? " · " + a.os : ""}</div>
       </div>
       <span class="agent-alert-count ${cntCls}">${a.alert_count}</span>
@@ -84,7 +84,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
   );
   const agentMeta = state.agentsData.find((a) => a.agent === agentName) || {};
   document.getElementById("agent-detail-title").innerHTML =
-    `${agentName} <span style="font-size:10px;color:var(--text3);font-family:var(--mono2);font-weight:400">${agentMeta.ip || ""} · ${agentMeta.os || ""}</span>`;
+    `${agentName} <span style="font-size:11px;color:var(--text3);font-family:var(--mono2);font-weight:400">${agentMeta.ip || ""} · ${agentMeta.os || ""}</span>`;
   const body = document.getElementById("agent-detail-body");
   // On an explicit click we show the spinner; on a 30s auto-refresh
   // (silent=true) we keep the current view until the new data arrives.
@@ -108,7 +108,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
   if (!alerts.length) {
     body.innerHTML = `<div class="agent-summary" style="grid-template-columns:1fr 1fr;">
       <div class="agent-stat"><div class="agent-stat-val" style="color:var(--green)">0</div><div class="agent-stat-lbl">Alerts</div></div>
-      <div class="agent-stat"><div class="agent-stat-val" style="color:var(--green);font-size:16px">CLEAN</div><div class="agent-stat-lbl">Status</div></div>
+      <div class="agent-stat"><div class="agent-stat-val" style="color:var(--green);font-size:16.5px">CLEAN</div><div class="agent-stat-lbl">Status</div></div>
     </div>
     <div class="empty-state"><svg width="40" height="40" viewBox="0 0 40 40" fill="none"><circle cx="20" cy="20" r="16" stroke="#06d6a0" stroke-width="1.5" fill="none" opacity="0.4"/><path d="M13 20l5 5 9-9" stroke="#06d6a0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <p style="color:var(--green)">NO ANOMALIES DETECTED</p></div>`;
@@ -158,8 +158,8 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
     const pct = maxVal > 0 ? Math.max(2, Math.round((val / maxVal) * 100)) : 0;
     return `<div style="margin-bottom:11px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
-        <span style="font-family:var(--mono2);font-size:11px;color:var(--text2);max-width:78%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${label}">${label}</span>
-        <span style="font-family:var(--mono);font-size:12px;font-weight:400;color:${color};margin-left:8px;flex-shrink:0">${val}</span>
+        <span style="font-family:var(--mono2);font-size:11.5px;color:var(--text2);max-width:78%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${label}">${label}</span>
+        <span style="font-family:var(--mono);font-size:12.5px;font-weight:400;color:${color};margin-left:8px;flex-shrink:0">${val}</span>
       </div>
       <div style="height:8px;background:rgba(255,255,255,0.04);border-radius:4px;overflow:hidden">
         <div style="height:100%;width:${pct}%;background:${color};border-radius:4px;opacity:0.7"></div>
@@ -168,7 +168,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
   }
 
   function buildTimeline() {
-    if (!bKeys.length) return `<div style="text-align:center;padding:50px 20px;color:var(--text3);font-family:var(--mono2);font-size:11px">NO TIMELINE DATA</div>`;
+    if (!bKeys.length) return `<div style="text-align:center;padding:50px 20px;color:var(--text3);font-family:var(--mono2);font-size:11.5px">NO TIMELINE DATA</div>`;
     const W = 560, H = 160, pL = 36, pB = 28, pT = 10, pR = 8;
     const cW = W - pL - pR, cH = H - pB - pT, n = bKeys.length;
     const cats = [
@@ -210,7 +210,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
       <line x1="${pL}" y1="${pT + cH}" x2="${W - pR}" y2="${pT + cH}" stroke="#243447" stroke-width="1"/>
       ${bars}${xLabels}</svg>
     <div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap;padding-bottom:2px">
-      ${cats.map((c) => `<span style="font-family:var(--mono2);font-size:10px;color:${c.color};display:flex;align-items:center;gap:5px"><span style="display:inline-block;width:10px;height:8px;background:${c.color};opacity:0.8;border-radius:2px"></span>${c.label}</span>`).join("")}
+      ${cats.map((c) => `<span style="font-family:var(--mono2);font-size:11px;color:${c.color};display:flex;align-items:center;gap:5px"><span style="display:inline-block;width:10px;height:8px;background:${c.color};opacity:0.8;border-radius:2px"></span>${c.label}</span>`).join("")}
     </div>`;
   }
 
@@ -262,37 +262,37 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
 
       <div style="display:grid;grid-template-columns:200px 1fr;gap:12px;margin-bottom:14px;align-items:stretch;">
         <div class="ep-chart-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px 10px;gap:6px;">
-          <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);letter-spacing:2px;text-transform:uppercase;align-self:flex-start;">⬡ Risk Meter</div>
+          <div style="font-family:var(--mono2);font-size:9.5px;color:var(--text3);letter-spacing:2px;text-transform:uppercase;align-self:flex-start;">⬡ Risk Meter</div>
           <canvas id="agent-risk-gauge" style="width:180px;height:100px;display:block;"></canvas>
           <div style="text-align:center;margin-top:-6px;">
             <div id="agent-risk-score-val" style="font-family:var(--mono);font-size:26px;line-height:1;color:var(--green);">—</div>
-            <div id="agent-risk-label" style="font-family:var(--mono2);font-size:9px;padding:2px 10px;border-radius:3px;border:1px solid rgba(6,214,160,0.4);background:rgba(6,214,160,0.07);color:var(--green);letter-spacing:1px;margin-top:5px;display:inline-block;">Calculating...</div>
+            <div id="agent-risk-label" style="font-family:var(--mono2);font-size:10px;padding:2px 10px;border-radius:3px;border:1px solid rgba(6,214,160,0.4);background:rgba(6,214,160,0.07);color:var(--green);letter-spacing:1px;margin-top:5px;display:inline-block;">Calculating...</div>
           </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px;">
           <div class="agent-kpi-card" style="background:rgba(255,59,92,0.06);border:1px solid rgba(255,59,92,0.2);border-radius:6px;padding:12px 14px;">
-            <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">CRITICAL</div>
+            <div style="font-family:var(--mono2);font-size:9.5px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">CRITICAL</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-family:var(--mono);font-size:26px;color:var(--red);line-height:1;">${critCount}</div>
-              <div style="font-family:var(--mono2);font-size:10px;color:rgba(255,59,92,0.55);">${alerts.length > 0 ? Math.round((critCount / alerts.length) * 100) : 0}%</div>
+              <div style="font-family:var(--mono2);font-size:11px;color:rgba(255,59,92,0.55);">${alerts.length > 0 ? Math.round((critCount / alerts.length) * 100) : 0}%</div>
             </div>
           </div>
           <div class="agent-kpi-card" style="background:rgba(255,140,66,0.06);border:1px solid rgba(255,140,66,0.2);border-radius:6px;padding:12px 14px;">
-            <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">ANOMALOUS</div>
+            <div style="font-family:var(--mono2);font-size:9.5px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">ANOMALOUS</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-family:var(--mono);font-size:26px;color:var(--orange);line-height:1;">${anomCount}</div>
-              <div style="font-family:var(--mono2);font-size:10px;color:rgba(255,140,66,0.55);">${alerts.length > 0 ? Math.round((anomCount / alerts.length) * 100) : 0}%</div>
+              <div style="font-family:var(--mono2);font-size:11px;color:rgba(255,140,66,0.55);">${alerts.length > 0 ? Math.round((anomCount / alerts.length) * 100) : 0}%</div>
             </div>
           </div>
           <div class="agent-kpi-card" style="background:rgba(255,209,102,0.05);border:1px solid rgba(255,209,102,0.18);border-radius:6px;padding:12px 14px;">
-            <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">SUSPICIOUS</div>
+            <div style="font-family:var(--mono2);font-size:9.5px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">SUSPICIOUS</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-family:var(--mono);font-size:26px;color:var(--yellow);line-height:1;">${suspCount}</div>
-              <div style="font-family:var(--mono2);font-size:10px;color:rgba(255,209,102,0.45);">${alerts.length > 0 ? Math.round((suspCount / alerts.length) * 100) : 0}%</div>
+              <div style="font-family:var(--mono2);font-size:11px;color:rgba(255,209,102,0.45);">${alerts.length > 0 ? Math.round((suspCount / alerts.length) * 100) : 0}%</div>
             </div>
           </div>
           <div class="agent-kpi-card" style="background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.15);border-radius:6px;padding:12px 14px;">
-            <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">MAX SCORE</div>
+            <div style="font-family:var(--mono2);font-size:9.5px;color:var(--text3);letter-spacing:2px;margin-bottom:4px;">MAX SCORE</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-family:var(--mono);font-size:26px;color:${scoreColor(maxScore)};line-height:1;">${maxScore.toFixed(3)}</div>
             </div>
@@ -309,7 +309,7 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
               { c: "#ff3b5c", l: "Critical" },
               { c: "#ff8c42", l: "Anomalous" },
               { c: "#ffd166", l: "Suspicious" },
-            ].map((x) => `<span style="display:flex;align-items:center;gap:5px;font-size:9px;color:${x.c}"><span style="display:inline-block;width:10px;height:4px;background:${x.c};border-radius:2px;opacity:0.8"></span>${x.l}</span>`).join("")}
+            ].map((x) => `<span style="display:flex;align-items:center;gap:5px;font-size:10px;color:${x.c}"><span style="display:inline-block;width:10px;height:4px;background:${x.c};border-radius:2px;opacity:0.8"></span>${x.l}</span>`).join("")}
           </div>
         </div>
         ${buildTimeline()}
@@ -327,14 +327,14 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
             ].map((it) => {
               const pct = alerts.length > 0 ? Math.round((it.val / alerts.length) * 100) : 0;
               return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 6px;border-bottom:1px solid rgba(26,40,56,0.4);">
-                <div style="display:flex;align-items:center;gap:7px;"><div style="width:7px;height:7px;border-radius:50%;background:${it.color};flex-shrink:0;"></div><span style="font-family:var(--mono2);font-size:9px;color:var(--text3);letter-spacing:1.5px;">${it.label}</span></div>
-                <div style="display:flex;align-items:baseline;gap:8px;"><span style="font-family:var(--mono);font-size:18px;color:${it.color};">${it.val}</span><span style="font-family:var(--mono2);font-size:10px;color:${it.color};opacity:0.5;">${pct}%</span></div>
+                <div style="display:flex;align-items:center;gap:7px;"><div style="width:7px;height:7px;border-radius:50%;background:${it.color};flex-shrink:0;"></div><span style="font-family:var(--mono2);font-size:10px;color:var(--text3);letter-spacing:1.5px;">${it.label}</span></div>
+                <div style="display:flex;align-items:baseline;gap:8px;"><span style="font-family:var(--mono);font-size:18.5px;color:${it.color};">${it.val}</span><span style="font-family:var(--mono2);font-size:11px;color:${it.color};opacity:0.5;">${pct}%</span></div>
               </div>`;
             }).join("")}
           </div>
         </div>
-        <div class="ep-chart-card"><div class="ep-chart-title">Top Triggered Rules</div><div style="padding:4px 0">${topSigs.length ? topSigs.map(([s, c]) => hBar(s, c, topSigs[0][1], "var(--accent)")).join("") : '<div style="color:var(--text3);font-family:var(--mono2);font-size:11px;padding:12px">No data</div>'}</div></div>
-        <div class="ep-chart-card"><div class="ep-chart-title">Top Users</div><div style="padding:4px 0">${topUsers.length ? topUsers.map(([u, c]) => hBar(u, c, topUsers[0][1], "var(--purple)")).join("") : '<div style="color:var(--text3);font-family:var(--mono2);font-size:11px;padding:12px">No data</div>'}</div></div>
+        <div class="ep-chart-card"><div class="ep-chart-title">Top Triggered Rules</div><div style="padding:4px 0">${topSigs.length ? topSigs.map(([s, c]) => hBar(s, c, topSigs[0][1], "var(--accent)")).join("") : '<div style="color:var(--text3);font-family:var(--mono2);font-size:11.5px;padding:12px">No data</div>'}</div></div>
+        <div class="ep-chart-card"><div class="ep-chart-title">Top Users</div><div style="padding:4px 0">${topUsers.length ? topUsers.map(([u, c]) => hBar(u, c, topUsers[0][1], "var(--purple)")).join("") : '<div style="color:var(--text3);font-family:var(--mono2);font-size:11.5px;padding:12px">No data</div>'}</div></div>
       </div>
     </div>
     <div id="agent-pane-events" class="agent-pane" style="display:none;">
@@ -410,7 +410,7 @@ function drawAgentGauge(critCount, anomCount, total, maxScore) {
     ctx.strokeStyle = "#1a2838"; ctx.lineWidth = 1.5; ctx.stroke();
     if (i % 5 === 0) {
       ctx.fillStyle = "#3d5a72";
-      ctx.font = "8px JetBrains Mono,monospace";
+      ctx.font = "9.5px JetBrains Mono,monospace";
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(i * 10, cx + (r + 14) * Math.cos(a), cy + (r + 14) * Math.sin(a));
     }

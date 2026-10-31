@@ -76,7 +76,7 @@ export function drawGauge(score) {
       const lx = cx + (r + 14) * Math.cos(a);
       const ly = cy + (r + 14) * Math.sin(a);
       ctx.fillStyle = "#3d5a72";
-      ctx.font = '600 9px "JetBrains Mono", monospace';
+      ctx.font = '600 10px "JetBrains Mono", monospace';
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(String(i * 10), lx, ly);
     }

@@ -221,7 +221,7 @@ export function feedRows(alerts, colSpan, idPrefix) {
       : "";
     rows.push(`
       <tr class="${rowCls}" data-id="${alertId}" style="cursor:pointer">
-        <td class="time-cell"><span class="ev-toggle" style="color:var(--text3);margin-right:6px;font-size:10px">${chev}</span>${fmtTime(a.processed_at)}</td>
+        <td class="time-cell"><span class="ev-toggle" style="color:var(--text3);margin-right:6px;font-size:11px">${chev}</span>${fmtTime(a.processed_at)}</td>
         <td class="user-cell">${wlBadge}${a.user || "—"}</td>
         ${colSpan > 7 ? `<td class="host-cell">${a.host || "—"}</td>` : ""}
         <td><span class="verdict-badge ${verdictClass(a.verdict)}">${verdictLabel(a.verdict)}</span></td>

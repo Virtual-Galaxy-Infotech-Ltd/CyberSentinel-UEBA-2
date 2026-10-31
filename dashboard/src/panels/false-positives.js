@@ -22,7 +22,7 @@ function renderFpPatterns() {
   if (!pats.length) {
     tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state" style="padding:20px 12px">
       <p>NO AUTO-SUPPRESSION PATTERNS</p>
-      <p style="font-family:var(--mono2);font-size:10px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
+      <p style="font-family:var(--mono2);font-size:11px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
         Click <b>Mark FP</b> on any alert to auto-suppress every future alert with the same rule description.
       </p>
     </div></td></tr>`;
@@ -55,7 +55,7 @@ function renderFpEvents() {
   if (!fps.length) {
     tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state" style="padding:30px 12px">
       <p>NO FALSE POSITIVES YET</p>
-      <p style="font-family:var(--mono2);font-size:10px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
+      <p style="font-family:var(--mono2);font-size:11px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
         Click the <span class="fp-btn-inline" style="cursor:default;pointer-events:none">FP</span> button on any alert in the feed to start.
       </p>
     </div></td></tr>`;

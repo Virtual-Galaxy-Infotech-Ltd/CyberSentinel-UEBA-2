@@ -67,7 +67,7 @@ function _render(hoverIdx) {
     ctx.strokeStyle = "rgba(26,40,56,0.55)"; ctx.lineWidth = 0.5;
     ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = "#3d5a72";
-    ctx.font = '500 9px "JetBrains Mono", monospace';
+    ctx.font = '500 10px "JetBrains Mono", monospace';
     ctx.textAlign = "right"; ctx.textBaseline = "middle";
     ctx.fillText(Math.round((maxVal * i) / 4), pL - 6, y);
   }
@@ -151,7 +151,7 @@ function _render(hoverIdx) {
           return keys.map((_, i) => i).filter((i) => i % step === 0 || i === n - 1);
         })();
   ctx.fillStyle = "#3d5a72";
-  ctx.font = '500 9px "JetBrains Mono", monospace';
+  ctx.font = '500 10px "JetBrains Mono", monospace';
   ctx.textAlign = "center"; ctx.textBaseline = "top";
   labelIndices.forEach((i) => {
     const x = getX(i);
@@ -195,7 +195,7 @@ function _render(hoverIdx) {
     ctx.beginPath(); ctx.arc(lx + 8, legY, 3, 0, Math.PI * 2);
     ctx.fillStyle = item.c; ctx.fill();
     ctx.fillStyle = "#7a9ab5";
-    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.font = '10px "JetBrains Mono", monospace';
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
     ctx.fillText(item.l, lx + 21, legY);
   });

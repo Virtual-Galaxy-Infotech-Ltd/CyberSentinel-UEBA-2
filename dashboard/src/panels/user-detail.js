@@ -82,8 +82,8 @@ export async function loadUserDetail(userName, { silent = false } = {}) {
     const pct = maxVal > 0 ? Math.max(2, Math.round((val / maxVal) * 100)) : 0;
     return `<div style="margin-bottom:11px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
-        <span style="font-family:var(--mono2);font-size:11px;color:var(--text2);max-width:78%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${label}">${label}</span>
-        <span style="font-family:var(--mono);font-size:12px;color:${color};margin-left:8px;flex-shrink:0">${val}</span>
+        <span style="font-family:var(--mono2);font-size:11.5px;color:var(--text2);max-width:78%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${label}">${label}</span>
+        <span style="font-family:var(--mono);font-size:12.5px;color:${color};margin-left:8px;flex-shrink:0">${val}</span>
       </div>
       <div style="height:8px;background:rgba(255,255,255,0.04);border-radius:4px;overflow:hidden">
         <div style="height:100%;width:${pct}%;background:${color};border-radius:4px;opacity:0.7"></div>
@@ -138,7 +138,7 @@ export async function loadUserDetail(userName, { silent = false } = {}) {
       <div class="ep-chart-card" style="margin-bottom:14px;">
         <div class="ep-chart-title" style="display:flex;justify-content:space-between;align-items:center;">
           <span>Daily activity</span>
-          <div style="display:flex;gap:14px;font-size:9px">
+          <div style="display:flex;gap:14px;font-size:10px">
             <span style="color:#00d4ff"><span style="display:inline-block;width:10px;height:4px;background:#00d4ff;opacity:0.65;border-radius:2px;margin-right:4px"></span>Total</span>
             <span style="color:#ff3b5c"><span style="display:inline-block;width:10px;height:4px;background:#ff3b5c;border-radius:2px;margin-right:4px"></span>Critical</span>
           </div>
@@ -149,11 +149,11 @@ export async function loadUserDetail(userName, { silent = false } = {}) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
         <div class="ep-chart-card">
           <div class="ep-chart-title">Top Hosts</div>
-          <div style="padding:4px 0">${topHosts.map(([h, c]) => hBar(h, c, topHosts[0][1], "var(--accent)")).join("") || '<div style="color:var(--text3);font-family:var(--mono2);font-size:11px;padding:12px">No data</div>'}</div>
+          <div style="padding:4px 0">${topHosts.map(([h, c]) => hBar(h, c, topHosts[0][1], "var(--accent)")).join("") || '<div style="color:var(--text3);font-family:var(--mono2);font-size:11.5px;padding:12px">No data</div>'}</div>
         </div>
         <div class="ep-chart-card">
           <div class="ep-chart-title">Top Triggered Rules</div>
-          <div style="padding:4px 0">${topSigs.map(([s, c]) => hBar(s, c, topSigs[0][1], "var(--purple)")).join("") || '<div style="color:var(--text3);font-family:var(--mono2);font-size:11px;padding:12px">No data</div>'}</div>
+          <div style="padding:4px 0">${topSigs.map(([s, c]) => hBar(s, c, topSigs[0][1], "var(--purple)")).join("") || '<div style="color:var(--text3);font-family:var(--mono2);font-size:11.5px;padding:12px">No data</div>'}</div>
         </div>
       </div>
 

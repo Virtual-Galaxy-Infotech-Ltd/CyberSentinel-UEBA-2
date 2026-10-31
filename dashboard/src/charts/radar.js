@@ -98,8 +98,8 @@ export function drawRadar(reasons) {
     // Vertical layout: build relative offsets, then shift the group so top
     // labels float above y, bottom labels float below y, sides centered.
     const lineH = 11;
-    const fontReason = 10;
-    const fontCount  = 13;
+    const fontReason = 13;
+    const fontCount  = 16;
     const totalH = lines.length * lineH + fontCount + 2;
     let baseDy;
     if (sinA < -0.2)      baseDy = -totalH + fontReason;     // top half
@@ -182,7 +182,7 @@ export function drawRadar(reasons) {
     }" width="12" height="8" fill="rgba(0,212,255,0.18)" stroke="rgba(0,212,255,0.7)" stroke-width="1" rx="1"/>
     <text x="26" y="${
       H - 10
-    }" font-family="JetBrains Mono,monospace" font-size="9" fill="#7a9ab5">Alert Count</text>
+    }" font-family="JetBrains Mono,monospace" font-size="12" fill="#7a9ab5">Alert Count</text>
   </svg>`;
 
   const existing = document.getElementById("radar-svg-wrap");
@@ -222,7 +222,7 @@ function _ensureTipEl() {
     "background:rgba(11,17,24,0.96)",
     "color:#c8d8e8",
     "font-family:'IBM Plex Mono',monospace",
-    "font-size:11.5px",
+    "font-size:13.5px",
     "letter-spacing:0.2px",
     "border:1px solid rgba(0,212,255,0.35)",
     "border-radius:4px",

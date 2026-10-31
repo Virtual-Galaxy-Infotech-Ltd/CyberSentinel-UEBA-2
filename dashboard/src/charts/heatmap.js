@@ -29,14 +29,14 @@ export function renderHeatmap(feedData) {
   hours.forEach((h, hi) => {
     hourLabels += `<text x="${padL + hi * cellW + cellW / 2}" y="${
       padT - 3
-    }" font-size="8" fill="#3d5a72" text-anchor="middle">${hi % 3 === 0 ? h : ""}</text>`;
+    }" font-size="10" fill="#3d5a72" text-anchor="middle">${hi % 3 === 0 ? h : ""}</text>`;
   });
 
   allDays.forEach((day, di) => {
     const shortDay = day.slice(5);
     dayLabels += `<text x="${padL - 4}" y="${
       padT + di * cellH + cellH * 0.65
-    }" font-size="9" fill="#7a9ab5" text-anchor="end">${shortDay}</text>`;
+    }" font-size="11" fill="#7a9ab5" text-anchor="end">${shortDay}</text>`;
     hours.forEach((h, hi) => {
       const key = `${day}|${h}`;
       const v = matrix[key] || { total: 0, critical: 0 };
@@ -64,7 +64,7 @@ export function renderHeatmap(feedData) {
       ${dayLabels}${hourLabels}${cells}
     </svg>
     <div style="display:flex;gap:16px;margin-top:8px;align-items:center;">
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--text3);">Low activity</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--text3);">Low activity</span>
       <div style="display:flex;gap:2px;">
         ${[0.1, 0.3, 0.5, 0.7, 0.9]
           .map(
@@ -75,8 +75,8 @@ export function renderHeatmap(feedData) {
           )
           .join("")}
       </div>
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--accent);">High (normal)</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--accent);">High (normal)</span>
       <div style="width:14px;height:10px;background:rgba(255,59,92,0.7);border-radius:2px;"></div>
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--red);">Critical alerts</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--red);">Critical alerts</span>
     </div>`;
 }
