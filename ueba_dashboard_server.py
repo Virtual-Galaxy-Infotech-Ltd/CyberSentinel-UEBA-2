@@ -91,6 +91,14 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# Supervised learning on analyst verdicts (RFP SN 20). Optional likewise.
+try:
+    import ueba_supervised  # type: ignore
+    SUPERVISED_AVAILABLE = True
+except Exception:
+    ueba_supervised = None
+    SUPERVISED_AVAILABLE = False
+
 # Peer groups built from observed behaviour (RFP SN 42). Optional likewise.
 try:
     import ueba_peers  # type: ignore
@@ -4363,6 +4371,50 @@ def _entities_path():
     if not p:
         p = "entities.json"
     return str(_abs_install_path(p))
+
+
+@app.route("/api/supervised")
+def api_supervised_status():
+    """The supervised model, its card, and the current label supply (SN 20).
+
+    Answers the question honestly whether or not a model exists: if none does,
+    it says how many labels of each class are held against the minimum, and
+    where labels come from.
+    """
+    if not SUPERVISED_AVAILABLE:
+        return jsonify({"ok": False,
+                        "error": "supervised module unavailable"}), 503
+    paths = (_RAW_CFG.get("paths") or {})
+    scfg = (_RAW_CFG.get("detection") or {}).get("supervised") or {}
+    mdir = _abs_install_path(paths.get("models_dir") or "models")
+    try:
+        fp_file = _abs_install_path(
+            paths.get("fp_file")
+            or (_RAW_CFG.get("dashboard") or {}).get("false_positives_file")
+            or "false_positives.json")
+        rh = paths.get("risk_history_db") or ""
+        rh_path = (_abs_install_path(rh) if rh
+                   else Path(_profile_db_path()).parent / "risk_history.db")
+        counts = ueba_supervised.label_counts(
+            ueba_supervised.read_confirmed(rh_path),
+            ueba_supervised.read_false_positives(fp_file))
+        st = ueba_supervised.status(
+            mdir / "supervised.pkl", mdir / "supervised_card.json", counts,
+            int(scfg.get("min_per_class")
+                or ueba_supervised.DEFAULT_MIN_PER_CLASS))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    st["ok"] = True
+    st["enabled"] = bool(scfg.get("enabled", True))
+    st["gates"] = {
+        "min_per_class": scfg.get("min_per_class",
+                                  ueba_supervised.DEFAULT_MIN_PER_CLASS),
+        "min_recall": scfg.get("min_recall",
+                               ueba_supervised.DEFAULT_MIN_RECALL),
+        "min_f1_margin": scfg.get("min_f1_margin",
+                                  ueba_supervised.DEFAULT_MIN_F1_MARGIN),
+    }
+    return jsonify(st)
 
 
 def _peer_groups_path():

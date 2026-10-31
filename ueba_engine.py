@@ -48,6 +48,7 @@ import ueba_assets
 import ueba_entities
 import ueba_device_identity
 import ueba_peers
+import ueba_supervised
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -486,6 +487,7 @@ def build_evidence_block(
     entities: list | None = None,
     device: dict | None = None,
     peer: dict | None = None,
+    supervised: dict | None = None,
 ) -> dict:
     """
     Build a human-readable evidence block for SOC analysts.
@@ -623,6 +625,15 @@ def build_evidence_block(
             # misuse findings and then 914 privilege-only alerts. Classifying
             # and tracking entities is what SN 30 and SN 67 ask for; neither
             # asks for a score.
+            # RFP SN 20. The supervised model's probability that this event
+            # is malicious, learned from analyst verdicts. Carried beside the
+            # unsupervised score rather than folded into it, so an analyst can
+            # see the two opinions agree or disagree — which is the useful
+            # thing about having a second one.
+            "supervised":           (supervised
+                                     if supervised
+                                     and supervised.get("verdict") != "unavailable"
+                                     else None),
             # RFP SN 42. Whether this entity's recent pattern has drifted
             # from its peer group, which group, and how far out it sits
             # relative to that group's OWN spread. `membership` is carried so
@@ -890,6 +901,34 @@ class UEBAEngine:
         # is O(n·k) over every entity and has no business on the event path.
         self.peers_cfg = (cfg.get("detection") or {}).get("peers") or {}
         self.peer_groups_file = paths.get("peer_groups_file") or ""
+        # Supervised second opinion (SN 20). Loaded once; the dimension check
+        # is the important part — a model fitted on a different feature width
+        # would still produce numbers, which is the dangerous failure.
+        self.supervised_cfg = (
+            (cfg.get("detection") or {}).get("supervised") or {})
+        self.supervised_model = None
+        self.supervised_card = {}
+        if self.supervised_cfg.get("enabled", True):
+            try:
+                mdir = Path(paths.get("models_dir") or "models")
+                sup = ueba_supervised.load_model(
+                    mdir / "supervised.pkl", mdir / "supervised_card.json",
+                    feature_dim=int((cfg.get("preprocessing") or {})
+                                    .get("feature_dim") or 35))
+                self.supervised_card = sup.get("card") or {}
+                if sup.get("ok"):
+                    self.supervised_model = sup["model"]
+                    m = (self.supervised_card.get("metrics_heldout") or {})
+                    log.info("Supervised model loaded (held-out recall %.2f, "
+                             "F1 %.2f on the malicious class)",
+                             m.get("recall", 0.0), m.get("f1", 0.0))
+                else:
+                    log.info("No supervised model in use: %s",
+                             sup.get("reason") or "none published")
+            except Exception as e:
+                log.warning("supervised model not loaded: %s", e)
+                self.supervised_model = None
+
         self.peer_recent = None
         if self.peers_cfg.get("enabled", True) and self.peer_groups_file:
             self.peer_recent = ueba_peers.RecentProfiles(
@@ -1040,6 +1079,19 @@ class UEBAEngine:
             except Exception as e:
                 log.debug("entity extraction skipped: %s", e)
                 entities, entity_presence = [], {}
+
+        # SN 20 — the supervised model's own opinion on this event, from the
+        # same feature vector the unsupervised layers scored. Reported beside
+        # the unsupervised verdict, never added to it: fusing a second opinion
+        # needs its live error rate measured first.
+        supervised = None
+        if self.supervised_model is not None:
+            try:
+                supervised = ueba_supervised.score(
+                    self.supervised_model, feature_vec)
+            except Exception as e:
+                log.debug("supervised scoring skipped: %s", e)
+                supervised = None
 
         # SN 42 — has this entity's pattern started to drift from its peers?
         #
@@ -1292,6 +1344,7 @@ class UEBAEngine:
             entities=entities,
             device=device,
             peer=peer,
+            supervised=supervised,
         )
 
         # Append ueba block + evidence to original log

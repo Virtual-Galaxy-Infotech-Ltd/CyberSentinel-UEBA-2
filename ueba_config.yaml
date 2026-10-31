@@ -749,6 +749,41 @@ detection:
   #                 The serial says a pattern STARTS deviating, which is a
   #                 statement about change, so the comparison is recent-window
   #                 against cohort, not all-time against cohort.
+  # ── Supervised machine learning (RFP SN 20) ────────────────────────────────
+  #
+  # The sheet had this blocked on "a labelled incident dataset from the customer
+  # SOC". We already collect exactly that, through workflow this platform
+  # ships: marking a false positive records a BENIGN example (10,830 of them
+  # measured locally) and confirming an incident records a MALICIOUS one. The
+  # dataset is generated in-house by the people best placed to label it.
+  #
+  # What is short today is the MALICIOUS class, because the confirm action only
+  # shipped on 29-Oct-2026. That is a waiting problem, not a dependency: nobody
+  # outside the team has to send us anything. train_supervised.py reports the
+  # current count against min_per_class and refuses to train below it, so the
+  # position is always stated rather than implied.
+  #
+  # ACCURACY IS NEVER THE TEST. With the labelled set dominated by false
+  # positives, a model answering "benign" to everything scores over 99%
+  # accuracy and is worthless. Every gate is on the MALICIOUS class, and the
+  # majority-class baseline is computed and published beside the model so the
+  # comparison cannot be dodged.
+  #
+  # Vectors come from the SAME FeatureExtractor the unsupervised models use. A
+  # model whose recorded feature dimension disagrees with preprocessing
+  # .feature_dim is refused rather than scoring a space it was not fitted on.
+  #
+  # Reported, not fused. The supervised verdict is published alongside the
+  # unsupervised score, never added to it: fusing a second opinion needs its
+  # error rate measured on live traffic first, and this project has twice paid
+  # for a scoring change made before that measurement.
+  supervised:
+    enabled: true
+    min_per_class: 50
+    min_recall: 0.50
+    min_f1_margin: 0.10
+    test_fraction: 0.25
+
   peers:
     enabled: true
     min_size: 4

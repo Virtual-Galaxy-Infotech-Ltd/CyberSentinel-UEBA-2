@@ -353,6 +353,23 @@ else
   echo "  No build_peer_groups.py — skipping peer group rebuild"
 fi
 
+# ── 5.6 Retrain the supervised model (RFP SN 20) ──────────────────────────
+# Non-fatal for the same reasons as 5.5, and additionally because this one is
+# EXPECTED to decline for a while: it refuses to train until there are enough
+# confirmed incidents, and reports the count against the minimum instead. A
+# refusal is the correct outcome, not a failure.
+SUP_TOOL="$BASE/train_supervised.py"
+if [ -f "$SUP_TOOL" ]; then
+  echo "  Retraining the supervised model..."
+  if "$VENV_PY" "$SUP_TOOL" --config "$BASE/ueba_config.yaml" 2>&1 | sed 's/^/    /'; then
+    echo "  Supervised step complete"
+  else
+    echo "  WARNING: supervised step failed — any existing model stays in force"
+  fi
+else
+  echo "  No train_supervised.py — skipping the supervised step"
+fi
+
 # ── 6. Prune snapshots older than N days ─────────────────────────────────
 DELETED=$(find "$TRAINING_DIR" -maxdepth 1 -name 'enriched-weekly-*.json.gz' \
             -mtime "+${SNAPSHOT_RETENTION_DAYS}" -print -delete 2>/dev/null || true)
