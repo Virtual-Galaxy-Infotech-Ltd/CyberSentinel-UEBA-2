@@ -2140,7 +2140,36 @@
     display: grid;
     grid-template-columns: clamp(200px, 22%, 300px) 1fr;
     gap: 12px;
-    min-height: 600px;
+    /* With nothing selected the detail panel is a small empty state, so this
+       floor is what sets the height of both columns. Keyed to the viewport so
+       the pair fills the screen rather than stopping at an arbitrary 600px;
+       --svh already divides out the UI scale. */
+    min-height: max(620px, calc(100 * var(--svh) - 230px));
+  }
+
+  /* The endpoint list must be exactly as tall as the detail panel beside it,
+     whatever that panel happens to contain. Two things have to be true at once:
+
+     1. The sidebar STRETCHES to the row (the grid default), so selecting an
+        endpoint — which fills the detail panel and so grows the row — grows the
+        sidebar with it. It used to carry align-self:start, which pinned it to
+        its own content height and left it visibly short of its neighbour.
+     2. The sidebar does not DRIVE the row. height:0 on the scroller makes its
+        flex base size 0, so a hundred endpoints contribute nothing to the
+        intrinsic height; flex-grow then hands it every pixel the row turned out
+        to have. Without this the list would simply stretch the row to its own
+        full length and the detail panel would sit in a sea of empty space. */
+  .endpoints-side {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;        /* a flex/grid child defaults to min-content height */
+    overflow: hidden;     /* keep the scroller inside the rounded corners */
+  }
+  .endpoints-side > #agents-list {
+    flex: 1 1 auto;
+    height: 0;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   /* Overview 3-col — collapses to 1-col */
@@ -3943,56 +3972,56 @@ body.login-gated { overflow: hidden; }
 .lg-left { flex: 1 1 44%; max-width: 34em; min-width: 0; }
 
 .lg-logo { display: flex; align-items: center; gap: 1.1em; }
-.lg-mark { width: 5.2em; height: auto; flex: 0 0 auto; }
+.lg-mark { width: 4.1em; height: auto; flex: 0 0 auto; }
 .lg-word-main {
-  font-size: 1.95em; font-weight: 700; letter-spacing: -0.01em;
-  color: #e8f2fb; line-height: 1.05;
+  font-size: 1.5em; font-weight: 600; letter-spacing: -0.005em;
+  color: #d7e6f4; line-height: 1.1;
 }
 .lg-word-main span { color: #3b9dff; }
 .lg-word-ueba {
-  font-size: 1.22em; font-weight: 600; letter-spacing: 0.42em;
-  color: #cfe3f5; line-height: 1.5;
+  font-size: 0.98em; font-weight: 500; letter-spacing: 0.34em;
+  color: #a9c6de; line-height: 1.5;
 }
 .lg-word-sub {
-  font-family: var(--mono2); font-size: 0.6em; letter-spacing: 0.17em;
-  text-transform: uppercase; color: #7fa6c8;
+  font-family: var(--mono2); font-size: 0.57em; letter-spacing: 0.16em;
+  text-transform: uppercase; color: #6f93b2;
 }
 
 .lg-rule {
-  width: 3.6em; height: 2px; margin: 1.9em 0 1.6em;
-  background: linear-gradient(90deg, #00d4ff, rgba(0,212,255,0.1));
+  width: 3em; height: 1px; margin: 1.6em 0 1.4em;
+  background: linear-gradient(90deg, rgba(0,212,255,0.75), rgba(0,212,255,0.06));
 }
 
 .lg-head {
-  margin: 0 0 0.7em;
-  font-size: 2.55em; font-weight: 700; line-height: 1.16;
-  letter-spacing: -0.02em; color: #ffffff;
+  margin: 0 0 0.75em;
+  font-size: 1.9em; font-weight: 600; line-height: 1.22;
+  letter-spacing: -0.012em; color: #dbe9f6;
 }
-.lg-head span { color: #35c4f0; }
+.lg-head span { color: #4fb4dd; }
 
 .lg-copy {
-  margin: 0 0 2.4em;
-  font-size: 1.02em; line-height: 1.65; color: #a9c2d8;
-  max-width: 24em;
+  margin: 0 0 2em;
+  font-size: 0.94em; line-height: 1.7; color: #8fa9c0;
+  max-width: 25em;
 }
 
 .lg-feats { list-style: none; margin: 0; padding: 0; }
 .lg-feats li {
-  display: flex; align-items: center; gap: 1em;
-  padding: 0.85em 0;
-  border-bottom: 1px solid rgba(120,170,210,0.14);
-  font-size: 0.97em; color: #cfe0ef;
+  display: flex; align-items: center; gap: 0.9em;
+  padding: 0.75em 0;
+  border-bottom: 1px solid rgba(120,170,210,0.1);
+  font-size: 0.9em; color: #aec4d8;
 }
-.lg-feats li:first-child { border-top: 1px solid rgba(120,170,210,0.14); }
+.lg-feats li:first-child { border-top: 1px solid rgba(120,170,210,0.1); }
 .lg-feat-ico {
   flex: 0 0 auto;
-  width: 2.3em; height: 2.3em; border-radius: 0.5em;
+  width: 2.05em; height: 2.05em; border-radius: 0.45em;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(10,40,70,0.55);
-  border: 1px solid rgba(70,150,210,0.28);
-  color: #4bb4ea;
+  background: rgba(10,40,70,0.4);
+  border: 1px solid rgba(70,150,210,0.2);
+  color: #4199c9;
 }
-.lg-feat-ico svg { width: 1.2em; height: 1.2em; }
+.lg-feat-ico svg { width: 1.1em; height: 1.1em; }
 
 /* ── right: sign-in card ── */
 .lg-card {
