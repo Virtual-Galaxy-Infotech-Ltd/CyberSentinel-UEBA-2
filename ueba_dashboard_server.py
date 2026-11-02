@@ -808,7 +808,13 @@ _ARCHIVE_RE = re.compile(r"ueba_alerts_(\d{4}-\d{2}-\d{2})\.jsonl\.zip$")
 # the cache as a slim record.
 # v5 (2026-10-29) adds privilege_boost, for RFP SN 15, on the same grounds.
 # v6 (2026-10-30) adds asset_boost and asset_tier, for RFP SN 17 / SN 40.
-_SLIM_VER = 6
+# v7 (2026-11-02) adds host.os.family, for RFP SN 30's appliance rule. It has
+# to be carried rather than derived: the verdict needs each host's DOMINANT
+# family, because two Windows hosts in this estate also report a minority of
+# network_os events (firewall records are attributed to whichever host reported
+# them), so a single event's value would misclassify them as appliances. The
+# archive is 93 MB over 6 zips, so re-slimming it costs seconds.
+_SLIM_VER = 7
 
 
 def _slim(a: dict) -> dict:
@@ -866,7 +872,10 @@ def _slim(a: dict) -> dict:
             "signature_id": sec.get("signature_id"),
             "severity":     sec.get("severity"),
         },
-        "host": {"name": host.get("name"), "ip": host.get("ip")},
+        "host": {"name": host.get("name"), "ip": host.get("ip"),
+                 # One string. Needed per host in aggregate, not per event —
+                 # see the _SLIM_VER note above.
+                 "os": {"family": ((host.get("os") or {}).get("family"))}},
         # Pre-resolved (see get_user memo) so builders never touch the dropped
         # subject/object/raw_event blobs again.
         "__user": _resolve_user(a),
@@ -2887,6 +2896,10 @@ def _build_devices(alerts):
         "users": set(), "reasons": defaultdict(int), "signatures": defaultdict(int),
         "signature_names": {}, "severity_max": 0, "ip": "",
         "first_seen": "", "last_seen": "",
+        # Counted rather than last-write-wins: the appliance rule needs the
+        # dominant family and a minority of network_os events is normal on an
+        # ordinary Windows host.
+        "os_families": defaultdict(int),
     })
 
     for a in alerts:
@@ -2919,6 +2932,9 @@ def _build_devices(alerts):
         ip = ((a.get("host") or {}).get("ip") or "")
         if ip:
             d["ip"] = ip
+        fam = (((a.get("host") or {}).get("os") or {}).get("family") or "")
+        if fam:
+            d["os_families"][str(fam).strip().lower()] += 1
         if t and (not d["first_seen"] or t < d["first_seen"]):
             d["first_seen"] = t
         if t > d["last_seen"]:
@@ -2930,9 +2946,19 @@ def _build_devices(alerts):
                     [:_DEVICE_PROFILE_CAP])
         verdicts = dict(d["verdicts"])
         reasons = dict(sorted(d["reasons"].items(), key=lambda kv: -kv[1])[:10])
+        fams = dict(d["os_families"])
+        dominant = max(fams, key=fams.get) if fams else ""
+        fam_total = sum(fams.values()) or 1
+        # The SHARE, not just the winner: an ordinary machine whose traffic
+        # mostly appears in firewall records has a majority of network_os
+        # without being a network device. Two live laptops sat at 85% and 61%.
+        dominant_share = (fams.get(dominant, 0) / fam_total) if dominant else 0.0
         out[name] = {
             "device":         name,
             "ip":             d["ip"],
+            "os_family":      dominant,
+            "os_share":       round(dominant_share, 4),
+            "os_families":    fams,
             "alerts":         d["alerts"],
             "max_score":      round(d["max_score"], 3),
             "severity_max":   d["severity_max"],
@@ -2979,24 +3005,38 @@ def _device_similarity(a_sigs: dict, b_sigs: dict) -> tuple:
     return num / (dx * dy), ranked
 
 
-def _device_role(name: str):
-    """(role, why, accounts_seen) for one device, or (None, reason, 0)."""
+def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
+    """(role, why, humans) for one device.
+
+    `humans` is a count of distinct PEOPLE, canonicalised by
+    ueba_entities.human_account — NOT a raw COUNT(DISTINCT username). The first
+    version of this counted raw account strings and promoted four laptops to
+    "server", because the raw count is inflated three- to tenfold by
+    doubled-backslash duplicates of one person, by service and machine
+    accounts, and by Windows per-session pseudo-users.
+
+    `os_family` must be the host's DOMINANT family — see classify_host.
+    """
     if not ENTITIES_AVAILABLE:
         return None, "entities module unavailable", 0
-    seen = 0
+    humans = 0
     try:
-        got = _presence_query(
-            "SELECT COUNT(DISTINCT username) FROM entity_presence "
-            "WHERE kind = 'agent' AND value = ? COLLATE NOCASE", (name,))
-        seen = int(got[0][0] or 0) if got else 0
+        # Capped: the firewall collector carries 33,890 rows and the verdict is
+        # decided long before the cap, so reading them all buys nothing.
+        rows = _presence_query(
+            "SELECT username FROM entity_presence "
+            "WHERE kind = 'agent' AND value = ? COLLATE NOCASE LIMIT 20000",
+            (name,))
+        humans = ueba_entities.count_human_accounts(r[0] for r in rows)
     except Exception:
-        seen = 0
+        humans = 0
     try:
         v = ueba_entities.classify_host(
-            name, ueba_entities.register(_entities_path()), seen)
-        return v.get("role"), v.get("why"), seen
+            name, ueba_entities.register(_entities_path()), humans, os_family,
+            os_share)
+        return v.get("role"), v.get("why"), humans
     except Exception as e:
-        return None, str(e), seen
+        return None, str(e), humans
 
 
 def _device_match(index: dict, name: str):
@@ -3016,10 +3056,11 @@ def api_device_list():
     index = _device_index()
     rows = []
     for name, d in index.items():
-        role, why, seen = _device_role(name)
+        role, why, seen = _device_role(name, d.get("os_family", ""), d.get("os_share", 0.0))
         rows.append({
             "device": name, "ip": d["ip"], "role": role, "role_why": why,
-            "accounts_seen": seen, "alerts": d["alerts"],
+            "os_family": d.get("os_family", ""),
+            "people_seen": seen, "accounts_seen": seen, "alerts": d["alerts"],
             "max_score": d["max_score"], "top_verdict": d["top_verdict"],
             "user_count": d["user_count"], "last_seen": d["last_seen"],
         })
@@ -3048,15 +3089,17 @@ def api_device_summary(name):
         role, why, seen = _device_role(name)
         return jsonify({
             "ok": True, "device": name, "role": role, "role_why": why,
-            "accounts_seen": seen, "alerts": 0, "in_window": False,
+            "people_seen": seen, "accounts_seen": seen,
+            "alerts": 0, "in_window": False,
             "note": "no alerts in the selected window",
             "touched": {}, "presence": {},
         })
 
     d = dict(index[key])
-    role, why, seen = _device_role(key)
+    role, why, seen = _device_role(key, d.get("os_family", ""), d.get("os_share", 0.0))
     d["role"] = role
     d["role_why"] = why
+    d["people_seen"] = seen
     d["accounts_seen"] = seen
     d["in_window"] = True
     d["ok"] = True
@@ -3146,7 +3189,7 @@ def api_device_peers(name):
         their_users = set(d.get("users") or [])
         both = my_users & their_users
         union = my_users | their_users
-        role, why, _ = _device_role(other)
+        role, why, _ = _device_role(other, d.get("os_family", ""), d.get("os_share", 0.0))
         scored.append({
             "device": other, "similarity": round(sim, 4), "role": role,
             "alerts": d["alerts"], "user_count": d["user_count"],
@@ -5571,23 +5614,27 @@ def api_entities_classify():
     if not host:
         return jsonify({"ok": False, "error": "host required"}), 400
     try:
-        seen = 0
+        # The DOMINANT os family for this host, from the device index — the
+        # appliance rule needs the aggregate, never one event's value.
+        fam, share = "", 0.0
         try:
-            # COLLATE NOCASE: the agent rows keep whatever case the
-            # reporting agent used, and an operator typing a host name into
-            # the console should not have to reproduce it.
-            got = _presence_query(
-                "SELECT COUNT(DISTINCT username) FROM entity_presence "
-                "WHERE kind = 'agent' AND value = ? COLLATE NOCASE", (host,))
-            seen = int(got[0][0] or 0) if got else 0
+            idx = _device_index()
+            k = _device_match(idx, host)
+            if k:
+                fam = idx[k].get("os_family", "") or ""
+                share = float(idx[k].get("os_share", 0.0) or 0.0)
         except Exception:
-            seen = 0
+            fam, share = "", 0.0
+        role, why, seen = _device_role(host, fam, share)
         verdict = ueba_entities.classify_host(
-            host, ueba_entities.register(_entities_path()), seen)
+            host, ueba_entities.register(_entities_path()), seen, fam, share)
+        verdict["os_family"] = fam
+        verdict["os_share"] = round(share, 4)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     verdict["ok"] = True
     verdict["host"] = host
+    verdict["people_seen"] = seen
     verdict["accounts_seen"] = seen
     return jsonify(verdict)
 

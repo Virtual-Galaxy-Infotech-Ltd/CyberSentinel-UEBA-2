@@ -35,13 +35,19 @@ export async function loadDeviceRoles() {
 function roleBadge(name) {
   const hit = _roles[String(name || "").toLowerCase()];
   if (!hit || !hit.role) return "";
-  const server = hit.role === "server";
-  const col = server ? "var(--blue, #4aa3ff)" : "var(--text3)";
+  // Three roles, not two. A FortiOS/IOS box is an APPLIANCE: calling the
+  // firewall collector a server would make the whole estate its behaviour,
+  // since every event's user is attributed to it.
+  const col = {
+    server:    "var(--blue, #4aa3ff)",
+    appliance: "var(--orange, #f0883e)",
+    endpoint:  "var(--text3)",
+  }[hit.role] || "var(--text3)";
   const why = String(hit.why || "").replace(/"/g, "&quot;");
   return `<span title="${why}" style="font-family:var(--mono2);font-size:8px;
     letter-spacing:1px;text-transform:uppercase;border:1px solid ${col};
     color:${col};border-radius:3px;padding:0 4px;margin-left:5px;
-    vertical-align:middle;">${server ? "SERVER" : "ENDPOINT"}</span>`;
+    vertical-align:middle;">${hit.role}</span>`;
 }
 
 export function renderOverviewAgents() {

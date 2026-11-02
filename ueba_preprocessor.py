@@ -1522,9 +1522,19 @@ class UserProfileStore:
                     # new whichever way it is read — so the host has gained an
                     # account. See distinct_account_count.
                     if seen == 1:
-                        counts = self._account_counts()
-                        key = value.strip().casefold()
-                        counts[key] = counts.get(key, 0) + 1
+                        # Only a new PERSON raises the host's count. A new
+                        # service account, machine account or session
+                        # pseudo-user is a new row but not a new user, and
+                        # counting it is what broke the breadth rule.
+                        try:
+                            from ueba_entities import human_account
+                            is_person = bool(human_account(user))
+                        except Exception:
+                            is_person = True
+                        if is_person:
+                            counts = self._account_counts()
+                            key = value.strip().casefold()
+                            counts[key] = counts.get(key, 0) + 1
 
                 out[kind] = {"value": value, "first_time": first_time,
                              "distinct": distinct, "events": seen}
@@ -1764,7 +1774,7 @@ class UserProfileStore:
         return cached
 
     def distinct_account_count(self, host: str) -> int:
-        """How many distinct accounts have been seen on this host (SN 30).
+        """How many distinct PEOPLE have been seen on this host (SN 30).
 
         The mirror image of distinct_host_count, off the same kind='agent'
         rows: that table stores (account, host) pairs, so grouping by account
@@ -1791,13 +1801,34 @@ class UserProfileStore:
             return cached
         cached = {}
         try:
-            # GROUP BY the casefolded value, so two spellings of one host are
-            # one host. See distinct_account_count.
-            for value, n in self.conn.execute(
-                    "SELECT LOWER(value), COUNT(DISTINCT username) "
-                    "FROM entity_presence WHERE kind = 'agent' "
-                    "GROUP BY LOWER(value)"):
-                cached[value] = int(n or 0)
+            # Distinct PEOPLE per host, not distinct account strings.
+            #
+            # COUNT(DISTINCT username) was wrong and shipped wrong: the raw
+            # count is inflated three- to tenfold by doubled-backslash
+            # duplicates of one person, service accounts (NT AUTHORITY\*),
+            # machine accounts (trailing $) and Windows per-session pseudo-users
+            # (DWM-178…). Measured on the live store one laptop's eight
+            # "accounts" were ONE person, and the breadth rule in ueba_entities
+            # promoted four laptops to "server" because of it.
+            #
+            # SQL cannot canonicalise that, so the rows are folded in Python.
+            # It runs once per process, like the other counts here.
+            try:
+                from ueba_entities import human_account
+            except Exception:
+                human_account = None
+            people = {}
+            for value, user in self.conn.execute(
+                    "SELECT LOWER(value), username FROM entity_presence "
+                    "WHERE kind = 'agent'"):
+                if human_account is None:
+                    people.setdefault(value, set()).add(user)
+                    continue
+                p = human_account(user)
+                if p:
+                    people.setdefault(value, set()).add(p)
+            for value, names in people.items():
+                cached[value] = len(names)
         except Exception as e:
             _log.debug("account counts unavailable: %s", e)
         self._account_cache = cached

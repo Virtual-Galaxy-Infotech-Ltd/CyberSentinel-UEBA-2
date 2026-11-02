@@ -88,15 +88,74 @@ from pathlib import Path
 BUILTIN_KINDS = ("server", "endpoint", "application")
 CUSTOM_PREFIX = "custom:"
 
-HOST_ROLES = ("server", "endpoint")
-ROLE_SOURCES = ("register", "name_shape", "observed", "default")
+# A network appliance is neither a server nor an endpoint, and calling it
+# either is wrong. cybersentinel-manager reports host.os.family=network_os and
+# carries 24,453 distinct accounts because every firewall event's user lands on
+# it — classify that as a server and its "behaviour" is the whole estate's.
+HOST_ROLES = ("server", "endpoint", "appliance")
+ROLE_SOURCES = ("register", "collector", "name_shape", "human_breadth",
+                "default")
 
-# A host seen authenticating this many distinct accounts is a server whatever
-# its name looks like. Deliberately high: on the local sample sales_Pc (a
-# laptop) carries 3 accounts, while the two real multi-user hosts carry 102 and
-# 11. A low threshold would reclassify laptops that happen to have a support
-# login on them.
-OBSERVED_ACCOUNT_THRESHOLD = 8
+# host.os.family values that mean "network device".
+_APPLIANCE_OS = ("network_os", "fortios", "ios", "ios-xe", "nx-os", "junos",
+                 "panos", "routeros", "screenos", "asa")
+
+# An appliance must pass BOTH of these, because either one alone is wrong.
+#
+# Measured over the full live window, 22 hosts:
+#   cybersentinel-manager   14,858 people   100% network_os   <- the collector
+#   Access-SRV-2.140            21 people     0% network_os
+#   Crypt0n                      4 people    85% network_os   <- a laptop
+#   Himanshu                     1 person    61% network_os   <- a laptop
+#
+# "Dominant network_os" alone made Crypt0n and Himanshu appliances: an ordinary
+# machine whose traffic mostly shows up in firewall records has a majority of
+# network_os events without being a network device. Requiring the share to be
+# near-total excludes both at 85% and 61%.
+#
+# And a host attributed more people than the estate contains is not a machine
+# at all, it is an aggregation point — 14,858 against a next-highest of 21.
+# Either test alone is a guess; together they identify the one real collector
+# and nothing else.
+APPLIANCE_OS_SHARE = 0.95
+APPLIANCE_MIN_PEOPLE = 100
+
+# A host used by this many distinct PEOPLE is a server whatever its name looks
+# like.
+#
+# The first version of this counted raw `username` values and fired at 8, and
+# it was wrong on live data — it promoted laptops (firdous, Rupali, utkarsh_Pc,
+# Nidhi) to "server". Measured on the live presence store, the raw count is
+# inflated several times over by things that are not people:
+#
+#   VGINFO\\nidhi.choudhari  |  nidhi.choudhari  |  VGINFO\nidhi.choudhari
+#        the SAME person three times, because the doubled-backslash escaping
+#        from the sync bridge makes one account look like several
+#   NT AUTHORITY\SYSTEM, LOCAL SERVICE, NETWORK SERVICE     service accounts
+#   VGSOC-LAP04$                                            a machine account
+#   DWM-178 … DWM-206, UMFD-0                  Windows per-session pseudo-users
+#   host:Nidhi                                 not an account at all
+#
+# Nidhi's eight "accounts" are ONE person. Counting canonical humans instead
+# separates the estate cleanly: every laptop measured 1-4, while the real
+# multi-user server measured 21. 10 sits in that gap with room either side.
+HUMAN_BREADTH_THRESHOLD = 10
+
+# Kept as an alias so an older caller passing the previous name still works.
+OBSERVED_ACCOUNT_THRESHOLD = HUMAN_BREADTH_THRESHOLD
+
+# Account strings that are not a person. Measured against the live store; each
+# entry is there because it was actually inflating a host's count.
+_NONHUMAN_PREFIX = ("nt authority\\", "nt service\\", "nt virtual machine\\",
+                    "iis apppool\\", "window manager\\",
+                    "font driver host\\")
+_NONHUMAN_EXACT = {"system", "local service", "network service", "local system",
+                   "localsystem", "anonymous logon", "-", "unknown", ""}
+# DWM-<n> and UMFD-<n> are one per desktop session, so an ordinary Windows
+# machine accumulates dozens; `host:`/`ip:` are typed entity keys, not accounts.
+_PSEUDO_ACCOUNT = re.compile(
+    r"^(?:dwm|umfd)-\d+$|^(?:host|ip|endpoint|external|device|addr|agent|name):",
+    re.I)
 
 # Distinct values a single kind may accumulate before it is suspended. A field
 # the operator picked badly (a process id, a timestamp) is unbounded, and
@@ -138,10 +197,25 @@ def _leaf_words(leaf: str) -> list:
 # Server name shapes. Anchored on a separator or a boundary so "srv" matches
 # DC_DIR_srv, APP-SRV-01 and kafka-broker1's "kafka", but not a person called
 # "Sarah".
-_SERVER_SHAPE = re.compile(
-    r"(?:^|[-_.])(srv|server|svr|dc|ad|db|sql|pg|postgres|mysql|oracle|kafka|"
-    r"redis|mongo|web|www|http|app|api|mail|smtp|exch|nas|san|vm|esx|hv|node|"
-    r"gw|fw|vpn|proxy|dns|dhcp|ntp|lb|bkp|backup|jenkins|git|ci)"
+# Server name shapes, in two patterns because the tokens are not equally safe.
+#
+# LONG tokens are unambiguous, so a camelCase boundary counts: MDM_ServerAnsh
+# is a server and the separator-only rule missed it, because "Server" is
+# followed by a letter rather than a separator or a digit.
+#
+# SHORT tokens (dc, ad, db, vm, gw…) are two letters and appear inside ordinary
+# words, so they still require a separator or digit on both sides. Allowing a
+# camelCase boundary for them would read "ADMinThing" as a domain controller.
+# The token matches case-insensitively via a SCOPED flag, so the trailing
+# [A-Z] can still act as a camelCase boundary. A whole-pattern re.I would make
+# that boundary match any letter and "serverless" would read as a server.
+_SERVER_SHAPE_LONG = re.compile(
+    r"(?:^|[-_.])((?i:srv|server|svr|postgres|mysql|oracle|kafka|redis|mongo|"
+    r"jenkins|proxy|backup|exch|esx))"
+    r"(?:$|[-_.0-9]|[A-Z])")
+_SERVER_SHAPE_SHORT = re.compile(
+    r"(?:^|[-_.])(dc|ad|db|sql|pg|web|www|http|app|api|mail|smtp|nas|san|vm|"
+    r"hv|node|gw|fw|vpn|dns|dhcp|ntp|lb|bkp|git|ci)"
     r"(?:$|[-_.0-9])",
     re.I)
 
@@ -226,6 +300,53 @@ def normalise(value, kind: str = "") -> str:
     else:
         s = s.strip().casefold()
     return s
+
+
+def human_account(raw) -> str:
+    r"""The canonical PERSON behind an account string, or "" if it is not one.
+
+    This is the fix for the misclassification the first version of this module
+    shipped. Four things have to happen in order, and skipping any of them
+    inflates a host's apparent user count:
+
+      1. DE-ESCAPE. The sync bridge doubles backslashes depending on how many
+         JSON hops an event took, so one person arrives as both
+         `VGINFO\\name` and `VGINFO\name`.
+      2. DROP NON-HUMANS. Service accounts, machine accounts (trailing `$`),
+         Windows per-session pseudo-users (DWM-178, UMFD-0) and typed entity
+         keys (`host:`, `ip:`) are not people.
+      3. STRIP THE DOMAIN. `VGINFO\name` and a bare `name` are one person.
+      4. RE-CHECK the tail, because a qualified name can still resolve to a
+         non-human: `SOMEDOMAIN\SYSTEM` passes step 2 and must not pass here.
+    """
+    s = _deescape(str(raw or "").strip())
+    low = s.casefold()
+    if low in _NONHUMAN_EXACT:
+        return ""
+    if any(low.startswith(p) for p in _NONHUMAN_PREFIX):
+        return ""
+    if _PSEUDO_ACCOUNT.search(low) or low.endswith("$"):
+        return ""
+    tail = s.rsplit("\\", 1)[-1].strip().casefold()
+    if (not tail or tail in _NONHUMAN_EXACT
+            or _PSEUDO_ACCOUNT.search(tail) or tail.endswith("$")):
+        return ""
+    return tail
+
+
+def count_human_accounts(accounts) -> int:
+    """How many distinct PEOPLE these account strings represent."""
+    return len({h for h in (human_account(a) for a in (accounts or [])) if h})
+
+
+def appliance_os(os_family) -> str:
+    """The os.family value marking this as a network appliance, or "".
+
+    Separate from the role decision so a caller can report WHICH value decided
+    it rather than just the verdict.
+    """
+    v = str(os_family or "").strip().casefold().replace(" ", "_")
+    return v if v in _APPLIANCE_OS else ""
 
 
 def check_field(field: str) -> tuple:
@@ -431,20 +552,40 @@ def set_host_role(path, host: str, role: str) -> tuple:
 # ── classification ──────────────────────────────────────────────────────────
 
 def classify_host(name, reg: "dict | None" = None,
-                  accounts_seen: int = 0) -> dict:
+                  humans_seen: int = 0, os_family: str = "",
+                  os_share: float = 1.0) -> dict:
     """{'role', 'source', 'why'} for one host name.
 
-    Precedence: operator register, then name shape, then observed breadth,
-    then endpoint.
+    Precedence, and each step is here because a weaker one got something wrong:
 
-    Name shape sits ABOVE observed activity here, which is the reverse of
-    ueba_privilege's order, and the local sample is why: of the five hosts
-    carrying three or more accounts, one (sales_Pc) is a laptop, while
-    kafka-broker1 is a broker that carries only two. Shape agreed with the
-    estate on all twelve hosts; account count did not. Observed breadth is
-    kept as a backstop for a server whose name says nothing, at a threshold
-    (%d) that no laptop in the sample reaches.
-    """ % OBSERVED_ACCOUNT_THRESHOLD
+      1. OPERATOR REGISTER   always wins; the classifier is a default.
+      2. OS FAMILY           a FortiOS/IOS/JunOS box is an APPLIANCE, not a
+                             server. The firewall collector in this estate
+                             carries 24,453 distinct accounts because every
+                             event's user lands on it, and calling that a
+                             server makes the whole estate its "behaviour".
+
+                             `os_family` MUST be the host's DOMINANT value,
+                             not one event's. Measured on live data, two
+                             Windows hosts carry a minority of network_os
+                             events (538 windows vs 29, and 39 vs 33) because
+                             firewall records get attributed to whichever host
+                             reported them. Passing a single event's value
+                             would make those two appliances.
+      3. NAME SHAPE          catches the servers whose names say so, including
+                             the ones only one person logs into.
+      4. HUMAN BREADTH       catches a multi-user server with no naming
+                             convention. Counted as distinct PEOPLE, not raw
+                             account strings — see human_account(). The raw
+                             count is inflated three- to tenfold by escaping
+                             duplicates, service and machine accounts and
+                             Windows session pseudo-users, and counting it
+                             promoted four laptops to "server" on live data.
+      5. ENDPOINT            the default.
+
+    `humans_seen` is a count of PEOPLE. Passing a raw account count here is the
+    mistake this signature was renamed to make obvious.
+    """
     n = normalise(name)
     if not n:
         return {"role": "", "source": "", "why": "no host on the event"}
@@ -455,16 +596,37 @@ def classify_host(name, reg: "dict | None" = None,
             return {"role": role, "source": "register",
                     "why": "operator tagged %s as %s" % (n, role)}
 
-    tokens = [t for t in _SERVER_SHAPE.findall(n)
+    appl = appliance_os(os_family)
+    if appl and os_share >= APPLIANCE_OS_SHARE and humans_seen >= APPLIANCE_MIN_PEOPLE:
+        return {"role": "appliance", "source": "collector",
+                "why": "%.0f%% of its events are %s and %d distinct people are "
+                       "attributed to it — an aggregation point, not a host "
+                       "people log into"
+                       % (os_share * 100, appl, humans_seen)}
+
+    # The long pattern is run against the ORIGINAL spelling so its camelCase
+    # boundary can see the capital; the short one against the folded name.
+    raw = _deescape(str(name or "").strip())
+    tokens = [t for t in (_SERVER_SHAPE_LONG.findall(raw)
+                          + _SERVER_SHAPE_LONG.findall(n)
+                          + _SERVER_SHAPE_SHORT.findall(n))
               if not _SERVER_SHAPE_EXCEPT.match(t)]
+    tokens = sorted(set(t.lower() for t in tokens))
     if tokens:
         return {"role": "server", "source": "name_shape",
                 "why": "name contains %s" % ", ".join(repr(t) for t in tokens)}
 
-    if accounts_seen >= OBSERVED_ACCOUNT_THRESHOLD:
-        return {"role": "server", "source": "observed",
-                "why": "%d distinct accounts seen on it" % accounts_seen}
+    if humans_seen >= HUMAN_BREADTH_THRESHOLD:
+        return {"role": "server", "source": "human_breadth",
+                "why": "%d distinct people have used it (threshold %d)"
+                       % (humans_seen, HUMAN_BREADTH_THRESHOLD)}
 
+    if humans_seen:
+        return {"role": "endpoint", "source": "default",
+                "why": "only %d distinct %s used it, and the name carries no "
+                       "server signal"
+                       % (humans_seen, "person has" if humans_seen == 1
+                          else "people have")}
     return {"role": "endpoint", "source": "default",
             "why": "no server signal"}
 
@@ -741,19 +903,121 @@ def selftest() -> int:
     ok("an 'adam' laptop is not a server by its 'ad'",
        classify_host("adam")["role"] == "endpoint")
     ok("no host yields no role", classify_host("")["role"] == "")
-    ok("observed breadth promotes a shapeless host",
-       classify_host("blobby", accounts_seen=40)["role"] == "server")
-    ok("observed source is reported",
-       classify_host("blobby", accounts_seen=40)["source"] == "observed")
-    ok("three accounts is not enough to promote a laptop",
-       classify_host("sales_Pc", accounts_seen=3)["role"] == "endpoint")
+    ok("human breadth promotes a shapeless host",
+       classify_host("blobby", humans_seen=40)["role"] == "server")
+    ok("the breadth source is reported",
+       classify_host("blobby", humans_seen=40)["source"] == "human_breadth")
+    ok("and the count is quoted",
+       "40 distinct people" in classify_host("blobby", humans_seen=40)["why"])
+    ok("three people is not enough to promote a laptop",
+       classify_host("sales_Pc", humans_seen=3)["role"] == "endpoint")
+    ok("and the reason says how few",
+       "3 distinct people" in classify_host("sales_Pc", humans_seen=3)["why"])
+    ok("one person reads in the singular",
+       "1 distinct person has" in classify_host("sales_Pc", humans_seen=1)["why"])
+    # The regression this rebuild exists for: every one of these laptops was
+    # promoted to "server" by the previous raw-account rule at its threshold
+    # of 8. Their real human counts, measured on the live store, are 1-3.
+    for host, humans in (("firdous", 3), ("rupali", 1), ("utkarsh_pc", 3),
+                         ("nidhi", 1), ("rupen_primary", 2), ("monish", 1)):
+        v = classify_host(host, None, humans)
+        ok("live laptop stays an endpoint: %s" % host, v["role"] == "endpoint")
+    # ...while the host that genuinely is multi-user is promoted.
+    ok("a genuinely multi-user host is a server",
+       classify_host("someshapelesshost", None, 21)["role"] == "server")
+
+    # ── appliances: BOTH tests required ──
+    ap = classify_host("collector", None, 14858, "network_os", 1.0)
+    ok("a near-total network_os collector is an appliance",
+       ap["role"] == "appliance")
+    ok("and the source says collector", ap["source"] == "collector")
+    ok("and the reason gives both numbers",
+       "100%" in ap["why"] and "14858" in ap["why"])
+    # The two live laptops that the share-only rule got wrong.
+    ok("85% network_os with 4 people is NOT an appliance",
+       classify_host("crypt0n", None, 4, "network_os", 0.85)["role"]
+       == "endpoint")
+    ok("61% network_os with 1 person is NOT an appliance",
+       classify_host("himanshu", None, 1, "network_os", 0.61)["role"]
+       == "endpoint")
+    # NB the host name here must carry no server token of its own — an earlier
+    # version of this check used "small-fw" and matched on 'fw' before the
+    # appliance test was ever reached.
+    ok("100% network_os but only 4 people is NOT an appliance",
+       classify_host("quietbox", None, 4, "network_os", 1.0)["role"]
+       == "endpoint")
+    ok("many people but only 61% network_os is NOT an appliance",
+       classify_host("busy", None, 9999, "network_os", 0.61)["role"]
+       == "server")
+    ok("an ordinary windows host is not an appliance",
+       classify_host("laptop-a", None, 2, "windows", 0.0)["role"] == "endpoint")
+    ok("an unknown os family decides nothing",
+       classify_host("laptop-a", None, 2, "weird", 1.0)["role"] == "endpoint")
+    ok("appliance_os reports which value matched",
+       appliance_os("NETWORK_OS") == "network_os")
+    ok("and nothing for a normal os", appliance_os("windows") == "")
+
+    # ── name shape: camelCase on long tokens, separators only on short ones ──
+    ok("a camelCase long token is caught",
+       classify_host("MDM_ServerAnsh")["role"] == "server")
+    ok("upper-case too", classify_host("MDM_SERVERAnsh")["role"] == "server")
+    ok("srv in camelCase is caught",
+       classify_host("app_srvNode")["role"] == "server")
+    # The word that must NOT match: a trailing letter is only a boundary when
+    # it is a capital, so "serverless" is not a server.
+    ok("serverless is not a server",
+       classify_host("serverless-fn")["role"] == "endpoint")
+    ok("a short token still needs a real boundary",
+       classify_host("ADMinThing")["role"] == "endpoint")
+    ok("and adam is still not a domain controller",
+       classify_host("adam")["role"] == "endpoint")
+    ok("a short token with a separator still works",
+       classify_host("DC_ATM_SRV")["role"] == "server")
+
+    # ── human_account ──
+    ok("a plain name is a person", human_account("jane.doe") == "jane.doe")
+    ok("a domain is stripped", human_account("VGINFO\\jane.doe") == "jane.doe")
+    ok("a doubled-escape domain is stripped too",
+       human_account("VGINFO\\\\jane.doe") == "jane.doe")
+    ok("all three spellings are one person",
+       len({human_account("VGINFO\\\\n.c"), human_account("VGINFO\\n.c"),
+            human_account("n.c")}) == 1)
+    for nonhuman in ("NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\\\LOCAL SERVICE",
+                     "NT SERVICE\\MSSQL", "NT VIRTUAL MACHINE\\4D02C33E",
+                     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
+                     "VGSOC-LAP04$", "DWM-178", "UMFD-0", "host:Nidhi",
+                     "ip:10.0.0.1", "external:1.2.3.4", "ANONYMOUS LOGON",
+                     "-", ""):
+        ok("not a person: %s" % (nonhuman or "(empty)"),
+           human_account(nonhuman) == "")
+    ok("a qualified service account is still rejected",
+       human_account("SOMEDOMAIN\\SYSTEM") == "")
+    ok("a qualified machine account is still rejected",
+       human_account("SOMEDOMAIN\\HOST$") == "")
+    ok("counting collapses one person's spellings",
+       count_human_accounts(["VGINFO\\\\n.c", "VGINFO\\n.c", "n.c"]) == 1)
+    ok("counting excludes the non-humans",
+       count_human_accounts(["VGINFO\\\\n.c", "NT AUTHORITY\\\\SYSTEM",
+                             "VGSOC-LAP04$", "DWM-1", "host:X"]) == 1)
+    ok("counting nothing is zero", count_human_accounts([]) == 0)
+    ok("counting None is zero", count_human_accounts(None) == 0)
+    # The exact live case, start to finish.
+    nidhi = ["VGINFO\\\\nidhi.choudhari", "host:Nidhi",
+             "NT AUTHORITY\\\\SYSTEM", "VGSOC-LAP04$", "nidhi.choudhari",
+             "NT AUTHORITY\\\\NETWORK SERVICE", "VGINFO\\nidhi.choudhari",
+             "NT AUTHORITY\\\\LOCAL SERVICE"]
+    ok("the live Nidhi case counts as one person",
+       count_human_accounts(nidhi) == 1)
+    ok("and therefore stays an endpoint",
+       classify_host("nidhi", None, count_human_accounts(nidhi))["role"]
+       == "endpoint")
     reg = {"hosts": {"sales_pc": "server", "app-srv-01": "endpoint"}}
     ok("the register overrides the default",
        classify_host("sales_Pc", reg)["role"] == "server")
     ok("the register overrides the shape too",
        classify_host("APP-SRV-01", reg)["role"] == "endpoint")
     ok("the register overrides observed breadth",
-       classify_host("APP-SRV-01", reg, accounts_seen=99)["role"] == "endpoint")
+       classify_host("APP-SRV-01", reg, 99)["role"] == "endpoint")
     ok("register is reported as the source",
        classify_host("sales_Pc", reg)["source"] == "register")
 
@@ -932,7 +1196,7 @@ def selftest() -> int:
         ok("status is explicit that no data-asset kind is offered",
            "not offered" in st["data_asset_kind"])
 
-    total = 97
+    total = 168
     if failures:
         print("ueba_entities selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:
