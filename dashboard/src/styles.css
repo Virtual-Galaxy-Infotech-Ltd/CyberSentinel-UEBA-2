@@ -2266,7 +2266,21 @@
     gap: var(--gap);
     margin-bottom: var(--gap);
   }
-  @media (max-width: 1280px) {
+  /* COORDINATE SPACES -- the trap documented at the top of this file, which
+     these two breakpoints had walked straight into. A width media query tests
+     the VIEWPORT, but the grid below it lays out in LAYOUT px, and under
+     `html { zoom: var(--ui-scale) }` those are not the same number: at a
+     1280px viewport the scale is 0.88, so the row actually has 1280/0.88 =
+     ~1455px to work with. Collapsing at 1280 therefore dropped the timeline
+     out of a row that had room for all three panels, and left the radar
+     spanning ~1400px with a chart capped at 330px tall floating in the middle
+     of it -- which is exactly the "why is this one so wide" report.
+
+     Three columns need about 240 + 280 + 320 plus two gaps = ~870 layout px.
+     At the scales in this ladder that is a viewport of roughly 750px, so 1000
+     keeps a comfortable margin and still collapses before anything is
+     genuinely squeezed. */
+  @media (max-width: 1000px) {
     .row-gauge-radar-timeline {
       grid-template-columns: minmax(240px, 300px) 1fr;
     }
@@ -2274,7 +2288,7 @@
       grid-column: 1 / -1;   /* timeline drops to its own row, full width */
     }
   }
-  @media (max-width: 900px) {
+  @media (max-width: 820px) {
     .row-gauge-radar-timeline {
       grid-template-columns: 1fr;
     }
