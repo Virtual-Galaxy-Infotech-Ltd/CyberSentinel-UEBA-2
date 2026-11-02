@@ -312,6 +312,12 @@ class AuthStore:
         ("password_set_at", "TEXT"),
         ("failed_logins",   "INTEGER NOT NULL DEFAULT 0"),
         ("locked_until",    "INTEGER NOT NULL DEFAULT 0"),
+        # RFP SN 7. The device set / subnet an administrator is limited to,
+        # stored as JSON. Scope is ORTHOGONAL to role — see ueba_scope — so
+        # this is a new column rather than a new rung on the role ladder, and
+        # the default of NULL means unrestricted, which is every existing
+        # account's current authority. Nothing changes on migration.
+        ("scope_json",      "TEXT"),
     )
 
     def __init__(self, db_path: str):
@@ -496,9 +502,65 @@ class AuthStore:
             rows = self._conn.execute(
                 "SELECT sub, username, email, display_name, role, role_pinned, "
                 "active, created_at, last_login, locked_until, failed_logins, "
-                "(password_hash IS NOT NULL) AS has_password "
+                "scope_json, (password_hash IS NOT NULL) AS has_password "
                 "FROM users ORDER BY username").fetchall()
         return [dict(r) for r in rows]
+
+    def get_scope(self, sub: str) -> dict:
+        """The device set / subnet this account is limited to (RFP SN 7).
+
+        An empty scope means UNRESTRICTED, which is every existing account's
+        authority — see ueba_scope for why that direction was chosen. A
+        corrupt value also reads as empty rather than raising: a scope that
+        cannot be parsed must not be able to lock an administrator out of the
+        console, and an unparseable restriction is not a restriction.
+        """
+        row = None
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT scope_json FROM users WHERE sub = ?", (sub,)).fetchone()
+            except sqlite3.Error:
+                return {"devices": [], "subnets": []}
+        raw = (row["scope_json"] if row else None) or ""
+        if not str(raw).strip():
+            return {"devices": [], "subnets": []}
+        try:
+            d = json.loads(raw)
+        except Exception:
+            return {"devices": [], "subnets": []}
+        return {"devices": list(d.get("devices") or []),
+                "subnets": list(d.get("subnets") or [])}
+
+    def set_scope(self, sub: str, scope: dict | None) -> dict:
+        """Replace this account's scope. None or empty clears it."""
+        devices = list((scope or {}).get("devices") or [])
+        subnets = list((scope or {}).get("subnets") or [])
+        payload = (None if not (devices or subnets)
+                   else json.dumps({"devices": devices, "subnets": subnets}))
+        with self._lock:
+            self._conn.execute("UPDATE users SET scope_json=? WHERE sub=?",
+                               (payload, sub))
+            self._conn.commit()
+        return {"devices": devices, "subnets": subnets}
+
+    def scoped_admins(self) -> list[dict]:
+        """Every account that carries a restriction, for the console."""
+        out = []
+        for u in self.list_users():
+            raw = (u.get("scope_json") or "").strip()
+            if not raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            if (d.get("devices") or d.get("subnets")):
+                out.append({"sub": u["sub"], "username": u.get("username"),
+                            "role": u.get("role"),
+                            "scope": {"devices": list(d.get("devices") or []),
+                                      "subnets": list(d.get("subnets") or [])}})
+        return out
 
     def update_user(self, sub: str, *, role: str | None = None,
                     active: int | None = None, display_name: str | None = None,
@@ -779,6 +841,27 @@ def current_user() -> dict | None:
             user = store.touch_session(tok, int(_cfg().get("session_idle_secs") or 0))
     g._ueba_user = user
     return user
+
+
+def current_scope() -> dict:
+    """The scope restricting this request's user (RFP SN 7).
+
+    Empty when unrestricted, when nobody is authenticated, or when
+    enforcement is off — so a caller can always ask and an unenforced
+    deployment behaves exactly as it did before scopes existed.
+    """
+    if hasattr(g, "_ueba_scope"):
+        return g._ueba_scope
+    scope = {"devices": [], "subnets": []}
+    try:
+        user = current_user()
+        store = _store()
+        if user and store is not None:
+            scope = store.get_scope(user.get("sub") or "")
+    except Exception:
+        scope = {"devices": [], "subnets": []}
+    g._ueba_scope = scope
+    return scope
 
 
 def is_enforcing() -> bool:

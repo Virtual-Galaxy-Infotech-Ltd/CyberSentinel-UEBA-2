@@ -216,6 +216,73 @@ async function changeMyUsername() {
 }
 
 // ── User management (admin) ──────────────────────────────────────────────────
+// RFP SN 7. Scope is orthogonal to role: the role select says what an account
+// may do, this says what it may do it TO. Empty means unrestricted, which is
+// every account until an admin narrows one — so the column reads "all" rather
+// than "none", because "none" would suggest the opposite of what it means.
+let _scopes = {};        // sub -> {devices, subnets}
+let _mayScope = false;   // only an UNRESTRICTED admin may change a scope
+
+async function loadScopes() {
+  try {
+    const r = await fetch("/api/scopes", { credentials: "same-origin" });
+    if (!r.ok) { _scopes = {}; _mayScope = false; return; }
+    const d = await r.json();
+    _mayScope = !!d.may_administer;
+    _scopes = {};
+    (d.scoped || []).forEach((row) => { _scopes[row.sub] = row.scope; });
+  } catch {
+    _scopes = {};
+    _mayScope = false;
+  }
+}
+
+function scopeText(sub) {
+  const sc = _scopes[sub];
+  if (!sc) return "all";
+  const bits = [];
+  if ((sc.devices || []).length) bits.push(`${sc.devices.length} device`);
+  if ((sc.subnets || []).length) bits.push(`${sc.subnets.length} subnet`);
+  return bits.join(" + ") || "all";
+}
+
+async function editScope(sub, name) {
+  const sc = _scopes[sub] || { devices: [], subnets: [] };
+  const cur = [...(sc.devices || []), ...(sc.subnets || [])].join(", ");
+  const raw = window.prompt(
+    `Limit ${name} to particular devices or subnets.\n\n` +
+    `Comma-separated. Device names may use * (dc_*, *-lap??); ` +
+    `subnets are CIDR (10.0.5.0/24).\n\n` +
+    `Leave EMPTY to remove the limit and restore full authority.`, cur);
+  if (raw === null) return;
+
+  // Split on the shape rather than asking the admin which kind each entry is:
+  // anything containing a slash or parsing as an address is a subnet.
+  const devices = [];
+  const subnets = [];
+  raw.split(",").map((x) => x.trim()).filter(Boolean).forEach((x) => {
+    if (x.includes("/") || /^[0-9.]+$/.test(x) || x.includes(":")) subnets.push(x);
+    else devices.push(x);
+  });
+
+  try {
+    const r = await fetch("/api/scopes", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sub, scope: { devices, subnets } }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
+    showToast(devices.length || subnets.length
+      ? `${name} is now ${d.description}.`
+      : `${name} is unrestricted again.`, "ok");
+    loadUsers();
+  } catch (e) {
+    showToast(String(e.message || e), "error");
+  }
+}
+
 export async function loadUsers() {
   try {
     const r = await fetch("/api/auth/users", { credentials: "same-origin" });
@@ -224,6 +291,7 @@ export async function loadUsers() {
     if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
     _users = d.users || [];
     _roles = d.roles || _roles;
+    await loadScopes();
   } catch (e) {
     _users = null;
     console.warn("[ueba] user list failed:", e);
@@ -238,11 +306,11 @@ function renderUsers() {
   if (badge) badge.textContent = _users ? _users.length : 0;
 
   if (_users === null) {
-    tb.innerHTML = `<tr><td colspan="7" class="wl-empty">Could not load accounts.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="8" class="wl-empty">Could not load accounts.</td></tr>`;
     return;
   }
   if (!_users.length) {
-    tb.innerHTML = `<tr><td colspan="7" class="wl-empty">No accounts yet — use the form above to
+    tb.innerHTML = `<tr><td colspan="8" class="wl-empty">No accounts yet — use the form above to
       create one. The first account should be an <b>Admin</b>, or nobody will be able to manage
       the rest.</td></tr>`;
     return;
@@ -256,6 +324,9 @@ function renderUsers() {
         <td><b>${esc(u.username || u.sub)}</b>${u.locked ? ' <span class="wl-badge">LOCKED</span>' : ""}</td>
         <td>${u.is_local ? "local" : "sso"}</td>
         <td><select class="wl-input set-role" data-sub="${esc(u.sub)}">${opts}</select></td>
+        <td>${_mayScope
+              ? `<button class="fp-btn-inline" data-act="scope" data-sub="${esc(u.sub)}" data-name="${esc(u.username || u.sub)}">${esc(scopeText(u.sub))}</button>`
+              : esc(scopeText(u.sub))}</td>
         <td>${u.active ? "yes" : "no"}</td>
         <td>${u.has_password ? "yes" : "—"}</td>
         <td>${esc(fmtWhen(u.last_login))}</td>
@@ -292,6 +363,8 @@ function renderUsers() {
           else patchUser(sub, { password: pw },
                          "Password reset; their sessions were signed out.");
         }
+      } else if (act === "scope") {
+        editScope(sub, b.dataset.name);
       } else if (act === "delete") {
         if (window.confirm(`Delete the account "${b.dataset.name}"?\n\nThis cannot be undone.`)) {
           deleteUser(sub, b.dataset.name);

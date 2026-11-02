@@ -91,6 +91,14 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# Scoped administrator authority (RFP SN 7). Optional likewise.
+try:
+    import ueba_scope  # type: ignore
+    SCOPE_AVAILABLE = True
+except Exception:
+    ueba_scope = None
+    SCOPE_AVAILABLE = False
+
 # SOAR and SIEM integration (RFP SN 3). Optional likewise.
 try:
     import ueba_soar  # type: ignore
@@ -2382,8 +2390,15 @@ def _build_incidents(alerts, win_min: int):
 
 @app.route("/api/agents")
 def agents():
-    """Agent (endpoint) summary — all registered agents, merged with alert stats."""
-    return jsonify(_cached_endpoint("agents", _build_agents))
+    """Agent (endpoint) summary — all registered agents, merged with alert stats.
+
+    Scope-filtered AFTER the cache (RFP SN 7). The cached builder output is
+    shared across callers, so filtering inside it would store one
+    administrator's view and serve it to the next.
+    """
+    return jsonify(_scope_filter(
+        _cached_endpoint("agents", _build_agents),
+        device_keys=("agent",), address_keys=("ip",)))
 
 
 def _build_agents(alerts):
@@ -2473,6 +2488,7 @@ def _build_agents(alerts):
 
     result.sort(key=lambda x: (-x["highly_anomalous"], -x["max_score"]))
     return result
+
 
 
 # Register the heavy endpoint builders so the background warmer keeps the result
@@ -2994,6 +3010,7 @@ def api_device_list():
             "max_score": d["max_score"], "top_verdict": d["top_verdict"],
             "user_count": d["user_count"], "last_seen": d["last_seen"],
         })
+    rows = _scope_filter(rows, device_keys=("device",), address_keys=("ip",))
     rows.sort(key=lambda r: (-r["alerts"], r["device"]))
     return jsonify({"ok": True, "count": len(rows), "devices": rows})
 
@@ -3007,6 +3024,9 @@ def api_device_summary(name):
     Duplicating that here would make the summary the heaviest call in a device
     page load for data the table fetches anyway.
     """
+    bad = _require_scope(device=name)
+    if bad:
+        return bad
     index = _device_index()
     key = _device_match(index, name)
     if key is None:
@@ -3079,6 +3099,9 @@ def api_device_peers(name):
     except (TypeError, ValueError):
         limit = 5
 
+    bad = _require_scope(device=name)
+    if bad:
+        return bad
     index = _device_index()
     key = _device_match(index, name)
     if key is None:
@@ -3127,6 +3150,9 @@ def api_device_peers(name):
             "shared_accounts": sorted(u for u in both if u)[:10],
             "account_overlap": round(len(both) / len(union), 4) if union else 0.0,
         })
+    # A peer outside the caller's scope is removed, not ranked lower: naming
+    # it would leak the hostname the scope was withholding.
+    scored = _scope_filter(scored, device_keys=("device",), address_keys=())
     scored.sort(key=lambda p: -p["similarity"])
 
     return jsonify({
@@ -3528,6 +3554,169 @@ def _require_cap(cap):
     def _passthrough(fn):
         return fn
     return _passthrough
+
+
+# ── Scoped administrator authority (RFP SN 7) ────────────────────────────────
+#
+# Scope is orthogonal to role: the role says what an account may do, the scope
+# says what it may do it TO. An admin with no scope is unrestricted, which is
+# every existing account, so nothing changes until an operator sets one. See
+# ueba_scope for why this is not a new rung on the role ladder.
+#
+# Enforced in two places, because one is not enough:
+#   _require_scope   refuses a WRITE whose target is outside scope, 403.
+#   _scope_filter    removes out-of-scope rows from a READ. Absent, not
+#                    marked — a row whose existence is visible has already
+#                    leaked the hostname or address the scope was withholding.
+
+def _current_scope() -> dict:
+    """The scope restricting this request, or empty for unrestricted."""
+    if not (SCOPE_AVAILABLE and AUTH_MODULE_AVAILABLE and _rbac_enforcing()):
+        return {"devices": [], "subnets": []}
+    try:
+        return ueba_auth.current_scope()
+    except Exception:
+        # Fail OPEN here, deliberately, and only here: this path runs while
+        # enforcement is on, and a scope lookup that errors must not lock the
+        # estate's administrators out of their own console. The write gate
+        # below fails CLOSED, which is where the safety actually lives.
+        return {"devices": [], "subnets": []}
+
+
+def _scope_restricted() -> bool:
+    return SCOPE_AVAILABLE and ueba_scope.is_restricted(_current_scope())
+
+
+def _require_scope(device=None, address=None):
+    """None when the caller may act on this target, else a 403 response.
+
+    Returns rather than raises so a route reads
+    `bad = _require_scope(...); if bad: return bad` — explicit at every call
+    site, which matters for a gate whose absence is invisible.
+    """
+    if not _scope_restricted():
+        return None
+    verdict = ueba_scope.covers(_current_scope(), device, address)
+    if verdict["allowed"]:
+        return None
+    return jsonify({"ok": False, "error": "outside your administrative scope",
+                    "detail": verdict["why"],
+                    "scope": ueba_scope.describe(_current_scope())}), 403
+
+
+def _scope_filter(rows, device_keys=("device", "agent", "host", "name"),
+                  address_keys=("ip", "address", "host_ip")):
+    """Rows this caller may see. A no-op when unrestricted."""
+    if not _scope_restricted():
+        return rows
+    return ueba_scope.filter_rows(_current_scope(), rows,
+                                  device_keys=device_keys,
+                                  address_keys=address_keys)
+
+
+def _may_administer_scopes() -> bool:
+    """Only an UNRESTRICTED admin may create or change a scope.
+
+    A scoped admin who could edit scopes would widen their own, and admin is
+    the role that manages users — so this is the predicate that stops every
+    device admin holding the key to their own cage.
+    """
+    if not SCOPE_AVAILABLE:
+        return False
+    if not _rbac_enforcing():
+        # Not enforcing means no roles are live at all, so scope management is
+        # as open as everything else is today.
+        return True
+    try:
+        return ueba_scope.may_administer_scopes(ueba_auth.current_user(),
+                                                _current_scope())
+    except Exception:
+        return False
+
+
+@app.route("/api/scopes")
+def api_scopes_list():
+    """Who is restricted, and to what (RFP SN 7)."""
+    if not SCOPE_AVAILABLE:
+        return jsonify({"ok": False, "error": "scope module unavailable",
+                        "scoped": []}), 503
+    mine = _current_scope()
+    out = {
+        "ok": True,
+        "kinds": list(ueba_scope.SCOPE_KINDS),
+        "enforcing": _rbac_enforcing(),
+        "your_scope": mine,
+        "your_scope_label": ueba_scope.label(mine),
+        "your_scope_description": ueba_scope.describe(mine),
+        "may_administer": _may_administer_scopes(),
+        "notes": ueba_scope.status(),
+        "scoped": [],
+    }
+    # The roster of other people's scopes is itself administrative
+    # information, so only an unrestricted admin sees it.
+    if out["may_administer"] and AUTH_MODULE_AVAILABLE:
+        try:
+            store = ueba_auth._store()
+            if store is not None:
+                out["scoped"] = [
+                    dict(r, label=ueba_scope.label(r["scope"]),
+                         description=ueba_scope.describe(r["scope"]))
+                    for r in store.scoped_admins()]
+        except Exception as e:
+            out["error"] = str(e)
+    return jsonify(out)
+
+
+@app.route("/api/scopes", methods=["POST"])
+@_require_cap("users.manage")
+def api_scopes_set():
+    """Restrict an administrator to a device set or a subnet (RFP SN 7).
+
+    Gated twice: the users.manage capability AND an unrestricted scope of the
+    caller's own. The second is the one that matters.
+    """
+    if not SCOPE_AVAILABLE:
+        return jsonify({"ok": False, "error": "scope module unavailable"}), 503
+    if not _may_administer_scopes():
+        return jsonify({"ok": False,
+                        "error": "only an administrator with no scope of their "
+                                 "own may set another account's scope"}), 403
+    if not AUTH_MODULE_AVAILABLE:
+        return jsonify({"ok": False, "error": "auth module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    sub = (body.get("sub") or "").strip()
+    if not sub:
+        return jsonify({"ok": False, "error": "sub required"}), 400
+    parsed = ueba_scope.parse_scope(body.get("scope"))
+    if parsed["errors"]:
+        # 422: the request was well formed and refused on its merits, and the
+        # reasons are the useful part of the response.
+        return jsonify({"ok": False, "error": "; ".join(parsed["errors"])}), 422
+    try:
+        store = ueba_auth._store()
+        if store is None:
+            return jsonify({"ok": False, "error": "auth store unavailable"}), 503
+        target = store.get_user(sub)
+        if not target:
+            return jsonify({"ok": False, "error": "no such account"}), 404
+        # Refusing to scope the account making the request: an admin who
+        # scopes themselves cannot undo it, because undoing it needs an
+        # unrestricted admin. That is a one-way door and a support call.
+        me = ueba_auth.current_user() or {}
+        if _rbac_enforcing() and me.get("sub") == sub and (
+                parsed["devices"] or parsed["subnets"]):
+            return jsonify({"ok": False,
+                            "error": "you cannot scope your own account — "
+                                     "undoing it would need an unrestricted "
+                                     "administrator, so it is a one-way "
+                                     "door"}), 400
+        saved = store.set_scope(sub, {"devices": parsed["devices"],
+                                      "subnets": parsed["subnets"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "sub": sub, "scope": saved,
+                    "label": ueba_scope.label(saved),
+                    "description": ueba_scope.describe(saved)})
 
 
 def _capability_map():
@@ -4061,6 +4250,7 @@ def api_devices_list():
     if not _notify_ready():
         return _notify_unavailable()
     items = ueba_notify.devices(_ncfg()["devices_file"])
+    items = _scope_filter(items, device_keys=("name",), address_keys=())
     items.sort(key=lambda d: (ueba_notify.PRIORITIES.index(d.get("priority", "low"))
                               if d.get("priority") in ueba_notify.PRIORITIES else 0,
                               d.get("name", "")), reverse=True)
@@ -4074,6 +4264,9 @@ def api_devices_save():
     if not _notify_ready():
         return _notify_unavailable()
     b = request.get_json(silent=True) or {}
+    bad = _require_scope(device=b.get("name"))
+    if bad:
+        return bad
     try:
         rec, created = ueba_notify.save_device(
             _ncfg()["devices_file"], name=b.get("name"), label=b.get("label"),
@@ -4091,6 +4284,9 @@ def api_devices_save():
 def api_devices_delete(name):
     if not _notify_ready():
         return _notify_unavailable()
+    bad = _require_scope(device=name)
+    if bad:
+        return bad
     if not ueba_notify.delete_device(_ncfg()["devices_file"], name):
         return jsonify({"ok": False, "error": "not found"}), 404
     return jsonify({"ok": True, "name": name})
@@ -4320,6 +4516,9 @@ def api_assets_add():
         return jsonify({"ok": False,
                         "error": "role must be one of %s"
                                  % list(ueba_assets.ROLES)}), 400
+    bad = _require_scope(device=value, address=value)
+    if bad:
+        return bad
     tier = (body.get("tier") or "high").strip().lower()
     if tier not in ueba_assets.TIERS:
         return jsonify({"ok": False,
@@ -4347,6 +4546,9 @@ def api_assets_add():
 @app.route("/api/assets/<role>/<path:value>", methods=["DELETE"])
 @_require_cap("assets.edit")
 def api_assets_remove(role, value):
+    bad = _require_scope(device=value, address=value)
+    if bad:
+        return bad
     """Untag one entity in one role."""
     if not ASSETS_AVAILABLE:
         return jsonify({"ok": False, "error": "assets module unavailable"}), 503
@@ -5039,6 +5241,12 @@ def api_device_trail():
 
     try:
         if device:
+            # The resolver's keys are namespaced (agent:070, name:host), so the
+            # scope is tested against the value after the namespace as well —
+            # an operator scopes a hostname, not an internal key format.
+            bad = _require_scope(device=device.split(":", 1)[-1])
+            if bad:
+                return bad
             out = rows("SELECT device, address, first_seen, last_seen, events, "
                        "closed FROM ip_trail WHERE device = ? "
                        "ORDER BY last_seen DESC LIMIT ?", (device, limit))
@@ -5046,6 +5254,9 @@ def api_device_trail():
                             "addresses_held": len({r["address"] for r in out}),
                             "trail": out})
         if address:
+            bad = _require_scope(address=address)
+            if bad:
+                return bad
             out = rows("SELECT device, address, first_seen, last_seen, events, "
                        "closed FROM ip_trail WHERE address = ? "
                        "ORDER BY last_seen DESC LIMIT ?", (address, limit))
@@ -5063,8 +5274,10 @@ def api_device_trail():
         reassigned = _trail_query(
             "SELECT COUNT(*) FROM (SELECT address FROM ip_trail GROUP BY address "
             "HAVING COUNT(DISTINCT device) > 1)")
-        top = rows("SELECT device, address, first_seen, last_seen, events, closed "
-                   "FROM ip_trail ORDER BY last_seen DESC LIMIT ?", (limit,))
+        top = _scope_filter(
+            rows("SELECT device, address, first_seen, last_seen, events, closed "
+                 "FROM ip_trail ORDER BY last_seen DESC LIMIT ?", (limit,)),
+            device_keys=("device",), address_keys=("address",))
         return jsonify({
             "ok": True,
             "addresses": int(addrs or 0),
@@ -5200,6 +5413,9 @@ def api_entities_host_role():
     host = (body.get("host") or "").strip()
     if not host:
         return jsonify({"ok": False, "error": "host required"}), 400
+    bad = _require_scope(device=host)
+    if bad:
+        return bad
     try:
         entry, err = ueba_entities.set_host_role(
             _entities_path(), host, body.get("role") or "")
