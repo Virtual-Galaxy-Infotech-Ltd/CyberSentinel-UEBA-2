@@ -51,6 +51,7 @@ import ueba_peers
 import ueba_supervised
 import ueba_netflow
 import ueba_soar
+import ueba_rules
 from ueba_preprocessor import FeatureExtractor, UserProfileStore, get_nested
 from ueba_models.isolation_forest import IsolationForestScorer
 from ueba_models.autoencoder import AutoencoderScorer
@@ -187,6 +188,30 @@ class StreamState:
     def save(self, position: int):
         self.position = position
         self.path.write_text(json.dumps({"position": position}))
+
+
+def _merge_watch_boost(watch_boost: float, rule_hit) -> float:
+    """The single analyst-attention prior, from the watch list and SN 45 rules.
+
+    A watch-list entry and a time-bound rule are the same KIND of statement —
+    an analyst asking for elevated scrutiny — so they take the stronger rather
+    than summing. A suppression rule subtracts and is floored at zero: it may
+    cancel an analyst's own attention prior, but it may not push the prior
+    negative and start hiding events the models themselves found anomalous.
+    """
+    try:
+        base = float(watch_boost or 0.0)
+    except (TypeError, ValueError):
+        base = 0.0
+    if not rule_hit:
+        return base
+    try:
+        effect = float(rule_hit.get("boost") or 0.0)
+    except (TypeError, ValueError):
+        return base
+    if effect >= 0:
+        return max(base, effect)
+    return max(0.0, base + effect)
 
 
 # ── Score Fusion ──────────────────────────────────────────────────────────────
@@ -961,6 +986,12 @@ class UEBAEngine:
         # queue, because it already runs the background dispatchers and owns
         # the egress-checked outbound path. Shared through SQLite in WAL mode,
         # so the engine only inserts and the dispatcher only updates.
+        # Time- and condition-bound rules (SN 45). Same file-and-mtime
+        # contract as the watch list, so a rule an analyst writes takes
+        # effect on the next event with no restart.
+        self.rules_file = paths.get("rules_file") or ""
+        self.rules_cfg = (cfg.get("detection") or {}).get("rules") or {}
+
         self.soar_cfg = (cfg.get("detection") or {}).get("soar") or {}
         self.soar_queue = None
         if self.soar_cfg.get("enabled", False) and self.soar_cfg.get("url"):
@@ -1126,6 +1157,24 @@ class UEBAEngine:
                 log.debug("entity extraction skipped: %s", e)
                 entities, entity_presence = [], {}
 
+        # SN 45 — a rule an analyst switched on for a set of users, with an
+        # ending. Unlike the other priors added recently this one DOES reach
+        # the score, and the reason it is safe to is that it cannot fire on its
+        # own: the register is empty until an analyst writes a rule, every rule
+        # carries a mandatory stop condition, and the effect is capped at the
+        # watch list's ceiling. An analyst creating a rule is explicitly asking
+        # for the score to change, which is not the same as a flat prior on a
+        # condition that is always true.
+        rule_hit = None
+        if self.rules_file and self.rules_cfg.get("enabled", True):
+            try:
+                rule_hit = ueba_rules.apply(
+                    self.rules_file, user,
+                    confirmed=bool((history or {}).get("incidents")))
+            except Exception as e:
+                log.debug("rule evaluation skipped: %s", e)
+                rule_hit = None
+
         # SN 28 — if this event is a flow record, fold it into the window and
         # ask whether the source is now doing something anomalous in the
         # aggregate. Runs ahead of fusion for the same reason the other
@@ -1276,7 +1325,17 @@ class UEBAEngine:
         # combined score past 1.0.
         fusion = fuse_scores(
             if_result, ae_result, self.config,
-            watch_boost=(watch or {}).get("boost", 0.0),
+            # Folded into watch_boost rather than added as a fifth prior,
+            # which does two things deliberately. It keeps fuse_scores'
+            # signature and its reported breakdown stable. And it enforces the
+            # no-stacking rule ACROSS both mechanisms: a watch-list entry and a
+            # rule are both "an analyst said watch this", so the stronger of
+            # the two applies instead of summing into an escalation nobody
+            # chose. A suppression subtracts, floored so it can lower the
+            # score without being able to zero it — silencing an entity should
+            # reduce its noise, not blind the platform to a real incident.
+            watch_boost=_merge_watch_boost(
+                (watch or {}).get("boost", 0.0), rule_hit),
             history_boost=(history or {}).get("boost", 0.0),
             privilege_boost=priv_assess.get("boost", 0.0),
             asset_boost=asset_assess.get("boost", 0.0))
@@ -1422,6 +1481,21 @@ class UEBAEngine:
         # Append ueba block + evidence to original log
         # Record the watch-list hit on the alert so the dashboard can badge it
         # and an analyst can see why this one surfaced.
+        # SN 45. Which rule applied, what it does, and when it ends — so an
+        # analyst seeing an elevated score can find the decision behind it
+        # rather than wondering why the number moved.
+        if rule_hit:
+            ueba_block["rule"] = {
+                "id": rule_hit["id"],
+                "name": rule_hit["name"],
+                "action": rule_hit["action"],
+                "boost": rule_hit["boost"],
+                "matched": rule_hit["matched"],
+                "condition": rule_hit["condition"],
+                "ends": rule_hit["ends"],
+                "reason": rule_hit["reason"],
+            }
+
         if watch:
             ueba_block["watchlist"] = {
                 "id":     watch["id"],

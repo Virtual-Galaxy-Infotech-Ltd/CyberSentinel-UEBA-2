@@ -91,6 +91,14 @@ except Exception:
     ueba_assets = None
     ASSETS_AVAILABLE = False
 
+# Time- and condition-bound rules (RFP SN 45). Optional likewise.
+try:
+    import ueba_rules  # type: ignore
+    RULES_AVAILABLE = True
+except Exception:
+    ueba_rules = None
+    RULES_AVAILABLE = False
+
 # Scoped administrator authority (RFP SN 7). Optional likewise.
 try:
     import ueba_scope  # type: ignore
@@ -3519,6 +3527,9 @@ CAPABILITIES = {
     "assets.edit":      "admin",
     "entities.edit":    "admin",
     "soar.manage":      "admin",
+    # A rule is day-to-day triage with a built-in ending, so it sits with the
+    # watch list rather than with configuration.
+    "rules.edit":       "analyst",
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
@@ -3632,6 +3643,122 @@ def _may_administer_scopes() -> bool:
                                                 _current_scope())
     except Exception:
         return False
+
+
+def _rules_path():
+    paths = (_RAW_CFG.get("paths") or {})
+    return str(_abs_install_path(paths.get("rules_file") or "rules.json"))
+
+
+@app.route("/api/rules")
+def api_rules_list():
+    """Every rule, live and ended, with why (RFP SN 45)."""
+    if not RULES_AVAILABLE:
+        return jsonify({"ok": False, "error": "rules module unavailable",
+                        "rules": []}), 503
+    try:
+        path = _rules_path()
+        items = ueba_rules.rules(path)
+        now = ueba_rules.now_utc()
+        out = []
+        for r in items:
+            v = ueba_rules.evaluate(r, now)
+            out.append(dict(r, live=v["active"], state=v["reason"],
+                            ends=v["ends"]))
+        # Live first, then most recently created: an analyst wants what is in
+        # force now, with the record of what was behind it still reachable.
+        out.sort(key=lambda r: (not r["live"], r.get("created_at") or ""),
+                 reverse=False)
+        st = ueba_rules.status(path)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "rules": []}), 500
+    return jsonify({"ok": True, "rules": out, "actions": list(ueba_rules.ACTIONS),
+                    "conditions": list(ueba_rules.CONDITIONS),
+                    "status": st})
+
+
+@app.route("/api/rules", methods=["POST"])
+@_require_cap("rules.edit")
+def api_rules_add():
+    """Switch on a rule for a set of users, with its ending (RFP SN 45)."""
+    if not RULES_AVAILABLE:
+        return jsonify({"ok": False, "error": "rules module unavailable"}), 503
+    b = request.get_json(silent=True) or {}
+    subjects = b.get("subjects")
+    if isinstance(subjects, str):
+        subjects = [x.strip() for x in subjects.split(",") if x.strip()]
+    try:
+        rule, errors = ueba_rules.build(
+            b.get("name") or "", subjects or [], b.get("condition") or "",
+            action=b.get("action") or "watch", boost=b.get("boost"),
+            until=b.get("until"), hits=b.get("hits"),
+            starts_at=b.get("starts_at"), reason=b.get("reason") or "",
+            created_by=_current_username())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if rule is None:
+        # 422: well formed and refused on its merits. The reasons are the
+        # useful part — a rule refused for having no ending needs to say so.
+        return jsonify({"ok": False, "error": "; ".join(errors),
+                        "errors": errors}), 422
+    try:
+        saved, err = ueba_rules.add(_rules_path(), rule)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if saved is None:
+        return jsonify({"ok": False, "error": err}), 409
+    return jsonify({"ok": True, "rule": saved})
+
+
+@app.route("/api/rules/<rid>", methods=["DELETE"])
+@_require_cap("rules.edit")
+def api_rules_end(rid):
+    """End a rule. By default it is MARKED ended, not deleted.
+
+    ?purge=1 removes it outright, which an analyst can do but should rarely
+    want: the marked record is what tells an audit the decision was once made.
+    """
+    if not RULES_AVAILABLE:
+        return jsonify({"ok": False, "error": "rules module unavailable"}), 503
+    purge = _truthy(request.args.get("purge"))
+    try:
+        if purge:
+            gone = ueba_rules.remove(_rules_path(), rid)
+        else:
+            gone = ueba_rules.end(_rules_path(), rid,
+                                  "cleared by %s" % (_current_username()
+                                                     or "an analyst"))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if not gone:
+        return jsonify({"ok": False,
+                        "error": "no live rule with that id"}), 404
+    return jsonify({"ok": True, "id": rid, "purged": bool(purge)})
+
+
+@app.route("/api/rules/sweep", methods=["POST"])
+@_require_cap("rules.edit")
+def api_rules_sweep():
+    """Mark every rule whose condition has been met.
+
+    Housekeeping only: expiry is already decided at evaluation time, so this
+    changes no verdict. It makes the register honest for a human reading it
+    rather than showing rules as live that the engine would already refuse.
+    """
+    if not RULES_AVAILABLE:
+        return jsonify({"ok": False, "error": "rules module unavailable"}), 503
+    confirmed = []
+    if RISK_HISTORY_AVAILABLE:
+        try:
+            confirmed = [i.get("entity") for i
+                         in ueba_risk_history.summary(_risk_history_path())]
+        except Exception:
+            confirmed = []
+    try:
+        res = ueba_rules.sweep(_rules_path(), confirmed_subjects=confirmed)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, **res})
 
 
 @app.route("/api/scopes")

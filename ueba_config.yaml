@@ -66,6 +66,10 @@ paths:
   # Durable outbound queue for the SOAR integration (SN 3). Defaults beside
   # the profile store with the other SQLite state.
   soar_queue_db:        "profiles/soar_queue.db"
+  # Time- and condition-bound rules (SN 45). Operator-written, same
+  # file-and-mtime contract as the watch list, so a rule takes effect on the
+  # next event with no restart. Every rule carries a mandatory stop condition.
+  rules_file:           "/root/NEW_DRIVE/aditya_ueba/rules.json"
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -752,6 +756,38 @@ detection:
   #                 The serial says a pattern STARTS deviating, which is a
   #                 statement about change, so the comparison is recent-window
   #                 against cohort, not all-time against cohort.
+  # ── Time- and condition-bound rules (RFP SN 45) ────────────────────────────
+  #
+  # "Activate rules for a set of users until a specified condition or time
+  # window." Two things the watch list deliberately does not do: a SET of
+  # subjects (one decision, not nineteen rows to remember to remove), and an
+  # ENDING. A rule with no ending is the one an analyst forgets, and a
+  # forgotten rule is a permanent score distortion nobody remembers choosing.
+  #
+  # So the stop condition is MANDATORY — there is no way to write an endless
+  # rule here, which is what the watch list is for. Four endings, each a fact
+  # the platform already knows: at_time (a wall-clock instant), after_hits
+  # (the rule has matched N events), on_confirmed (an analyst confirmed an
+  # incident for a subject), on_cleared (ended by hand). A condition language
+  # beyond that grows an expression parser and then a debugger.
+  #
+  # Expiry is EVALUATED on each event, not swept by a timer, so a rule cannot
+  # outlive its condition because a background job failed to run. An ended
+  # rule stays in the register, marked with the reason — deleting it would
+  # erase the fact that the decision was made, which is what an audit asks.
+  #
+  # The effect reaches the score, unlike the priors added over the last two
+  # days, and the reason that is safe: the register is empty until an analyst
+  # writes a rule, so it cannot fire on its own. It is folded into the
+  # watch-list prior rather than added as a fifth one, which enforces
+  # no-stacking across BOTH mechanisms — a watch-list entry and a rule are the
+  # same kind of statement, so the stronger applies instead of summing into an
+  # escalation nobody chose. A suppression subtracts and is floored at zero: it
+  # may cancel an analyst's own attention prior but may not push it negative
+  # and start hiding what the models themselves found anomalous.
+  rules:
+    enabled: true
+
   # ── SOAR and SIEM integration (RFP SN 3) ───────────────────────────────────
   #
   # The "same OEM" half of SN 3 is a commercial and bid decision, not an
