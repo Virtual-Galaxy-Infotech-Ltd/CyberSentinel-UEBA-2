@@ -4015,6 +4015,24 @@ body[data-role="admin"]   .role-chip { border-color: var(--accent); color: var(-
   background: #02060c;
 }
 #login-overlay.show { display: block; }
+
+/* THE PRE-AUTH VEIL.
+   initLogin() cannot know whether to gate until GET /api/auth/me comes back,
+   and until it did the dashboard was simply visible -- so a signed-out user
+   watched live alert data paint for as long as that round trip took before the
+   sign-in screen dropped over it. Blurring it afterwards does not help: it was
+   already on screen and already readable.
+
+   The class is set in the HTML rather than from JS, so it applies on the very
+   first paint instead of one frame later. The page starts covered and is
+   uncovered once the answer arrives -- either by showing the gate, or by
+   clearing this class. visibility rather than display so nothing reflows when
+   it lifts, and a plain background so the veil is not a white flash.
+
+   initLogin() also clears it on a failed probe, and on a timer, so a server
+   that never answers leaves the dashboard usable rather than blank. */
+body.auth-pending { background: #02060c; overflow: hidden; }
+body.auth-pending > *:not(#login-overlay) { visibility: hidden; }
 /* Hide the app behind the gate so no stale data is readable through it. */
 body.login-gated > *:not(#login-overlay) { filter: blur(3px); pointer-events: none; }
 body.login-gated { overflow: hidden; }
@@ -4049,7 +4067,7 @@ body.login-gated { overflow: hidden; }
      has to fit a 768px-tall laptop without scrolling: keyed to the SHORTER of
      the two axes so a wide-but-short window shrinks it too. --svh/--svw are
      already scale-corrected, so this is a true visual size. */
-  font-size: clamp(11.5px, min(calc(1.62 * var(--svh)), calc(0.91 * var(--svw))), 15px);
+  font-size: clamp(14px, min(calc(2.2 * var(--svh)), calc(1.15 * var(--svw))), 19px);
   font-family: var(--sans, inherit);
   display: flex; align-items: center; justify-content: space-between;
   gap: 2.6em;
@@ -4116,7 +4134,7 @@ body.login-gated { overflow: hidden; }
 /* ── right: sign-in card ── */
 .lg-card {
   flex: 0 0 auto;
-  width: min(33em, 100%);
+  width: min(34em, 100%);
   box-sizing: border-box;
   padding: 2.3em 2.4em 2em;
   border-radius: 1em;
@@ -4141,7 +4159,7 @@ body.login-gated { overflow: hidden; }
 
 .lg-title {
   margin: 0 0 0.25em;
-  font-size: 2.1em; font-weight: 600; letter-spacing: -0.018em; color: #eaf4fd;
+  font-size: 2.35em; font-weight: 600; letter-spacing: -0.018em; color: #eaf4fd;
   line-height: 1.12;
 }
 .lg-sub { margin: 0 0 1.5em; font-size: 0.96em; color: #9db6cc; }

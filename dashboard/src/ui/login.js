@@ -212,8 +212,11 @@ async function submit() {
     } catch (e) { /* storage blocked — the sign-in itself still succeeded */ }
     // Reload rather than patching state in place: capabilities, role chip and
     // every panel's data all have to be re-fetched as the new user, and a reload
-    // is the one path guaranteed to leave nothing behind from the signed-out view.
-    location.reload();
+    // is the one path guaranteed to leave nothing behind from the signed-out
+    // view. replace() rather than reload() so the new session always opens on
+    // the dashboard: a reload would reopen whatever page the LAST session was
+    // looking at, and that may be a page this user cannot see.
+    location.replace("/overview");
   } catch (e) {
     // Show the server's wording verbatim — it distinguishes a bad password from
     // a locked or disabled account, which is what the user needs to know.
@@ -224,8 +227,18 @@ async function submit() {
   }
 }
 
+/** The page ships with body.auth-pending set, so nothing is readable until we
+ *  know whether to gate. This takes it off, once, however we got here. */
+function reveal() {
+  document.body.classList.remove("auth-pending");
+}
+
 /** Put the gate up if, and only if, the server says it is required. */
 export async function initLogin() {
+  // Failsafe. If /api/auth/me never answers, the veil must still lift or the
+  // dashboard stays blank forever -- a slow auth service would otherwise look
+  // like a dead product.
+  const failsafe = setTimeout(reveal, 5000);
   try {
     const r = await fetch("/api/auth/me", { credentials: "same-origin" });
     if (!r.ok) return;
@@ -233,16 +246,29 @@ export async function initLogin() {
     if (d.enforce && !d.authenticated) {
       overlay().classList.add("show");
       document.body.classList.add("login-gated");
+      // Signing in reloads the page, and the reload lands on whatever URL is
+      // current. Rewriting it here is what makes every new session start at
+      // the dashboard rather than resuming the last session's page -- which
+      // the previous occupant of this browser may not have been entitled to.
+      if (location.pathname !== "/overview") {
+        history.replaceState({ tab: "overview" }, "", "/overview");
+      }
     }
   } catch (e) {
     // Never gate on a failed probe: a transient error must not lock the
     // dashboard behind a login the server may not even be asking for.
+  } finally {
+    clearTimeout(failsafe);
+    reveal();
   }
 }
 
 export async function logout() {
   try {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
-  } catch (e) { /* fall through to the reload regardless */ }
-  location.reload();
+  } catch (e) { /* fall through to the navigation regardless */ }
+  // replace(), not reload(): the signed-out page must not sit in history where
+  // Back would restore a view of the previous user's data, and the next sign-in
+  // should start at the dashboard.
+  location.replace("/overview");
 }
