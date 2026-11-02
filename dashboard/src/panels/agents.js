@@ -7,6 +7,43 @@ import { scoreColor } from "../helpers.js";
 import { renderFeed, feedRows } from "./feed.js";
 import { loadDeviceProfile } from "./device-profile.js";
 
+// RFP SN 30. The classification lives on the PROFILE tab, which means you have
+// to open a third tab to find out whether a machine is a server — too buried
+// for the one fact an analyst scanning this list wants first. So the role is
+// fetched once and badged on every row and on the detail header, with the
+// reason in the tooltip so the verdict stays questionable rather than stated.
+let _roles = {};   // lowercased device name -> {role, why}
+
+export async function loadDeviceRoles() {
+  try {
+    const r = await fetch(`/api/device?hours=${state.timelineHours || 0}`,
+                          { credentials: "same-origin" });
+    if (!r.ok) return;
+    const d = await r.json();
+    const next = {};
+    (d.devices || []).forEach((x) => {
+      if (x.device) next[String(x.device).toLowerCase()] = {
+        role: x.role, why: x.role_why,
+      };
+    });
+    _roles = next;
+  } catch {
+    // A missing role badge is not worth failing the endpoint list over.
+  }
+}
+
+function roleBadge(name) {
+  const hit = _roles[String(name || "").toLowerCase()];
+  if (!hit || !hit.role) return "";
+  const server = hit.role === "server";
+  const col = server ? "var(--blue, #4aa3ff)" : "var(--text3)";
+  const why = String(hit.why || "").replace(/"/g, "&quot;");
+  return `<span title="${why}" style="font-family:var(--mono2);font-size:8px;
+    letter-spacing:1px;text-transform:uppercase;border:1px solid ${col};
+    color:${col};border-radius:3px;padding:0 4px;margin-left:5px;
+    vertical-align:middle;">${server ? "SERVER" : "ENDPOINT"}</span>`;
+}
+
 export function renderOverviewAgents() {
   const el = document.getElementById("overview-agents");
   const badge = document.getElementById("ov-agents-badge");
@@ -56,7 +93,7 @@ export function renderAgents() {
     const safeName = a.agent.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
     return `<div class="agent-item ${cls} ${isActive}" onclick="loadAgentDetail('${safeName}')">
       <div>
-        <div class="agent-name">${a.agent}${a.agent_id ? ` <span style="color:var(--text3);font-size:9px">#${a.agent_id}</span>` : ""}</div>
+        <div class="agent-name">${a.agent}${roleBadge(a.agent)}${a.agent_id ? ` <span style="color:var(--text3);font-size:9px">#${a.agent_id}</span>` : ""}</div>
         <div class="agent-ip">${a.ip || ""}${a.os ? " · " + a.os : ""}</div>
       </div>
       <span class="agent-alert-count ${cntCls}">${a.alert_count}</span>
@@ -84,8 +121,10 @@ export async function loadAgentDetail(agentName, { silent = false } = {}) {
     el.classList.toggle("active", el.querySelector(".agent-name")?.textContent === agentName)
   );
   const agentMeta = state.agentsData.find((a) => a.agent === agentName) || {};
+  const roleHit = _roles[String(agentName || "").toLowerCase()];
   document.getElementById("agent-detail-title").innerHTML =
-    `${agentName} <span style="font-size:10px;color:var(--text3);font-family:var(--mono2);font-weight:400">${agentMeta.ip || ""} · ${agentMeta.os || ""}</span>`;
+    `${agentName}${roleBadge(agentName)} <span style="font-size:10px;color:var(--text3);font-family:var(--mono2);font-weight:400">${agentMeta.ip || ""} · ${agentMeta.os || ""}` +
+    (roleHit && roleHit.why ? ` · ${roleHit.why}` : "") + `</span>`;
   const body = document.getElementById("agent-detail-body");
   // On an explicit click we show the spinner; on a 30s auto-refresh
   // (silent=true) we keep the current view until the new data arrives.

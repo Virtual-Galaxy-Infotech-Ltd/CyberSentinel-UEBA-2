@@ -5,7 +5,7 @@
 import { state } from "../state.js";
 import { renderFeed } from "./feed.js";
 import { renderUsers, renderOverviewUsers } from "./users.js";
-import { renderAgents, renderOverviewAgents } from "./agents.js";
+import { renderAgents, renderOverviewAgents, loadDeviceRoles } from "./agents.js";
 import { updateGauge } from "../charts/gauge.js";
 import { drawTimeline } from "../charts/timeline.js";
 import { renderScoreDist } from "../charts/scoredist.js";
@@ -116,6 +116,10 @@ export function applyTimelineFilter() {
   renderOverviewUsers();
   renderAgents();
   renderOverviewAgents();
+  // RFP SN 30. Roles are fetched separately and the list is re-rendered once
+  // they arrive, rather than blocking this pass on another request — the
+  // endpoint list must not wait on a classification badge to appear at all.
+  loadDeviceRoles().then(renderAgents);
 
   if (state.lastStats) {
     updateGauge(state.lastStats, state.feedData);
