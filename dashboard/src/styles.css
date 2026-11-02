@@ -95,6 +95,14 @@
     /* How tall a panel's own scroller may grow before it scrolls internally
        instead of letting the whole page grow. */
     --scroll-h: clamp(240px, calc(46 * var(--svh)), 560px);
+    /* Ceiling for the two charts in the gauge/radar/timeline row. Both take
+       their height from their own WIDTH if nothing stops them -- the radar
+       from its viewBox aspect ratio, the timeline from the width/height
+       attributes it writes back onto its canvas each redraw -- so a wide
+       column made a tall panel and dragged the grid row with it. See
+       radar.js. This bounds both to the same vertical band as the rest of
+       the overview, and leaves the gauge column as the row's one driver. */
+    --chart-cap: clamp(150px, calc(30 * var(--svh)), 330px);
     --mono:      'Barlow Condensed', sans-serif;
     --mono2:     'IBM Plex Sans', sans-serif;   /* readable label/data font (was IBM Plex Mono) */
     --monodata:  'IBM Plex Mono', monospace;    /* kept for true monospace needs (header lockup subtitle) */
