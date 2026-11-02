@@ -3760,7 +3760,17 @@ body.nocap-reports-schedule [data-cap="reports.schedule"],
 body.nocap-devices-edit [data-cap="devices.edit"],
 body.nocap-notify-edit [data-cap="notify.edit"],
 body.nocap-audit-view [data-cap="audit.view"],
-body.nocap-users-manage [data-cap="users.manage"] {
+body.nocap-users-manage [data-cap="users.manage"],
+/* RFP SN 30 / SN 67. Added WITH the panel rather than after it: the comment
+   below records that users.manage was once missing from this list and the
+   whole User Management panel rendered for viewers as a console of controls
+   that all failed. Every new data-cap needs its selector here the same day. */
+body.nocap-entities-edit [data-cap="entities.edit"],
+body.nocap-rules-edit [data-cap="rules.edit"],
+body.nocap-soar-manage [data-cap="soar.manage"],
+body.nocap-incident-confirm [data-cap="incident.confirm"],
+body.nocap-privileged-edit [data-cap="privileged.edit"],
+body.nocap-assets-edit [data-cap="assets.edit"] {
   display: none !important;
 }
 /* users.manage was missing from the list above, so the entire User Management

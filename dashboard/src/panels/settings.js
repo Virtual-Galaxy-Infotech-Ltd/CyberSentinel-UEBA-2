@@ -20,6 +20,7 @@
 import { showToast } from "../ui/toast.js";
 import { state } from "../state.js";
 import { refreshAccount } from "../ui/account-menu.js";
+import { initEntities, loadEntities } from "./entities.js";
 
 let _users = [];
 let _roles = ["viewer", "analyst", "admin"];
@@ -449,10 +450,17 @@ export function initSettings() {
   const entry = document.getElementById("account-settings");
   if (entry) entry.addEventListener("click", refreshSettings);
 
+  // RFP SN 30 / SN 67 — the tracked-entities panel lives on this page and
+  // binds its own controls.
+  initEntities();
+
   refreshSettings();
 }
 
 export function refreshSettings() {
   loadMe();
   loadUsers();
+  // Re-read on every visit for the same reason the account list is: another
+  // admin or the config file may have changed the mappings since page load.
+  loadEntities();
 }

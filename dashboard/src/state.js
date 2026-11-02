@@ -13,7 +13,14 @@
 // all, so a fresh visit appeared to "hang" on LOADING. 24h is ~1.5MB/0.6s. An
 // explicit "All" the analyst picked is still honored (0 is in the allow-list).
 const TIMELINE_ALLOWED = [0, 24, 72, 168, 720, 1440, 2160];
-const TIMELINE_DEFAULT = 24;
+// The site can override which window the console opens on, injected into the
+// served index.html by the backend (dashboard.default_timeline_hours). 24
+// stays the default because opening on "All" makes every load scan the whole
+// retention; a replay or demo whose newest alert predates the window sets 0.
+const TIMELINE_DEFAULT = (() => {
+  const v = parseInt(globalThis.UEBA_DEFAULT_HOURS, 10);
+  return [0, 24, 72, 168, 720, 1440, 2160].includes(v) ? v : 24;
+})();
 function restoreTimelineHours() {
   try {
     const v = parseInt(localStorage.getItem("cs-timeline-hours"), 10);

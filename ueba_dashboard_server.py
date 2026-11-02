@@ -289,6 +289,11 @@ _DEFAULTS = {
     # /api/evidence/<event_id> only when an analyst expands that row. So 500k
     # alerts cost ~0.5 KB each on the wire (~260 MB worst case) instead of ~2.3 KB.
     "history_days":    95,
+    # Which timeline window the console opens on: 0 (All), 24, 72, 168, 720,
+    # 1440 or 2160 hours. 24 is right for a live site; a replay or demo whose
+    # newest alert predates the window should set 0, or the console opens empty
+    # and looks broken.
+    "default_timeline_hours": 24,
     "max_feed_alerts": 500000,
     # /api/feed table payload cap. The feed table + client-side charts only ever
     # need the most-recent slice; on a high-volume feed a wide window can hold
@@ -6726,10 +6731,40 @@ def _serve_index():
     their contents do, which is the whole point of fingerprinting.
     """
     dist_index = DASHBOARD_DIST / "index.html"
-    if dist_index.exists():
-        resp = send_from_directory(str(DASHBOARD_DIST), "index.html")
-    else:
-        resp = send_from_directory(str(DASHBOARD_DIR), "index.html")
+    src = dist_index if dist_index.exists() else (DASHBOARD_DIR / "index.html")
+
+    # The timeline window the console opens on, injected at serve time rather
+    # than baked into the bundle.
+    #
+    # It defaults to 24 hours and that default is right for a live deployment:
+    # opening on "All" would make every page load scan the whole retention,
+    # which is precisely what produced the 60-second loads and empty tiles this
+    # dashboard had to be rescued from. But a site whose newest alert is older
+    # than the window opens on an empty console and looks broken — which is
+    # what happens on a demo or archive replay — so the site can say otherwise
+    # in its own config instead of someone editing the bundle.
+    # NOT `... or 24`: 0 is the legitimate value for "All" and is falsy, so the
+    # or-idiom silently discards exactly the setting this knob exists for.
+    raw_hours = CFG.get("default_timeline_hours", 24)
+    try:
+        default_hours = 24 if raw_hours is None else int(raw_hours)
+    except (TypeError, ValueError):
+        default_hours = 24
+    if default_hours not in (0, 24, 72, 168, 720, 1440, 2160):
+        default_hours = 24
+
+    try:
+        html = src.read_text(encoding="utf-8")
+        marker = "</head>"
+        inject = ('<script>window.UEBA_DEFAULT_HOURS=%d;</script>'
+                  % default_hours)
+        if marker in html and "UEBA_DEFAULT_HOURS" not in html:
+            html = html.replace(marker, inject + marker, 1)
+        resp = Response(html, mimetype="text/html")
+    except OSError:
+        # Reading it is the only thing that can fail here, and a served
+        # dashboard with the stock default beats no dashboard at all.
+        resp = send_from_directory(str(src.parent), src.name)
     resp.headers["Cache-Control"] = "no-store, must-revalidate"
     resp.headers.pop("ETag", None)      # nothing to revalidate against
     return resp

@@ -1033,6 +1033,70 @@
         </table>
       </div>
     </div>
+
+    <!-- RFP SN 30 / SN 67. Admin only, same contract as User Management above:
+         data-cap hides the panel without the capability, and every endpoint it
+         calls is independently gated on the server. -->
+    <div class="panel" data-cap="entities.edit">
+      <div class="panel-header">
+        <div class="panel-title">TRACKED ENTITIES</div>
+        <span class="panel-badge" id="set-ent-badge">0</span>
+      </div>
+
+      <div class="set-note" id="set-ent-kinds"></div>
+
+      <div class="wl-form">
+        <input id="set-ent-field" class="wl-input" type="text"
+               placeholder="Field path, e.g. data.appname" autocomplete="off"
+               style="flex:1 1 240px">
+        <input id="set-ent-kind" class="wl-input" type="text"
+               placeholder="Call it, e.g. application" autocomplete="off"
+               style="flex:1 1 160px">
+        <input id="set-ent-note" class="wl-input" type="text"
+               placeholder="Why (optional)" autocomplete="off"
+               style="flex:1 1 200px">
+        <button id="set-ent-btn" class="export-btn wl-add-btn">＋ Track this field</button>
+      </div>
+      <div class="set-note">
+        Name any field in the incoming events and its values become tracked
+        entities, scored like any other — no code change, no restart, effective
+        on the next event. A field whose values never repeat (an id, a hash, a
+        timestamp) is <b>refused</b>, because tracking it would create one
+        entity per event; the reason is shown when that happens.
+      </div>
+
+      <div class="feed-table-wrap">
+        <table id="set-ent-table">
+          <thead>
+            <tr>
+              <th>Field</th><th>Tracked as</th><th>Why</th>
+              <th>Added</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="set-ent-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="panel-header" style="margin-top:14px">
+        <div class="panel-title">DEVICE ROLE OVERRIDES</div>
+      </div>
+      <div class="wl-form">
+        <input id="set-ent-host" class="wl-input" type="text"
+               placeholder="Device name" autocomplete="off" style="flex:1 1 220px">
+        <select id="set-ent-role" class="wl-input" style="min-width:140px">
+          <option value="server">server</option>
+          <option value="endpoint">endpoint</option>
+          <option value="">clear the override</option>
+        </select>
+        <button id="set-ent-host-btn" class="export-btn wl-add-btn">Set role</button>
+      </div>
+      <div class="set-note">
+        Devices are classified automatically from their name and how many
+        accounts are seen on them. Set an override here when that verdict is
+        wrong — an override always wins, and clearing it restores the automatic
+        one. <span id="set-ent-overrides"></span>
+      </div>
+    </div>
   </div>
 
   <div class="page" id="page-threatmap">

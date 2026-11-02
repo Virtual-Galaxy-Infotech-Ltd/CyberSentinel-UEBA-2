@@ -109,3 +109,11 @@ Thumbs.db
 SCR-*.png
 *.screenshot.png
 ChatGPT Image*.png
+
+# Local site state (added 2026-11-02 when box98 was dropped and everything moved
+# onto this machine). ueba_config.local.yaml carries THIS host's paths and its
+# own address, and site/ holds the registers the engine writes — both are site
+# state, exactly like ueba_config.yaml, and neither belongs in source.
+ueba_config.local.yaml
+site/
+dashboard_dist_backup_*/
