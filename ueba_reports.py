@@ -612,7 +612,6 @@ REPORTS = {
         "title":    "Analyst Investigation Report",
         "audience": "SOC analysts",
         "purpose":  "Which entities to look at next, and what they did.",
-        "rfp":      "35",
         "sections": ["scope", "summary", "top_users", "highly_anomalous",
                      "watchlist_hits", "campaigns", "top_signatures",
                      "top_reasons", "mitre_tactics", "alert_timeline"],
@@ -622,7 +621,6 @@ REPORTS = {
         "title":    "Administration & Management Report",
         "audience": "SOC management",
         "purpose":  "Operational posture, coverage and workload over the period.",
-        "rfp":      "36",
         "sections": ["scope", "summary", "verdict_breakdown", "alert_timeline",
                      "coverage", "top_hosts", "fp_activity", "system_health",
                      "retention"],
@@ -632,7 +630,6 @@ REPORTS = {
         "title":    "Audit & Compliance Report",
         "audience": "Audit and compliance",
         "purpose":  "Who did what inside the platform, and how it is configured.",
-        "rfp":      "37",
         "sections": ["scope", "audit_summary", "analyst_actions", "fp_activity",
                      "watchlist_config", "retention", "data_residency",
                      "system_health"],
@@ -642,7 +639,6 @@ REPORTS = {
         "title":    "Threat Report",
         "audience": "SOC and stakeholders",
         "purpose":  "The threat picture for a specified period.",
-        "rfp":      "62",
         "sections": ["scope", "summary", "verdict_breakdown", "alert_timeline",
                      "mitre_tactics", "geo_origins", "highly_anomalous",
                      "campaigns", "top_users", "top_signatures"],
@@ -655,7 +651,7 @@ def catalogue():
     return {
         "reports": [
             {"id": k, "title": v["title"], "audience": v["audience"],
-             "purpose": v["purpose"], "rfp": v["rfp"], "sections": v["sections"]}
+             "purpose": v["purpose"], "sections": v["sections"]}
             for k, v in REPORTS.items()
         ],
         "sections": [{"id": k, "label": SECTION_LABELS.get(k, k)} for k in SECTIONS],
@@ -697,7 +693,6 @@ def build_report(report_id, ctx, *, sections=None, title=None, subtitle=None):
         "title":        title or (spec or {}).get("title") or "UEBA Report",
         "subtitle":     subtitle or (spec or {}).get("purpose") or "",
         "audience":     (spec or {}).get("audience") or "",
-        "rfp":          (spec or {}).get("rfp") or "",
         "generated_at": ctx.get("generated_at") or datetime.now(timezone.utc).isoformat(),
         "generated_by": ctx.get("generated_by"),
         "site":         ctx.get("site") or "CyberSentinel UEBA",

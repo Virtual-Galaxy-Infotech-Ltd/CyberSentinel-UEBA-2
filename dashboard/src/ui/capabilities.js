@@ -1,4 +1,4 @@
-// Role-based UI gating (RFP 23).
+// Role-based UI gating.
 //
 // The server is the real gate — every mutating route is wrapped in
 // _require_cap() and returns 403 regardless of what the browser renders. This

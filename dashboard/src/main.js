@@ -152,7 +152,7 @@ Object.assign(window, {
 // ── Init subsystems (order matters for theme + footer DOM access) ────────────
 initTheme();
 initLogin();          // puts the sign-in gate up only if the server enforces auth
-initCapabilities();   // RFP 23 — hides controls the current role cannot use
+initCapabilities();   // hides controls the current role cannot use
 initAccountMenu();    // header account menu: Settings + Sign out
 initSettings();
 initFooter();

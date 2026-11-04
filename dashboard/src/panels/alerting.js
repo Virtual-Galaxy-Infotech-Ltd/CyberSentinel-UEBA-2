@@ -1,4 +1,4 @@
-// Device registry and proactive alerting (RFP 10, 15).
+// Device registry and proactive alerting.
 //
 // Two panels on one tab, because they are two halves of the same job: you label
 // and prioritise devices so that notification rules can alert on that priority.
@@ -27,7 +27,7 @@ function fmtWhen(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-// ── Devices (RFP 10) ────────────────────────────────────────────────────────
+// ── Devices ────────────────────────────────────────────────────────
 
 export async function loadDevices() {
   try {
@@ -104,7 +104,7 @@ export async function deleteDevice(name) {
   }
 }
 
-// ── Notification rules (RFP 15) ─────────────────────────────────────────────
+// ── Notification rules ─────────────────────────────────────────────
 
 export async function loadRules() {
   try {

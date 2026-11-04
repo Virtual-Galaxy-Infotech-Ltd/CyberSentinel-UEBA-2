@@ -1,4 +1,4 @@
-// Deep search over raw + enriched data (RFP 26).
+// Deep search over raw + enriched data.
 //
 // The feed's own search only reaches the slim projection the dashboard caches.
 // This asks the server to scan the FULL stored record — threat-intel verdicts,

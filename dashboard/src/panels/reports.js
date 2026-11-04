@@ -1,4 +1,4 @@
-// Reports — generate, customise and schedule (RFP 34-40, 62).
+// Reports — generate, customise and schedule.
 //
 // Four things live on this tab:
 //   1. Generate now      — pick a report, a period and a format; get the file.
@@ -231,8 +231,7 @@ function describeSelected() {
   if (!sel || !out) return;
   const r = allReports().find((x) => x.id === sel.value);
   if (!r) { out.textContent = ""; return; }
-  out.innerHTML = `<b>${esc(r.audience)}</b> — ${esc(r.purpose)}` +
-    (r.builtin && r.rfp ? ` <span class="wl-dim">(RFP ${esc(r.rfp)})</span>` : "");
+  out.innerHTML = `<b>${esc(r.audience)}</b> — ${esc(r.purpose)}`;
 }
 
 export async function generateReport() {

@@ -1,5 +1,5 @@
 // Settings — account self-service for everyone, user management for admins
-// (RFP 23, and the identity half of running UEBA without CyberSentinel SIEM).
+// (the identity half of running UEBA without CyberSentinel SIEM).
 //
 // Two panels with deliberately different audiences:
 //
