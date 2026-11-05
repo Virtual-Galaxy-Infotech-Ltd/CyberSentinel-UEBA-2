@@ -5,6 +5,7 @@
 // A rule can also alert purely on score or verdict, so the device registry is
 // useful but not a prerequisite.
 
+import { initEmailSender } from "./email-sender.js";
 import { showToast } from "../ui/toast.js";
 
 let DEVICES = [];
@@ -140,8 +141,8 @@ function renderRules() {
   if (!tb) return;
   if (note) {
     note.textContent = META.email_enabled
-      ? "Email delivery is configured."
-      : "Email is not set up, so email rules are stored but cannot deliver. Set it up in Settings → Email (SMTP). "
+      ? "Email delivery is set up (see Email Sender above)."
+      : "No mailbox is connected, so email rules are stored but cannot deliver. Connect one under Email Sender above. "
         + "Webhook rules work regardless.";
   }
   if (RULES === null) {
@@ -247,6 +248,7 @@ export function initAlerting() {
   on("dev-save-btn", "click", saveDevice);
   on("ntf-save-btn", "click", saveRule);
   // Same reasoning as the reports panel: nothing here may reject into main.js.
+  initEmailSender();
   Promise.all([loadDevices(), loadRules()])
     .catch((e) => console.warn("[ueba] alerting init failed:", e));
 }

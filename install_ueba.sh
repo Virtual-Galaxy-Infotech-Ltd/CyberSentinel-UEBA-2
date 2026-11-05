@@ -1347,7 +1347,7 @@ PYEOF
            ueba_source.py ueba_identity.py ueba_watchlist.py ueba_notify.py \
            ueba_nicknames.py ueba_egress.py ueba_risk_history.py \
            ueba_privilege.py ueba_assets.py build_faiss_seed.py \
-           ueba_reports.py ueba_report_render.py ueba_report_store.py \
+           ueba_reports.py ueba_report_render.py ueba_report_store.py ueba_mailer.py \
            ueba_housekeeping.py ueba_prune_corpus.py identity_diag.py \
            enrich_parallel.py retrain.py requirements.txt \
            ueba_sync_bridge.sh ueba_rotate.sh ueba_weekly_retrain.sh \

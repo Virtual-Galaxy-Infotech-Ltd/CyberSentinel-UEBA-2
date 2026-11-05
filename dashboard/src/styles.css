@@ -3861,6 +3861,29 @@ a.fp-btn-inline { text-decoration: none; display: inline-block; }
   flex: 0 0 auto;
 }
 
+/* -- Alerting: Email Sender (connected Gmail / Microsoft mailbox) -- */
+.em-body { padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 12px; }
+.em-note { font-size: 13.5px; line-height: 1.55; color: var(--text2); }
+.em-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.em-connect {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 8px 14px; border-radius: 6px; cursor: pointer;
+  background: var(--bg2, #0b111a); color: var(--text);
+  border: 1px solid var(--border2, var(--border));
+  font: inherit; font-size: 13.5px; font-weight: 600;
+  transition: border-color .15s, background .15s;
+}
+.em-connect:hover { border-color: var(--accent); background: rgba(0,212,255,0.06); }
+.em-conn { display: flex; gap: 12px; align-items: flex-start; }
+.em-conn-icon {
+  width: 32px; height: 32px; flex: 0 0 32px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg3); border: 1px solid var(--border);
+}
+.em-conn-email { font-family: var(--mono2); font-size: 14px; color: var(--text); font-weight: 600; }
+.em-conn-meta  { font-size: 12.5px; color: var(--text2); margin-top: 2px; }
+.em-conn-err   { font-size: 12.5px; color: var(--red); margin-top: 4px; }
+
 /* ── Alerting: device priority + rule conditions ───────────── */
 
 .prio {
