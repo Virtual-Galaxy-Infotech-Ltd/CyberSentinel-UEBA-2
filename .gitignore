@@ -117,3 +117,9 @@ ChatGPT Image*.png
 ueba_config.local.yaml
 site/
 dashboard_dist_backup_*/
+
+# ── not source: build output, installed deps, site state and real data ──
+.local-backup-*/       # local pre-change snapshots
+ueba_site.env          # per-site settings, including paths that carry account names
+entities.json          # operator register — site state
+rules.json             # operator rules — site state

@@ -188,7 +188,17 @@ def _device_matches(patterns, device: str) -> str:
     if not d:
         return ""
     for p in (patterns or []):
-        if p == d or fnmatch.fnmatchcase(d, p):
+        # The PATTERN is normalised here too, not just the device. It used to
+        # be compared as stored, with fnmatchcase against a case-folded
+        # device, so a pattern carrying any capital matched nothing at all —
+        # and because the gate fails closed, the administrator was simply
+        # locked out, with a message reporting the pattern count rather than
+        # the mismatch. parse_scope lowercases on the way in, so every scope
+        # created through the API was already safe; this closes the gap for a
+        # scope written by any other path (a script, a migration, a restored
+        # row) and costs one casefold per comparison.
+        pn = _norm_device(p)
+        if pn == d or fnmatch.fnmatchcase(d, pn):
             return p
     return ""
 
@@ -336,8 +346,13 @@ def status() -> dict:
 
 def selftest() -> int:
     failures = []
+    checked = []
 
     def ok(label_, cond):
+        # Counted, not a literal. This module kept `total = 86` while the other
+        # suites were converted, so the five checks added for the pattern-case
+        # trap ran and were not reported — the number stayed 86 either way.
+        checked.append(label_)
         if not cond:
             failures.append(label_)
 
@@ -404,6 +419,27 @@ def selftest() -> int:
     ok("a wildcard device is allowed", covers(dev, "APP-SRV-07")["allowed"])
     ok("the matching pattern is reported",
        covers(dev, "app-srv-07")["matched"] == "app-srv-*")
+
+    # ── a pattern carrying CAPITALS ──
+    # The fixture above is already lowercase, which is why this went unnoticed:
+    # parse_scope folds patterns on the way in, so an API-created scope was
+    # always safe. A scope stored by any other path (a script, a migration, a
+    # restored row) kept its capitals and matched NOTHING — and since the gate
+    # fails closed, that locked the administrator out of their own devices,
+    # reporting only how many patterns existed. Found by the SN 7 end-to-end
+    # harness, which seeded set_scope directly.
+    raw_upper = {"devices": ["Access-SRV-2.140", "DC_*"], "subnets": []}
+    ok("an unparsed exact pattern still matches",
+       covers(raw_upper, "Access-SRV-2.140")["allowed"])
+    ok("an unparsed wildcard still matches",
+       covers(raw_upper, "DC_AD_srv")["allowed"])
+    ok("and the device's own case still does not matter",
+       covers(raw_upper, "dc_ad_SRV")["allowed"])
+    # The direction that matters: folding patterns must not widen the scope.
+    ok("a non-member is still refused",
+       not covers(raw_upper, "lab-box-7")["allowed"])
+    ok("and so is a device from another range",
+       not covers(raw_upper, "far-host")["allowed"])
     ok("the reason names the device", "app-srv-07" in covers(dev, "app-srv-07")["why"])
     out = covers(dev, "laptop-a")
     ok("an unlisted device is refused", not out["allowed"])
@@ -510,7 +546,7 @@ def selftest() -> int:
        "response body" in st["filtering_note"])
     ok("status lists the kinds", st["kinds"] == list(SCOPE_KINDS))
 
-    total = 86
+    total = len(checked)
     if failures:
         print("ueba_scope selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

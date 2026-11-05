@@ -864,6 +864,44 @@ def current_scope() -> dict:
     return scope
 
 
+def unrestricted_admin_problem() -> str | None:
+    """None when the caller may manage ACCOUNTS, else the reason they may not.
+
+    Account management requires an admin with NO scope of their own, for the
+    reason ueba_scope.may_administer_scopes already states: "admin is precisely
+    the role that manages users — so without this predicate every device admin
+    holds the key to their own cage."
+
+    That predicate was installed on POST /api/scopes and NOT here, which left
+    the cage unlocked by a different door: a new account is created with no
+    scope, and no scope means unrestricted. Measured by the SN 7 end-to-end
+    harness, a device-scoped admin could create a fresh `admin` account (200)
+    and promote an existing viewer to admin (200), then sign in as either and
+    act outside its own scope. Scope was advisory for anyone holding the admin
+    role.
+
+    Returns a string rather than raising so each route can answer with its own
+    status code, and returns None when enforcement is off so an unenforced
+    deployment behaves exactly as it did before scopes existed.
+    """
+    if not is_enforcing():
+        return None
+    user = current_user()
+    if not user:
+        return "not authenticated"
+    try:
+        import ueba_scope
+    except Exception:
+        # No scope module means no scopes exist, so nobody is restricted.
+        return None
+    if ueba_scope.is_restricted(current_scope()):
+        return ("your administrative authority is limited to %s, and account "
+                "management is estate-wide — an administrator with no scope of "
+                "their own must make this change"
+                % ueba_scope.describe(current_scope()))
+    return None
+
+
 def is_enforcing() -> bool:
     """True when auth.enforce is on, i.e. when roles actually gate anything.
 
@@ -1256,6 +1294,9 @@ def auth_users_list():
 @bp.route("/api/auth/users", methods=["POST"])
 @require_role("admin")
 def auth_users_create():
+    problem = unrestricted_admin_problem()
+    if problem:
+        return jsonify({"ok": False, "error": problem}), 403
     store = _store()
     if store is None:
         return jsonify({"ok": False, "error": "auth store unavailable"}), 503
@@ -1283,6 +1324,9 @@ def auth_users_create():
 @bp.route("/api/auth/users/<path:sub>", methods=["PATCH"])
 @require_role("admin")
 def auth_users_update(sub):
+    problem = unrestricted_admin_problem()
+    if problem:
+        return jsonify({"ok": False, "error": problem}), 403
     store = _store()
     if store is None:
         return jsonify({"ok": False, "error": "auth store unavailable"}), 503
@@ -1325,6 +1369,9 @@ def auth_users_update(sub):
 @bp.route("/api/auth/users/<path:sub>", methods=["DELETE"])
 @require_role("admin")
 def auth_users_delete(sub):
+    problem = unrestricted_admin_problem()
+    if problem:
+        return jsonify({"ok": False, "error": problem}), 403
     store = _store()
     if store is None:
         return jsonify({"ok": False, "error": "auth store unavailable"}), 503
