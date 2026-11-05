@@ -108,6 +108,104 @@ def available(cfg):
             for p in PROVIDERS}
 
 
+def redirect_uri_problem(uri) -> str:
+    """Why Google or Microsoft will refuse this callback URL, or "".
+
+    WHY THIS IS WORTH CHECKING BEFORE ANYONE REGISTERS AN APP
+
+    The callback is derived from `dashboard.email.public_url`, or from the
+    host the browser used if that is unset. On an on-premises install that
+    second case gives something like
+    `https://10.200.10.23:3026/api/email/oauth/callback` — and Google's OAuth
+    console **rejects a private IP address** for a Web application client. It
+    accepts https with a publicly resolvable domain, or http/https on
+    localhost and 127.0.0.1, and nothing else.
+
+    So an admin can follow the registration guide correctly, paste the URL
+    this install actually uses, and be refused by the console with no hint
+    that the product could have told them. This says it first.
+    """
+    uri = str(uri or "").strip()
+    if not uri:
+        return ("no callback URL could be worked out — set "
+                "dashboard.email.public_url to the address admins reach this "
+                "console on")
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(uri)
+    except Exception:
+        return "the callback URL %r could not be parsed" % uri[:80]
+    host = (u.hostname or "").lower()
+    if not host:
+        return "the callback URL has no host: %r" % uri[:80]
+
+    loopback = host in ("localhost", "127.0.0.1", "::1")
+    if loopback:
+        return ""                       # allowed by both, http included
+
+    if u.scheme != "https":
+        return ("Google and Microsoft require https for a callback that is "
+                "not on localhost; this one is %s" % u.scheme)
+
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return ("Google will not accept a private IP address (%s) as a "
+                    "callback. Either give this console a publicly "
+                    "resolvable hostname and set "
+                    "dashboard.email.public_url to it, or connect the mailbox "
+                    "through a localhost tunnel: forward a local port to this "
+                    "host, set public_url to http://localhost:<port>, and "
+                    "register that as the redirect URI." % host)
+        return ("a bare public IP (%s) is accepted by some providers and not "
+                "others; a hostname is safer" % host)
+    if "." not in host:
+        return ("%r is not a fully qualified hostname, so neither provider "
+                "will resolve it" % host)
+    if host.endswith((".local", ".internal", ".lan", ".home")):
+        return ("%r is not publicly resolvable, so the provider cannot send "
+                "the browser back to it" % host)
+    return ""
+
+
+def readiness(cfg, redirect_uri="") -> dict:
+    """Everything an operator needs to know to get Connect working.
+
+    Returned by /api/email/status so the panel can say what is missing rather
+    than only showing or hiding a button.
+    """
+    avail = available(cfg)
+    problem = redirect_uri_problem(redirect_uri)
+    missing = []
+    for prov, ready in sorted(avail.items()):
+        if not ready:
+            pc = provider_cfg(cfg, prov)
+            lack = []
+            if not pc.get("client_id"):
+                lack.append("client_id")
+            if not pc.get("client_secret"):
+                lack.append("client_secret (from %s)"
+                            % (pc.get("client_secret_env") or "its env var"))
+            missing.append({"provider": prov, "needs": lack})
+    return {
+        "providers": avail,
+        "any_provider_ready": any(avail.values()),
+        "missing": missing,
+        "redirect_uri": redirect_uri,
+        "redirect_uri_problem": problem,
+        "ready": bool(any(avail.values()) and not problem),
+        "summary": (
+            "ready to connect a mailbox" if any(avail.values()) and not problem
+            else problem if problem and any(avail.values())
+            else "no OAuth application is configured yet, so the Connect "
+                 "buttons cannot work; see docs/EMAIL_SETUP.md"),
+    }
+
+
 def _guard(url, provider):
     if ueba_egress is None:
         return

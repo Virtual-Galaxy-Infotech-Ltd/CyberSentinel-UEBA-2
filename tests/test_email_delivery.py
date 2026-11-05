@@ -448,6 +448,156 @@ def main() -> int:
     ok("with no SMTP the capability map says email is off",
        RS.smtp_configured({}) is False)
 
+    # ── 5. the Settings → Email routes ──
+    # The panel shipped before these existed, so its buttons returned 404 and
+    # "no mail server is set" was true with no way to change it. Driven here
+    # through the real Flask routes against the local sink.
+    import yaml
+    import ueba_dashboard_server as S
+
+    wk = Path(tempfile.mkdtemp(prefix="smtpcfg-"))
+    base = yaml.safe_load((ROOT / "ueba_config.yaml").read_text())
+    rep = base.setdefault("dashboard", {}).setdefault("reporting", {})
+    rep["smtp_file"] = str(wk / "smtp_settings.json")
+    rep["smtp"] = {"host": "", "port": 587, "starttls": True, "ssl": False,
+                   "username": "", "password": "", "from_addr": "",
+                   "password_env": "UEBA_SMTP_PASSWORD_TEST_UNSET",
+                   "timeout_secs": 10}
+    base.setdefault("dashboard", {})["audit_file"] = str(wk / "audit.jsonl")
+    base.setdefault("paths", {})["audit_file"] = str(wk / "audit.jsonl")
+    base["audit_file"] = str(wk / "audit.jsonl")
+    base.setdefault("auth", {}).update({"enabled": False, "enforce": False})
+    cfgp = wk / "site.yaml"
+    cfgp.write_text(yaml.safe_dump(base, sort_keys=False))
+
+    S.CFG = S.load_dashboard_config(str(cfgp))
+    S._RAW_CFG = base
+    c = S.app.test_client()
+
+    r = c.get("/api/settings/smtp")
+    ok("GET settings/smtp answers", r.status_code == 200, str(r.status_code))
+    d = (r.get_json() or {}).get("smtp") or {}
+    ok("it starts unconfigured", d.get("configured") is False, str(d))
+    ok("and never carries a password field", "password" not in d, str(sorted(d)))
+
+    # A save with no host must be refused with something an admin can act on.
+    r = c.put("/api/settings/smtp", json={"host": "", "port": 587})
+    ok("saving with no mail server is refused", r.status_code == 400)
+    ok("and names what to enter",
+       "smtp.gmail.com" in ((r.get_json() or {}).get("error") or ""),
+       str(r.get_json()))
+    r = c.put("/api/settings/smtp", json={"host": "h", "port": 99999})
+    ok("an impossible port is refused", r.status_code == 400,
+       str(r.get_json()))
+
+    # A real save, pointed at the sink.
+    sink2 = SmtpSink()
+    try:
+        r = c.put("/api/settings/smtp", json={
+            "host": "127.0.0.1", "port": sink2.port, "ssl": False,
+            "starttls": False, "username": "", "password": "",
+            "from_addr": "ueba@example.invalid"})
+        ok("the settings save", r.status_code == 200,
+           "%d %s" % (r.status_code, r.get_data(as_text=True)[:120]))
+        d = (r.get_json() or {}).get("smtp") or {}
+        ok("and read back as configured", d.get("configured") is True, str(d))
+        ok("the stored file is owner-only",
+           (Path(rep["smtp_file"]).stat().st_mode & 0o077) == 0,
+           oct(Path(rep["smtp_file"]).stat().st_mode))
+
+        # The test send, through the real route.
+        r = c.post("/api/settings/smtp/test", json={"to": "soc@example.invalid"})
+        body = r.get_json() or {}
+        ok("the test send succeeds against the sink",
+           body.get("ok") is True, str(body)[:160])
+        import time
+        for _ in range(50):
+            if sink2.data:
+                break
+            time.sleep(0.05)
+        msg2 = sink2.message()
+        ok("and a message really arrived", msg2 is not None)
+        if msg2:
+            ok("addressed to the requested recipient",
+               "soc@example.invalid" in (msg2["To"] or ""), repr(msg2["To"]))
+            ok("from the configured sender",
+               msg2["From"] == "ueba@example.invalid", repr(msg2["From"]))
+            ok("and it does not name the underlying SIEM vendor",
+               "wazuh" not in (msg2["Subject"] or "").lower())
+    finally:
+        sink2.close()
+
+    # A blank password must KEEP the saved one. Changing the port used to wipe
+    # the credential, which breaks the relay silently.
+    c.put("/api/settings/smtp", json={
+        "host": "127.0.0.1", "port": 2525, "username": "u",
+        "password": "kept-secret", "from_addr": "u@example.invalid"})
+    r = c.put("/api/settings/smtp", json={
+        "host": "127.0.0.1", "port": 2526, "username": "u",
+        "password": "", "from_addr": "u@example.invalid"})
+    ok("a blank password keeps the stored one",
+       ((r.get_json() or {}).get("smtp") or {}).get("has_password") is True,
+       str(r.get_json()))
+    ok("and the port change took effect",
+       ((r.get_json() or {}).get("smtp") or {}).get("port") == 2526)
+
+    # Testing with no address, and with a relay that is not there.
+    r = c.post("/api/settings/smtp/test", json={"to": ""})
+    ok("a test with no recipient is refused", r.status_code == 400)
+    r = c.post("/api/settings/smtp/test", json={"to": "x@example.invalid"})
+    rb = r.get_json() or {}
+    ok("an unreachable relay reports ok:false, not a 500",
+       r.status_code == 200 and rb.get("ok") is False, "%d %s" % (r.status_code, str(rb)[:100]))
+    ok("with a readable reason rather than a traceback",
+       len(str(rb.get("error") or "")) > 15, str(rb.get("error"))[:120])
+
+    # The audit allowlist must never carry the password.
+    fields = S._AUDIT_BODY_FIELDS.get("/api/settings/smtp") or ()
+    ok("the audit trail records the relay", "host" in fields, str(fields))
+    ok("and NEVER the password", "password" not in fields, str(fields))
+
+    # ── 6. OAuth readiness: say what is missing, before anyone registers ──
+    import ueba_mailer as M
+    ok("a private-IP callback is flagged",
+       "private IP" in M.redirect_uri_problem(
+           "https://10.200.10.23:3026/api/email/oauth/callback"))
+    ok("and the fix is named in the message",
+       "localhost tunnel" in M.redirect_uri_problem(
+           "https://10.200.10.23:3026/api/email/oauth/callback"))
+    ok("localhost is accepted over http",
+       M.redirect_uri_problem("http://localhost:3026/cb") == "")
+    ok("127.0.0.1 too", M.redirect_uri_problem("http://127.0.0.1:3026/cb") == "")
+    ok("a public https host is accepted",
+       M.redirect_uri_problem("https://ueba.example.com/cb") == "")
+    ok("plain http on a public host is refused",
+       "https" in M.redirect_uri_problem("http://ueba.example.com/cb"))
+    ok("a .local name is refused",
+       "resolvable" in M.redirect_uri_problem("https://ueba.local/cb"))
+    ok("an empty callback names the setting to fill",
+       "public_url" in M.redirect_uri_problem(""))
+
+    rd = M.readiness({"google": {}, "microsoft": {}},
+                     "https://10.200.10.23:3026/cb")
+    ok("readiness reports no provider configured",
+       rd["any_provider_ready"] is False)
+    ok("and lists what each provider needs",
+       all(m["needs"] for m in rd["missing"]), str(rd["missing"]))
+    ok("and is not ready overall", rd["ready"] is False)
+    ok("with a summary pointing at the setup doc",
+       "EMAIL_SETUP" in rd["summary"], rd["summary"])
+    rd2 = M.readiness(
+        {"google": {"client_id": "x", "client_secret": "y"}, "microsoft": {}},
+        "https://ueba.example.com/cb")
+    ok("one configured provider is enough to be ready", rd2["ready"] is True)
+    ok("and the summary says so", "ready to connect" in rd2["summary"])
+    rd3 = M.readiness(
+        {"google": {"client_id": "x", "client_secret": "y"}, "microsoft": {}},
+        "https://10.200.10.23:3026/cb")
+    ok("a configured provider with a bad callback is NOT ready",
+       rd3["ready"] is False)
+    ok("and the summary is the callback problem, not the doc",
+       "private IP" in rd3["summary"], rd3["summary"][:70])
+
     total = len(_checks)
     if _failures:
         print("email delivery: %d/%d FAILED" % (len(_failures), total))
