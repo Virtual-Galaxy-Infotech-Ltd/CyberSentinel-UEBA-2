@@ -807,15 +807,17 @@ def role_at_least(user: dict | None, minimum: str) -> bool:
 def require_role(minimum: str = "viewer"):
     """Gate a route on a minimum role.
 
-    A no-op while auth.enforce is off, so the decorator can be applied to
-    routes ahead of the cutover without changing behaviour.
+    While auth.enforce is off, anonymous requests pass through unchanged, so
+    the decorator can be applied ahead of the cutover. A request that DOES carry
+    a session is held to that user's role either way: a signed-in viewer is a
+    viewer whether or not enforcement is on.
     """
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(*a, **kw):
-            if not _cfg().get("enforce"):
-                return fn(*a, **kw)
             user = current_user()
+            if not _cfg().get("enforce") and user is None:
+                return fn(*a, **kw)
             if user is None:
                 return jsonify({"error": "authentication required"}), 401
             if not role_at_least(user, minimum):

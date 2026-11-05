@@ -37,7 +37,7 @@ function renderFpPatterns() {
       <td class="fp-reason-cell">${p.reason ? `<span class="fp-reason-text">${escapeHtml(p.reason)}</span>` : '<span class="fp-reason-empty">—</span>'}</td>
       <td><span class="fp-pat-matched">${(p.matched || 0).toLocaleString()}</span></td>
       <td class="time-cell">${fmtDate(p.marked_at)}</td>
-      <td><button class="fp-restore-btn" onclick="unmarkPatternFP('${idSafe}')">× Remove</button></td>
+      <td><button class="fp-restore-btn" data-cap="fp.edit" onclick="unmarkPatternFP('${idSafe}')">× Remove</button></td>
     </tr>`;
   }).join("");
 }
@@ -75,7 +75,7 @@ function renderFpEvents() {
       <td><span class="score-num" style="color:${scoreColor(a.score || 0)}">${(a.score || 0).toFixed(3)}</span></td>
       <td class="sig-cell">${a.signature || "—"}</td>
       <td class="fp-reason-cell">${rec.reason ? `<span class="fp-reason-text">${escapeHtml(rec.reason)}</span>` : '<span class="fp-reason-empty">—</span>'}</td>
-      <td><button class="fp-restore-btn" onclick="unmarkFP('${eidSafe}')">↺ Restore</button></td>
+      <td><button class="fp-restore-btn" data-cap="fp.edit" onclick="unmarkFP('${eidSafe}')">↺ Restore</button></td>
     </tr>`;
   }).join("");
 }

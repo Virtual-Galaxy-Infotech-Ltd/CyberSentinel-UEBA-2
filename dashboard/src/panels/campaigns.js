@@ -38,7 +38,7 @@ export function renderCampaigns() {
           <span>${c.alert_count} alerts</span><span>${c.users.length} users</span>
           <span>${fmtDate(c.first_seen)} → ${fmtDate(c.last_seen)}</span>
         </div>
-        <button class="fp-camp-btn" title="Mark every alert in this campaign as a false positive"
+        <button class="fp-camp-btn" data-cap="fp.edit" title="Mark every alert in this campaign as a false positive"
           onclick="window.__markCampaignFpPrompt('${cidSafe}', ${c.alert_count})">⚑ Mark Campaign FP</button>
       </div>
       <div class="campaign-body">

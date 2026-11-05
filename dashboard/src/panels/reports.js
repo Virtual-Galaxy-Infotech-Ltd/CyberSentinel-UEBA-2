@@ -429,15 +429,23 @@ export async function saveSchedule() {
 }
 
 export async function runScheduleNow(id) {
-  showToast("Running…", "info");
+  showToast("Running… a wide report can take a few seconds", "info");
   try {
     const r = await fetch(`/api/reports/schedules/${encodeURIComponent(id)}/run`, { method: "POST" });
-    const d = await r.json();
-    if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
-    showToast(`Run complete — ${d.status}`, "success");
+    // A proxy timeout or crash returns an HTML page, not JSON. Say what
+    // happened instead of "Unexpected token <".
+    let d = {};
+    try { d = await r.json(); } catch { d = {}; }
+    if (r.status === 401 || r.status === 403) throw new Error("you do not have permission to run schedules");
+    if (!r.ok || d.ok === false) throw new Error(d.error || `server returned HTTP ${r.status}`);
+    if (d.delivered === false) {
+      showToast(`Report generated and saved to Recent Reports, but not emailed: ${d.status}`, "error", 10000);
+    } else {
+      showToast(`Run complete — ${d.status}`, "success");
+    }
     loadSchedules(); loadHistory();
   } catch (e) {
-    showToast("Run failed: " + e.message, "error");
+    showToast("Run failed: " + e.message, "error", 10000);
   }
 }
 

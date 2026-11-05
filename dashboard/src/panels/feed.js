@@ -63,11 +63,11 @@ export function buildEvidencePanel(ev, alertId, colSpan, eventId, signatureDesc)
         — across all users and hosts. Existing history stays visible; other rule descriptions are unaffected. Manage in the False Positives tab.
       </div>` : "";
   const fpForm = eventId ? `
-    <div class="fp-form" onclick="event.stopPropagation()">
+    <div class="fp-form" data-cap="fp.edit" onclick="event.stopPropagation()">
       <div class="fp-form-title">Mark this alert as a false positive</div>
       <div class="fp-form-row">
         <input id="fp-reason-${alertId}" class="fp-form-input" placeholder="Reason (optional) — e.g. expected RDP from admin desk" maxlength="240"/>
-        <button class="fp-form-submit" data-cap="fp.edit" onclick="window.__markFpFromForm('${eidSafe}','${alertId}')">Mark FP</button>
+        <button class="fp-form-submit" onclick="window.__markFpFromForm('${eidSafe}','${alertId}')">Mark FP</button>
       </div>
       ${fpHint}
     </div>` : "";

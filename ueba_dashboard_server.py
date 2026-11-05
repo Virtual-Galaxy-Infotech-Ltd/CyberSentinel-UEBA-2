@@ -3127,14 +3127,16 @@ def _require_cap(cap):
 
 def _capability_map():
     """{capability: allowed} for the caller — what the UI should offer."""
-    # Not enforcing means everyone can do everything, so say so rather than
-    # inventing a role. The UI then renders exactly as it does today.
-    if not _rbac_enforcing():
-        return {c: True for c in CAPABILITIES}
     try:
-        user = ueba_auth.current_user()
+        user = ueba_auth.current_user() if AUTH_MODULE_AVAILABLE else None
     except Exception:
         user = None
+    # Not enforcing and nobody signed in: everyone can do everything, so say so
+    # rather than inventing a role. But someone who HAS signed in gets their own
+    # role either way — a viewer must not be offered analyst actions just
+    # because enforcement is off.
+    if not _rbac_enforcing() and user is None:
+        return {c: True for c in CAPABILITIES}
     return {c: ueba_auth.role_at_least(user, m) for c, m in CAPABILITIES.items()}
 
 
@@ -3591,7 +3593,14 @@ def api_reports_schedule_run(sid):
         status = _run_schedule(sched, manual_by=_current_username())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    return jsonify({"ok": True, "status": status})
+    # Record the outcome on the schedule so "Last run" in the list matches what
+    # the button just reported, as a scheduled firing would.
+    try:
+        ueba_report_store.mark_run(_rcfg()["schedules_file"], sid, status)
+    except Exception:
+        pass
+    delivered = not str(status).startswith(("email failed", "smtp not configured"))
+    return jsonify({"ok": True, "status": status, "delivered": delivered})
 
 
 def _run_schedule(sched, manual_by=None):
@@ -3616,16 +3625,22 @@ def _run_schedule(sched, manual_by=None):
             delivery = "smtp not configured — stored only"
         else:
             win = (doc.get("window") or {}).get("label", "")
-            ueba_report_store.send_email(
-                smtp, to=recipients,
-                subject=f'{doc.get("title")} — {win}',
-                body=(f'{doc.get("title")}\n{doc.get("subtitle")}\n\n'
-                      f'Period: {win}\n'
-                      f'Generated: {doc.get("generated_at")}\n\n'
-                      f'This report was generated automatically by '
-                      f'{doc.get("site")}.\n'),
-                attachment=data, filename=f"report.{ext}", mime=mime)
-            delivery = f"emailed to {len(recipients)} recipient(s)"
+            try:
+                ueba_report_store.send_email(
+                    smtp, to=recipients,
+                    subject=f'{doc.get("title")} — {win}',
+                    body=(f'{doc.get("title")}\n{doc.get("subtitle")}\n\n'
+                          f'Period: {win}\n'
+                          f'Generated: {doc.get("generated_at")}\n\n'
+                          f'This report was generated automatically by '
+                          f'{doc.get("site")}.\n'),
+                    attachment=data, filename=f"report.{ext}", mime=mime)
+                delivery = f"emailed to {len(recipients)} recipient(s)"
+            except Exception as e:
+                # The report itself is fine: keep it in history so it can still
+                # be downloaded, and record exactly why the email did not go.
+                delivery = f"email failed — {e}"
+                print(f"[reports] schedule {sched.get('id')}: {delivery}")
 
     rec = ueba_report_store.record_artifact(
         _rcfg()["history_file"], _rcfg()["output_dir"],
