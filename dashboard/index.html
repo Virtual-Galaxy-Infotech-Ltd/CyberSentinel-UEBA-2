@@ -1033,6 +1033,39 @@
         </table>
       </div>
     </div>
+
+    <!-- Admin only. Used by scheduled reports and alert-rule emails. -->
+    <div class="panel" data-cap="smtp.edit">
+      <div class="panel-header">
+        <div class="panel-title">EMAIL (SMTP)</div>
+        <span class="panel-badge" id="set-smtp-badge">not set</span>
+      </div>
+      <div class="wl-form">
+        <select id="set-smtp-provider" class="wl-input" style="min-width:170px" title="Fills in the server for common providers">
+          <option value="gmail">Gmail</option>
+          <option value="office365">Outlook / Office 365</option>
+          <option value="custom">Other / work mail server</option>
+        </select>
+        <input id="set-smtp-host" class="wl-input" type="text" placeholder="Mail server, e.g. smtp.gmail.com" autocomplete="off" style="flex:2 1 220px">
+        <input id="set-smtp-port" class="wl-input" type="number" min="1" max="65535" placeholder="Port" style="width:90px">
+        <select id="set-smtp-security" class="wl-input" style="min-width:150px">
+          <option value="starttls">STARTTLS (587)</option>
+          <option value="ssl">SSL/TLS (465)</option>
+          <option value="none">None (25, internal relay)</option>
+        </select>
+      </div>
+      <div class="wl-form">
+        <input id="set-smtp-user" class="wl-input" type="text" placeholder="Login, e.g. you@gmail.com" autocomplete="off" style="flex:1 1 220px">
+        <input id="set-smtp-pass" class="wl-input" type="password" placeholder="Password / app password" autocomplete="new-password" style="flex:1 1 220px">
+        <input id="set-smtp-from" class="wl-input" type="text" placeholder="From address (optional, defaults to login)" autocomplete="off" style="flex:1 1 240px">
+        <button id="set-smtp-save" class="export-btn wl-add-btn">Save</button>
+      </div>
+      <div class="wl-form" style="border-bottom:none">
+        <input id="set-smtp-test-to" class="wl-input" type="text" placeholder="Send a test email to…" autocomplete="off" style="flex:1 1 260px">
+        <button id="set-smtp-test" class="export-btn wl-add-btn">Send test email</button>
+      </div>
+      <div class="set-note" id="set-smtp-help" style="margin-bottom:14px"></div>
+    </div>
   </div>
 
   <div class="page" id="page-threatmap">

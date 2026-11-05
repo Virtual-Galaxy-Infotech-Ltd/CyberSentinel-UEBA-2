@@ -141,7 +141,7 @@ function renderRules() {
   if (note) {
     note.textContent = META.email_enabled
       ? "Email delivery is configured."
-      : "SMTP is not configured, so email rules are stored but cannot deliver. "
+      : "Email is not set up, so email rules are stored but cannot deliver. Set it up in Settings → Email (SMTP). "
         + "Webhook rules work regardless.";
   }
   if (RULES === null) {

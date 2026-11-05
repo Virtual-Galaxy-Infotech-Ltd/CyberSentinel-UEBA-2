@@ -2870,7 +2870,66 @@ def _smtp_cfg():
     env_name = smtp.get("password_env")
     if env_name and os.environ.get(env_name):
         smtp["password"] = os.environ[env_name]
+    # Settings saved by an admin from the dashboard win over the YAML: they are
+    # the newer, deliberate choice. A saved blank password keeps the one above.
+    saved = _smtp_saved()
+    for k, v in saved.items():
+        if k == "password" and not v:
+            continue
+        smtp[k] = v
     return smtp
+
+
+SMTP_FIELDS = ("host", "port", "ssl", "starttls", "username", "password",
+               "from_addr", "verify_tls")
+
+
+def _smtp_settings_path():
+    p = _rcfg().get("smtp_settings_file")
+    if p:
+        return Path(p)
+    # Next to the other reporting state, so it lives on the data drive.
+    return Path(_rcfg().get("schedules_file") or "report_schedules.json").with_name(
+        "smtp_settings.json")
+
+
+def _smtp_saved():
+    try:
+        with open(_smtp_settings_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return {k: d[k] for k in SMTP_FIELDS if k in d} if isinstance(d, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+    except Exception as e:
+        print(f"[dashboard] could not read SMTP settings: {e}")
+        return {}
+
+
+def _smtp_save(settings):
+    """Write the admin's SMTP settings, readable by this service's user only."""
+    path = _smtp_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _smtp_public(cfg):
+    """SMTP settings safe to send to the browser: never the password itself."""
+    out = {k: cfg.get(k) for k in SMTP_FIELDS if k != "password"}
+    out["port"] = int(cfg.get("port") or 587)
+    out["has_password"] = bool(cfg.get("password"))
+    out["configured"] = bool(cfg.get("host"))
+    return out
+
+
+
 
 
 def _audit_entries_since(since_dt, limit=5000):
@@ -3096,6 +3155,7 @@ CAPABILITIES = {
     "notify.edit":      "admin",
     "audit.view":       "admin",
     "users.manage":     "admin",
+    "smtp.edit":        "admin",
 }
 
 
@@ -3207,6 +3267,81 @@ def api_auth_capabilities():
         "levels":       dict(CAPABILITIES),
         "roles":        list(ueba_auth.ROLES) if AUTH_MODULE_AVAILABLE else [],
     })
+
+
+# -- Mail (SMTP) settings, editable by admins --
+
+@app.route("/api/settings/smtp", methods=["GET"])
+@_require_cap("smtp.edit")
+def api_smtp_get():
+    if not REPORTS_AVAILABLE:
+        return _reports_unavailable()
+    return jsonify({"ok": True, "smtp": _smtp_public(_smtp_cfg())})
+
+
+@app.route("/api/settings/smtp", methods=["PUT", "POST"])
+@_require_cap("smtp.edit")
+def api_smtp_save():
+    if not REPORTS_AVAILABLE:
+        return _reports_unavailable()
+    b = request.get_json(silent=True) or {}
+    host = str(b.get("host") or "").strip()
+    try:
+        port = int(b.get("port") or 587)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Port must be a number"}), 400
+    if not (0 < port < 65536):
+        return jsonify({"ok": False, "error": "Port must be between 1 and 65535"}), 400
+    username = str(b.get("username") or "").strip()
+    from_addr = str(b.get("from_addr") or "").strip()
+    if from_addr and "@" not in from_addr:
+        return jsonify({"ok": False, "error": "From address must be an email address"}), 400
+    settings = {
+        "host": host, "port": port,
+        "ssl": bool(b.get("ssl")) or port == 465,
+        "starttls": bool(b.get("starttls", True)),
+        "verify_tls": bool(b.get("verify_tls", True)),
+        "username": username,
+        "from_addr": from_addr,
+    }
+    prev = _smtp_saved()
+    pw = b.get("password")
+    if b.get("clear_password"):
+        settings["password"] = ""
+    elif pw:
+        # Gmail shows app passwords in groups of four; the spaces are not part of it.
+        settings["password"] = str(pw).replace(" ", "") if "gmail" in host.lower() else str(pw)
+    elif prev.get("password"):
+        settings["password"] = prev["password"]
+    try:
+        _smtp_save(settings)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not save settings: {e}"}), 500
+    return jsonify({"ok": True, "smtp": _smtp_public(_smtp_cfg())})
+
+
+@app.route("/api/settings/smtp/test", methods=["POST"])
+@_require_cap("smtp.edit")
+def api_smtp_test():
+    """Send one short email so an admin can prove the mail settings work."""
+    if not REPORTS_AVAILABLE:
+        return _reports_unavailable()
+    b = request.get_json(silent=True) or {}
+    to = [t for t in re.split(r"[,;\s]+", str(b.get("to") or "")) if t]
+    if not to:
+        return jsonify({"ok": False, "error": "Enter an address to send the test to"}), 400
+    smtp = _smtp_cfg()
+    if not ueba_report_store.smtp_configured(smtp):
+        return jsonify({"ok": False, "error": "No mail server is set. Fill in the settings and save first."}), 400
+    try:
+        ueba_report_store.send_email(
+            smtp, to=to, subject="CyberSentinel UEBA - test email",
+            body=("This is a test email from CyberSentinel UEBA.\n\n"
+                  "If you can read it, scheduled reports and alert emails will be "
+                  "delivered with these settings.\n"))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "sent_to": to})
 
 
 def _resolve_report(report_id):
@@ -3564,7 +3699,7 @@ def api_reports_schedule_save():
     warn = None
     if rec["recipients"] and not ueba_report_store.smtp_configured(_smtp_cfg()):
         warn = ("Saved, but SMTP is not configured — this report will be generated "
-                "and stored, not emailed.")
+                "and stored, not emailed. Set up email in Settings → Email (SMTP).")
     return jsonify({"ok": True, "entry": rec, "created": created, "warning": warn})
 
 
@@ -3747,7 +3882,7 @@ def api_notify_rule_save():
     if rec["emails"] and not (REPORTS_AVAILABLE
                               and ueba_report_store.smtp_configured(_smtp_cfg())):
         warn = ("Saved, but SMTP is not configured — this rule cannot deliver "
-                "email until it is. Webhook delivery is unaffected.")
+                "email until it is (Settings → Email (SMTP)). Webhook delivery is unaffected.")
     return jsonify({"ok": True, "entry": rec, "created": created, "warning": warn})
 
 

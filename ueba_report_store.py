@@ -452,7 +452,7 @@ def send_email(cfg, *, to, subject, body, attachment=None, filename=None,
     cfg = cfg or {}
     host = (cfg.get("host") or "").strip()
     if not host:
-        raise RuntimeError("SMTP is not configured (reporting.smtp.host is empty)")
+        raise RuntimeError("No mail server is set. An admin can set one in Settings → Email (SMTP).")
     port = int(cfg.get("port") or 587)
     # Port 465 is implicit TLS. Treat it so even if `ssl` was left false — the
     # most common misconfiguration, and one that otherwise just hangs/drops.
