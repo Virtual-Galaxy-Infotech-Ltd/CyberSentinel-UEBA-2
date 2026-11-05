@@ -34,6 +34,7 @@ import argparse
 import gzip
 import json
 import random
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -77,6 +78,85 @@ def build_scorers(cfg: dict, model_dir: str):
     ae_scorer = AutoencoderScorer(str(md / "autoencoders"), scaler,
                                   str(md / "thresholds.json"), cfg)
     return if_scorer, ae_scorer
+
+
+# Enriched chunks are named `enriched_YYYY-MM-DD_HH-MM-SS.jsonl[.gz]`. The
+# timestamp is zero-padded throughout, so plain string ordering is already
+# chronological ordering and no date parsing is needed to compare two chunks.
+_CHUNK_RE = re.compile(r"enriched[_-](\d{4}-\d{2}-\d{2})[_T](\d{2}-\d{2}-\d{2})")
+
+
+def chunk_key(name) -> str:
+    """The sortable timestamp inside a chunk filename, or "".
+
+    Returns the raw `YYYY-MM-DD_HH-MM-SS` text rather than a datetime: the
+    only thing anyone does with it is compare it to another chunk's, and
+    string comparison is exact where a parse could fail on an unexpected
+    variant and silently return a wrong order.
+    """
+    m = _CHUNK_RE.search(str(Path(name).name))
+    return "%s_%s" % (m.group(1), m.group(2)) if m else ""
+
+
+def holdout_chunks(sample_dir, after: str = "", limit: int = 0) -> list:
+    """Chunks strictly NEWER than `after`, newest first.
+
+    WHY THIS EXISTS. The gate used to validate against a single file named by
+    `paths.enriched_input`, which on this deployment does not exist — so the
+    gate failed outright and no retrain could ever promote (2026-11-03:
+    "sample file not found: /opt/ueba/enriched.jsonl").
+
+    The obvious fix, pointing it at the training corpus, would be worse than
+    the bug: a model validated on the data it was fitted to will always look
+    good, and the gate exists precisely to catch a model that scores its own
+    training distribution well and floods on anything else. So the sample has
+    to be data the candidate has never seen.
+
+    `after` is normally the content of `.state/last_train_pull`, the last
+    chunk the weekly pull fed into the corpus. Everything newer is unseen by
+    construction, which makes this a real holdout without anyone maintaining
+    a second copy of the data.
+    """
+    d = Path(sample_dir)
+    if not d.is_dir():
+        return []
+    cut = chunk_key(after) if after else ""
+    found = []
+    for f in d.iterdir():
+        if not f.is_file():
+            continue
+        nm = f.name
+        if not (nm.endswith(".jsonl") or nm.endswith(".jsonl.gz")):
+            continue
+        k = chunk_key(nm)
+        if not k:
+            continue
+        if cut and k <= cut:
+            continue
+        found.append((k, f))
+    found.sort(key=lambda kv: kv[0], reverse=True)
+    out = [f for _k, f in found]
+    return out[:limit] if limit else out
+
+
+def read_sample_many(paths, n: int, max_scan: int) -> list[dict]:
+    """Sample up to n events across several chunks, newest first.
+
+    Spread across files rather than drained from the newest one, so the sample
+    is not a few minutes of traffic that happens to be unrepresentative — a
+    single quiet chunk would otherwise pass a model that floods at midday.
+    """
+    paths = list(paths)
+    if not paths:
+        return []
+    per = max(1, n // len(paths))
+    out: list[dict] = []
+    for pth in paths:
+        if len(out) >= n:
+            break
+        want = min(per, n - len(out))
+        out.extend(read_sample(str(pth), want, max_scan))
+    return out[:n]
 
 
 def read_sample(path: str, n: int, max_scan: int) -> list[dict]:
@@ -149,19 +229,75 @@ def main() -> None:
                          "--baseline-multiple x its critical rate")
     ap.add_argument("--baseline-multiple", type=float, default=4.0)
     ap.add_argument("--min-events", type=int, default=500)
+    ap.add_argument("--sample-dir", default=None,
+                    help="directory of enriched chunks to sample a HOLDOUT "
+                         "from (default: validation.sample_dir in config)")
+    ap.add_argument("--after", default=None,
+                    help="only use chunks newer than this chunk name or "
+                         "timestamp (default: the contents of "
+                         "validation.trained_through_file, i.e. the last "
+                         "chunk fed into the training corpus)")
+    ap.add_argument("--max-chunks", type=int, default=12,
+                    help="how many holdout chunks to spread the sample across")
     args = ap.parse_args()
 
     cfg = load_cfg(args.config)
-    sample_path = (args.sample or cfg["paths"].get("enriched_input")
-                   or cfg["paths"].get("input_file") or "enriched.jsonl")
-    if not Path(sample_path).exists():
-        print(f"VALIDATION ERROR: sample file not found: {sample_path}")
-        sys.exit(2)
+    vcfg = cfg.get("validation") or {}
 
-    events = read_sample(sample_path, args.n, args.max_scan)
+    # An explicit --sample always wins, so an operator can validate against a
+    # file of their choosing. Otherwise prefer a HOLDOUT drawn from the chunk
+    # directory, and fall back to the old single-file behaviour only if no
+    # directory is configured.
+    events: list = []
+    sample_desc = ""
+    if args.sample:
+        sample_path = args.sample
+        if not Path(sample_path).exists():
+            print(f"VALIDATION ERROR: sample file not found: {sample_path}")
+            sys.exit(2)
+        events = read_sample(sample_path, args.n, args.max_scan)
+        sample_desc = sample_path
+    else:
+        sample_dir = args.sample_dir or vcfg.get("sample_dir") or ""
+        after = args.after
+        if after is None:
+            tf = vcfg.get("trained_through_file") or ""
+            try:
+                after = Path(tf).read_text().strip() if tf else ""
+            except Exception:
+                after = ""
+        if sample_dir:
+            chunks = holdout_chunks(sample_dir, after or "",
+                                    limit=max(1, args.max_chunks))
+            if not chunks:
+                # Deliberately fatal. An empty holdout means every candidate
+                # would be promoted unchecked, and a gate that passes because
+                # it had nothing to test is worse than one that fails loudly.
+                print(f"VALIDATION ERROR: no holdout chunks in {sample_dir} "
+                      f"newer than {after or '<unset>'} — the candidate cannot "
+                      f"be validated against unseen data. Is the enriched feed "
+                      f"still writing?")
+                sys.exit(2)
+            events = read_sample_many(chunks, args.n, args.max_scan)
+            sample_desc = ("%d holdout chunk(s) from %s, newer than %s"
+                           % (len(chunks), sample_dir, after or "<unset>"))
+            print("HOLDOUT    %s" % sample_desc)
+            print("  newest=%s  oldest=%s"
+                  % (chunks[0].name, chunks[-1].name))
+        else:
+            sample_path = (cfg["paths"].get("enriched_input")
+                           or cfg["paths"].get("input_file") or "enriched.jsonl")
+            if not Path(sample_path).exists():
+                print(f"VALIDATION ERROR: sample file not found: {sample_path}"
+                      f" and no validation.sample_dir is configured, so no "
+                      f"holdout could be assembled either")
+                sys.exit(2)
+            events = read_sample(sample_path, args.n, args.max_scan)
+            sample_desc = sample_path
+
     if len(events) < args.min_events:
         print(f"VALIDATION ERROR: only {len(events)} events sampled from "
-              f"{sample_path} (need >= {args.min_events}) — cannot validate")
+              f"{sample_desc} (need >= {args.min_events}) — cannot validate")
         sys.exit(2)
 
     # profile_store=None: feature[34] user_deviation_baseline is a zero-variance

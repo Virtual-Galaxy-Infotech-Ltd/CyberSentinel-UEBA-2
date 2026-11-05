@@ -50,6 +50,41 @@ PREPROCESSOR = Path("ueba_preprocessor.py")
 CONFIG_FILE  = Path("ueba_config.yaml")
 FEATURES_H5  = Path("/data/ueba_training/features.h5")
 
+# The paths above are defaults, not the source of truth. They used to BE the
+# source of truth, while ueba_trainer.py read its own from the config — so the
+# two drifted, prepare wrote the corpus and features.h5 to one directory and
+# the trainer looked in another, and every weekly retrain since died with
+# "Features file not found". The config decides now; these stay only as the
+# fallback for a config that does not name them.
+#
+# Accepts --config so retrain.py can hand down the same file it gives the
+# trainer. There was no argparse here at all, which meant any argument was
+# silently ignored: `--help` did not print help, it started a rebuild.
+def _apply_config_paths():
+    global OUTPUT, FEATURES_H5, TMP_BASE, CONFIG_FILE
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Assemble the training corpus and rebuild features.h5.")
+    ap.add_argument("--config", default=str(CONFIG_FILE),
+                    help="UEBA config whose paths.* decide where output goes")
+    args, _unknown = ap.parse_known_args()
+    CONFIG_FILE = Path(args.config)
+    try:
+        import yaml
+        with open(CONFIG_FILE) as fh:
+            paths = (yaml.safe_load(fh) or {}).get("paths") or {}
+    except Exception as e:
+        print("[prepare] config unreadable (%s); using built-in paths" % e)
+        return
+    if paths.get("training_data"):
+        OUTPUT = Path(paths["training_data"])
+    if paths.get("features_h5"):
+        FEATURES_H5 = Path(paths["features_h5"])
+    TMP_BASE = OUTPUT.parent / "tmp"
+
+
+_apply_config_paths()
+
 GEOIP_DB = PIPELINE_DIR / "databases/GeoLite2-City.mmdb"
 ASN_DB   = PIPELINE_DIR / "databases/GeoLite2-ASN.mmdb"
 TOR_LIST = PIPELINE_DIR / "databases/tor-exit-nodes.txt"

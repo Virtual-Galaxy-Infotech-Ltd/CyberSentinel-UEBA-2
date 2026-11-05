@@ -183,7 +183,24 @@ def main():
     # ── Step 1/3: Data preparation (incremental) ──────────────────────────────
     log.info("")
     log.info("── STEP 1/3: Data Preparation ────────────────────────────")
-    if not run([PYTHON, str(PREPARE)], "Data preparation"):
+    # --config so prepare and the trainer cannot disagree about where
+    # features.h5 lives. --skip-prepare is for the case where the corpus is
+    # already built and only the models need rebuilding: prepare ALWAYS
+    # deletes and rebuilds features.h5 (84 GB in, 30-90 min), so re-running it
+    # to recover from a failure that happened AFTER it succeeded throws away
+    # work that was already good.
+    if "--skip-prepare" in sys.argv:
+        log.info("SKIPPED (--skip-prepare): using the existing corpus.")
+        from pathlib import Path as _P
+        import yaml as _yaml
+        _fp = ((_yaml.safe_load(open(CONFIG)) or {}).get("paths") or {}).get("features_h5")
+        if not _fp or not _P(_fp).exists():
+            log.error("--skip-prepare needs an existing features.h5; %r is not there.", _fp)
+            sys.exit(1)
+        log.info("  features.h5 : %.2f GB → %s",
+                 _P(_fp).stat().st_size / 1024 ** 3, _fp)
+    elif not run([PYTHON, str(PREPARE), "--config", str(CONFIG)],
+                 "Data preparation"):
         log.error("Data preparation failed. See logs/prepare.log. Live models untouched.")
         sys.exit(1)
 
@@ -200,6 +217,10 @@ def main():
     # ── Step 3/3: VALIDATION GATE ─────────────────────────────────────────────
     log.info("")
     log.info("── STEP 3/3: Validation gate ──────────────────────────────")
+    # No --sample: the validator assembles a HOLDOUT from
+    # validation.sample_dir, taking only chunks newer than the last one fed
+    # into the corpus. Passing a file here would re-introduce the thing the
+    # gate is for — a candidate judged on data it was trained on.
     val_cmd = [
         PYTHON, str(VALIDATOR),
         "--candidate", str(STAGING_DIR),
@@ -217,8 +238,8 @@ def main():
                              stderr=subprocess.STDOUT)
         vlog.write(val.stdout or "")
     for line in (val.stdout or "").splitlines():
-        if line.startswith(("CANDIDATE", "BASELINE", "VALIDATION", "  scored",
-                            "  highly", "  crit")):
+        if line.startswith(("CANDIDATE", "BASELINE", "VALIDATION", "HOLDOUT",
+                            "  scored", "  highly", "  crit", "  newest")):
             log.info("  [validate] %s", line.strip())
 
     if val.returncode != 0:

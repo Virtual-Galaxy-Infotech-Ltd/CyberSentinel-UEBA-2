@@ -202,6 +202,60 @@ isolation_forest:
 
 
 # ── Autoencoder ───────────────────────────────────────────────────────────────
+# ── Validation gate (RFP SN 18, retrain promotion) ─────────────────────────
+# A candidate model set is scored against real events before it replaces the
+# live one. The sample MUST be data the candidate has never seen: a model
+# validated on its own training corpus always looks good, and this gate exists
+# to catch one that fits its training distribution and floods on anything else.
+#
+# `sample_dir` is the live enriched feed. `trained_through_file` records the
+# last chunk the weekly pull fed into the corpus, so everything newer in that
+# directory is unseen by construction and the holdout needs no second copy of
+# the data and no manual upkeep.
+#
+# Before this, the gate defaulted to paths.enriched_input (/opt/ueba/
+# enriched.jsonl) which does not exist on this deployment — so it failed
+# outright and NO retrain could ever promote. Fixed 2026-11-04.
+validation:
+  # Left EMPTY on purpose. This is the one setting here that is genuinely
+  # site-specific — the directory the SIEM writes its enriched chunks to — and
+  # a real path carries a real account name, which does not belong in a shared
+  # repository. Set it in the site config (ueba_site.env / the deployed
+  # ueba_config.yaml), not here. Empty means the gate falls back to
+  # paths.enriched_input and says so plainly if that does not exist.
+  sample_dir: ""
+  trained_through_file: .state/last_train_pull
+  # Spread the sample across this many recent chunks rather than draining the
+  # newest one, so a single quiet period cannot pass a model that floods at
+  # midday.
+  max_chunks: 12
+
+# ── Behaviour-model tiers (RFP SN 18) ───────────────────────────────────────
+# Which model judges an entity, narrowest first:
+#
+#     own model  ->  cohort model  ->  global.pt
+#
+# The middle tier is new. preprocessing.min_events_per_user (2000) decides who
+# earns a model of their own; before this, EVERYONE below it was judged by
+# global.pt, a single model built from the whole estate. On the 2026-11-03
+# training run that was 42 named entities with their own model and every other
+# account sharing one.
+#
+# Cohorts come from profiles/peer_groups.json, the same assignment that drives
+# peer-group deviation (SN 42) — build it with build_peer_groups.py. With no
+# assignment present the cohort tier is inert and behaviour is exactly as it
+# was before, which is why this is safe to ship ahead of the peer-group run.
+model_tiers:
+  enabled: true
+  # A cohort of one is a per-entity model without the generalisation that
+  # justifies the tier.
+  cohort_min_members: 2
+  # Pooled rows needed before a cohort model is worth building. Below this it
+  # memorises its training rows — the same failure that autoencoder
+  # .peruser_floor_frac exists to contain for sparse per-entity models — so
+  # the members fall through to the global model instead.
+  cohort_min_rows: 500
+
 autoencoder:
   architecture:
     input_dim:   35
