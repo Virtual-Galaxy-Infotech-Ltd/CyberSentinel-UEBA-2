@@ -21,7 +21,7 @@ export function renderScoreDist(feedData) {
   [0.25, 0.5, 0.75, 1].forEach((f) => {
     const y = pT + cH - Math.round(f * cH);
     gridLines += `<line x1="${pL}" y1="${y}" x2="${W - pR}" y2="${y}" stroke="#1a2838" stroke-width="0.5" stroke-dasharray="3,3"/>
-                  <text x="${pL - 4}" y="${y + 3}" font-size="8" fill="#3d5a72" text-anchor="end">${Math.round(f * maxB)}</text>`;
+                  <text x="${pL - 4}" y="${y + 3}" font-size="10" fill="#3d5a72" text-anchor="end">${Math.round(f * maxB)}</text>`;
   });
   bins.forEach((count, i) => {
     const bH = Math.max(count > 0 ? 3 : 0, Math.round((count / maxB) * cH));
@@ -29,9 +29,9 @@ export function renderScoreDist(feedData) {
     const y  = pT + cH - bH;
     const color = colorsMap[i];
     rects  += `<rect x="${x}" y="${y}" width="${bW}" height="${bH}" fill="${color}" opacity="0.82" rx="2"><title>${(i/10).toFixed(1)}–${((i+1)/10).toFixed(1)}: ${count}</title></rect>`;
-    labels += `<text x="${x + bW/2}" y="${H - 2}" font-size="8" fill="#3d5a72" text-anchor="middle">${(i/10).toFixed(1)}</text>`;
+    labels += `<text x="${x + bW/2}" y="${H - 2}" font-size="10" fill="#3d5a72" text-anchor="middle">${(i/10).toFixed(1)}</text>`;
     if (count > 0) {
-      rects += `<text x="${x + bW/2}" y="${y - 3}" font-size="8" fill="${color}" text-anchor="middle">${count}</text>`;
+      rects += `<text x="${x + bW/2}" y="${y - 3}" font-size="10" fill="${color}" text-anchor="middle">${count}</text>`;
     }
   });
 
@@ -43,9 +43,9 @@ export function renderScoreDist(feedData) {
       ${rects}${labels}
     </svg>
     <div style="display:flex;gap:14px;margin-top:8px;flex-wrap:wrap;">
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--green);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#06d6a0;border-radius:1px;display:inline-block;"></span>Low (0.0–0.3)</span>
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--yellow);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#ffd166;border-radius:1px;display:inline-block;"></span>Moderate (0.4–0.5)</span>
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--orange);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#ff8c42;border-radius:1px;display:inline-block;"></span>High (0.6–0.7)</span>
-      <span style="font-family:var(--mono2);font-size:9px;color:var(--red);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#ff3b5c;border-radius:1px;display:inline-block;"></span>Critical (0.8–1.0)</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--green);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#06d6a0;border-radius:1px;display:inline-block;"></span>Low (0.0–0.3)</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--yellow);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#ffd166;border-radius:1px;display:inline-block;"></span>Moderate (0.4–0.5)</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--orange);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#ff8c42;border-radius:1px;display:inline-block;"></span>High (0.6–0.7)</span>
+      <span style="font-family:var(--mono2);font-size:12px;color:var(--red);display:flex;align-items:center;gap:5px;"><span style="width:10px;height:6px;background:#ff3b5c;border-radius:1px;display:inline-block;"></span>Critical (0.8–1.0)</span>
     </div>`;
 }

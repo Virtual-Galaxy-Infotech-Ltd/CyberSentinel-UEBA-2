@@ -725,6 +725,28 @@
   <!-- ── Alerting (device registry + notification rules) ── -->
   <div class="page" id="page-alerting">
 
+    <!-- Email sender: the mailbox reports and alerts are sent from -->
+    <div class="panel" style="margin-bottom:12px;" data-cap="notify.edit">
+      <div class="panel-header">
+        <div class="panel-header-left">
+          <span class="panel-title">✉ Email Sender</span>
+          <span class="info-btn" title="">i
+            <div class="info-tooltip">
+              <div class="info-tooltip-title">Email Sender</div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Providers</span><span class="info-tooltip-val tv-cyan">Gmail, Microsoft 365 / Outlook</span></div>
+              <div class="info-tooltip-row"><span class="info-tooltip-key">Permission</span><span class="info-tooltip-val tv-cyan">send only</span></div>
+              <div class="info-tooltip-note">Sign in with the mailbox that should send scheduled reports and alert notifications. UEBA is only allowed to send mail from it; it cannot read your inbox. You can disconnect at any time.</div>
+            </div>
+          </span>
+        </div>
+        <span class="panel-badge" id="em-badge">not connected</span>
+      </div>
+      <div class="em-body" id="em-body">
+        <div class="em-status" id="em-status">Checking…</div>
+        <div class="em-actions" id="em-actions"></div>
+      </div>
+    </div>
+
     <!-- Device registry -->
     <div class="panel" style="margin-bottom:12px;">
       <div class="panel-header">
@@ -1016,9 +1038,10 @@
         <button id="set-new-btn" class="export-btn wl-add-btn">＋ Create account</button>
       </div>
       <div class="set-note">
-        <b>Viewer</b> reads and exports. <b>Analyst</b> also triages — watch lists,
-        false positives, generating reports. <b>Admin</b> also configures devices,
-        notification rules, scheduled delivery and sees the audit trail.
+        <b>Viewer</b> reads and exports. <b>Analyst</b> also triages (false positives),
+        generates and schedules reports, and sets up alerting (device registry,
+        notification rules, email). <b>Admin</b> also manages watch lists and users
+        and sees the audit trail.
       </div>
 
       <div class="feed-table-wrap">

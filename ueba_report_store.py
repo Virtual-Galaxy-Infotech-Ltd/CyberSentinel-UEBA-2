@@ -27,6 +27,8 @@ import json
 import os
 import re
 import smtplib
+import socket
+import ssl
 import threading
 import time
 import traceback
@@ -237,6 +239,20 @@ def delete_schedule(path, sid):
     return True
 
 
+def mark_run(path, sid, status):
+    """Record a manual "Run now" on the schedule. Leaves next_run alone: running
+    it by hand must not shift when it next fires on its own."""
+    with _lock:
+        items = schedules(path)
+        for s in items:
+            if s.get("id") == sid:
+                s["last_run"] = datetime.now(timezone.utc).isoformat()
+                s["last_status"] = str(status)[:300]
+                _write(path, items)
+                return True
+    return False
+
+
 # ── History + artifacts ─────────────────────────────────────────────────────
 
 def history(path, limit=100):
@@ -383,15 +399,65 @@ def smtp_configured(cfg):
     return bool((cfg or {}).get("host"))
 
 
+PLACEHOLDER_FROM = "ueba@cybersentinel.local"
+
+
+def _sender(cfg):
+    """The From address. Most real mail servers (Office 365, Gmail, most relays
+    with auth) reject a From that is not the authenticated mailbox, so the
+    shipped placeholder gives way to the username when that is an address."""
+    user = (cfg.get("username") or "").strip()
+    frm = (cfg.get("from_addr") or "").strip()
+    if (not frm or frm == PLACEHOLDER_FROM) and "@" in user:
+        return user
+    return frm or user or "ueba@localhost"
+
+
+def _explain_smtp_error(e, host, port):
+    """Turn a socket/smtplib exception into something an administrator can act on."""
+    where = f"{host}:{port}"
+    if isinstance(e, smtplib.SMTPAuthenticationError):
+        return (f"Mail server {where} rejected the username/password "
+                f"(check reporting.smtp.username and the password or "
+                f"UEBA_SMTP_PASSWORD).")
+    if isinstance(e, smtplib.SMTPSenderRefused):
+        return (f"Mail server {where} refused the sender address "
+                f"{e.sender!r} — set reporting.smtp.from_addr to a mailbox "
+                f"this account may send as.")
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        bad = ", ".join(sorted(e.recipients)) or "recipients"
+        return f"Mail server {where} refused the recipient(s): {bad}."
+    if isinstance(e, socket.gaierror):
+        return f"Could not resolve mail server host {host!r} — check reporting.smtp.host."
+    if isinstance(e, (socket.timeout, TimeoutError)):
+        return (f"Timed out connecting to mail server {where} — the port may be "
+                f"blocked by a firewall, or the host/port is wrong.")
+    if isinstance(e, ConnectionRefusedError):
+        return f"Mail server {where} refused the connection — nothing is listening on that port."
+    if isinstance(e, ssl.SSLError):
+        return (f"TLS handshake with {where} failed ({e}). Port 465 needs "
+                f"ssl: true; port 587 needs ssl: false with starttls: true.")
+    if isinstance(e, smtplib.SMTPServerDisconnected):
+        return (f"Mail server {where} closed the connection. This usually means "
+                f"the SSL/STARTTLS setting does not match the port "
+                f"(465 = ssl, 587 = starttls).")
+    if isinstance(e, OSError):
+        return f"Could not connect to mail server {where}: {e}"
+    return f"Email via {where} failed: {e}"
+
+
 def send_email(cfg, *, to, subject, body, attachment=None, filename=None,
                mime="application/octet-stream"):
-    """Send one report. Raises on failure; the caller records that in history."""
+    """Send one report. Raises RuntimeError with a readable reason on failure."""
     cfg = cfg or {}
-    host = cfg.get("host")
+    host = (cfg.get("host") or "").strip()
     if not host:
-        raise RuntimeError("SMTP is not configured (reporting.smtp.host is empty)")
+        raise RuntimeError("No mail server is set (reporting.smtp.host is empty).")
     port = int(cfg.get("port") or 587)
-    sender = cfg.get("from_addr") or cfg.get("username") or "ueba@localhost"
+    # Port 465 is implicit TLS. Treat it so even if `ssl` was left false — the
+    # most common misconfiguration, and one that otherwise just hangs/drops.
+    use_ssl = bool(cfg.get("ssl")) or port == 465
+    sender = _sender(cfg)
 
     msg = EmailMessage()
     msg["From"] = sender
@@ -405,21 +471,37 @@ def send_email(cfg, *, to, subject, body, attachment=None, filename=None,
                            filename=filename or "report")
 
     timeout = int(cfg.get("timeout_secs") or 30)
-    if cfg.get("ssl"):
-        smtp = smtplib.SMTP_SSL(host, port, timeout=timeout)
-    else:
-        smtp = smtplib.SMTP(host, port, timeout=timeout)
+    smtp = None
     try:
-        if cfg.get("starttls") and not cfg.get("ssl"):
-            smtp.starttls()
+        if use_ssl:
+            smtp = smtplib.SMTP_SSL(host, port, timeout=timeout)
+        else:
+            smtp = smtplib.SMTP(host, port, timeout=timeout)
+        smtp.ehlo()
+        # STARTTLS only when the server offers it. An internal relay on port 25
+        # often does not, and insisting fails every send.
+        if not use_ssl and cfg.get("starttls", True) and smtp.has_extn("starttls"):
+            smtp.starttls(context=ssl.create_default_context()
+                          if cfg.get("verify_tls", True) else ssl._create_unverified_context())
+            smtp.ehlo()
         if cfg.get("username"):
+            if not smtp.has_extn("auth"):
+                raise RuntimeError(
+                    f"Mail server {host}:{port} does not offer login over this "
+                    f"connection — enable starttls, or clear reporting.smtp.username "
+                    f"for an unauthenticated relay.")
             smtp.login(cfg["username"], cfg.get("password") or "")
-        smtp.send_message(msg)
+        smtp.send_message(msg, from_addr=sender, to_addrs=list(to))
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(_explain_smtp_error(e, host, port)) from e
     finally:
-        try:
-            smtp.quit()
-        except Exception:
-            pass
+        if smtp is not None:
+            try:
+                smtp.quit()
+            except Exception:
+                pass
 
 
 # ── Scheduler (40) ──────────────────────────────────────────────────────────

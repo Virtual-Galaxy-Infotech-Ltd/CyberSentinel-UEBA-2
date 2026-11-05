@@ -22,7 +22,7 @@ function renderFpPatterns() {
   if (!pats.length) {
     tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state" style="padding:20px 12px">
       <p>NO AUTO-SUPPRESSION PATTERNS</p>
-      <p style="font-family:var(--mono2);font-size:10px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
+      <p style="font-family:var(--mono2);font-size:11px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
         Click <b>Mark FP</b> on any alert to auto-suppress every future alert with the same rule description.
       </p>
     </div></td></tr>`;
@@ -37,7 +37,7 @@ function renderFpPatterns() {
       <td class="fp-reason-cell">${p.reason ? `<span class="fp-reason-text">${escapeHtml(p.reason)}</span>` : '<span class="fp-reason-empty">—</span>'}</td>
       <td><span class="fp-pat-matched">${(p.matched || 0).toLocaleString()}</span></td>
       <td class="time-cell">${fmtDate(p.marked_at)}</td>
-      <td><button class="fp-restore-btn" onclick="unmarkPatternFP('${idSafe}')">× Remove</button></td>
+      <td><button class="fp-restore-btn" data-cap="fp.edit" onclick="unmarkPatternFP('${idSafe}')">× Remove</button></td>
     </tr>`;
   }).join("");
 }
@@ -55,7 +55,7 @@ function renderFpEvents() {
   if (!fps.length) {
     tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state" style="padding:30px 12px">
       <p>NO FALSE POSITIVES YET</p>
-      <p style="font-family:var(--mono2);font-size:10px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
+      <p style="font-family:var(--mono2);font-size:11px;color:var(--text3);margin-top:8px;letter-spacing:0.6px">
         Click the <span class="fp-btn-inline" style="cursor:default;pointer-events:none">FP</span> button on any alert in the feed to start.
       </p>
     </div></td></tr>`;
@@ -75,7 +75,7 @@ function renderFpEvents() {
       <td><span class="score-num" style="color:${scoreColor(a.score || 0)}">${(a.score || 0).toFixed(3)}</span></td>
       <td class="sig-cell">${a.signature || "—"}</td>
       <td class="fp-reason-cell">${rec.reason ? `<span class="fp-reason-text">${escapeHtml(rec.reason)}</span>` : '<span class="fp-reason-empty">—</span>'}</td>
-      <td><button class="fp-restore-btn" onclick="unmarkFP('${eidSafe}')">↺ Restore</button></td>
+      <td><button class="fp-restore-btn" data-cap="fp.edit" onclick="unmarkFP('${eidSafe}')">↺ Restore</button></td>
     </tr>`;
   }).join("");
 }

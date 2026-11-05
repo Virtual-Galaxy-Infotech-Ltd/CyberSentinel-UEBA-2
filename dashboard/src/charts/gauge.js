@@ -28,63 +28,93 @@ export function drawGauge(score) {
   const W = cssW, H = cssH;
   ctx.clearRect(0, 0, W, H);
 
-  const cx = W / 2;
-  const cy = H - 18;
-  const r  = Math.min(W * 0.44, H * 0.82);
+  // ── GEOMETRY IS DERIVED, NOT HARD-CODED ──────────────────────────────────
+  // Every dimension here used to be a fixed pixel value -- band 20, ticks 14
+  // and 8, label offset 14, hub 7 -- chosen when this canvas was ~250px wide.
+  // The panel was later compacted and the canvas roughly halved, which halved
+  // the radius while leaving the band at 20px: a stroke 36% as wide as the
+  // circle it sat on, which reads as a fat ring rather than a gauge.
+  //
+  // The value arc made it worse by using a ROUND line cap. A round cap adds
+  // half the band to EACH end of the arc, so at a low score the arc was
+  // shorter than its own caps: it drew as a rounded blob, and the start cap
+  // pushed it back past the horizontal, below where zero is. That is the
+  // green lozenge sticking out of the left of the dial.
+  //
+  // Everything below is now a fraction of the radius, and the radius is
+  // whatever is left after reserving room for the tick labels -- so the gauge
+  // keeps its proportions at any canvas size, and nothing can be clipped by
+  // the canvas edge the way the "0" and "100" labels were.
+  const cx        = W / 2;
+  const cy        = H - Math.max(6, H * 0.10);
+  const tickFont  = Math.max(8, Math.round(H * 0.115));
+  // "100" is the widest label: half of it, plus a gap, has to fit outside the
+  // arc on the right. The same reserve above the arc keeps "50" on-canvas.
+  const labelPad  = tickFont * 2.7;
+  const r         = Math.max(12, Math.min(W / 2 - labelPad, cy - labelPad));
+  const band      = Math.max(5, r * 0.22);
+  const tickOuter = r + band / 2;
+  const labelR    = tickOuter + tickFont * 0.9;
 
+  // Background track: the four risk zones, faint.
   const segments = [
     { from: 0,  to: 25,  color: "#06d6a0" },
     { from: 25, to: 50,  color: "#ffd166" },
     { from: 50, to: 75,  color: "#ff8c42" },
     { from: 75, to: 100, color: "#ff3b5c" },
   ];
+  ctx.lineCap = "butt";
   segments.forEach((s) => {
     const a1 = Math.PI + (s.from / 100) * Math.PI;
     const a2 = Math.PI + (s.to   / 100) * Math.PI;
     ctx.beginPath();
     ctx.arc(cx, cy, r, a1, a2);
-    ctx.lineWidth = 20; ctx.strokeStyle = s.color;
-    ctx.globalAlpha = 0.18; ctx.lineCap = "butt"; ctx.stroke();
+    ctx.lineWidth = band; ctx.strokeStyle = s.color;
+    ctx.globalAlpha = 0.18; ctx.stroke();
   });
   ctx.globalAlpha = 1;
 
+  // Value arc, drawn over the track. Butt cap, so it starts exactly at zero
+  // and its length is honestly the score -- no cap overhang either end.
   const sc = Math.min(Math.max(score, 0), 100);
   const fillColor = sc < 25 ? "#06d6a0" : sc < 50 ? "#ffd166" : sc < 75 ? "#ff8c42" : "#ff3b5c";
   if (sc > 0) {
     ctx.beginPath();
     ctx.arc(cx, cy, r, Math.PI, Math.PI + (sc / 100) * Math.PI);
-    ctx.lineWidth = 20; ctx.strokeStyle = fillColor;
-    ctx.globalAlpha = 0.95; ctx.lineCap = "round"; ctx.stroke();
+    ctx.lineWidth = band; ctx.strokeStyle = fillColor;
+    ctx.globalAlpha = 0.95; ctx.lineCap = "butt"; ctx.stroke();
     ctx.globalAlpha = 1;
   }
 
+  // Hairline along the outer edge of the band.
   ctx.beginPath();
-  ctx.arc(cx, cy, r + 2, Math.PI, Math.PI * 2);
+  ctx.arc(cx, cy, tickOuter, Math.PI, Math.PI * 2);
   ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,0.04)";
-  ctx.globalAlpha = 1; ctx.stroke();
+  ctx.stroke();
 
+  // Ticks, cut inward from the outer edge so they sit on the band.
   for (let i = 0; i <= 10; i++) {
     const a = Math.PI + (i / 10) * Math.PI;
     const isMajor = i % 2 === 0;
-    const iLen = isMajor ? 14 : 8;
+    const iLen = isMajor ? band * 0.72 : band * 0.40;
     ctx.beginPath();
-    ctx.moveTo(cx + (r - iLen) * Math.cos(a), cy + (r - iLen) * Math.sin(a));
-    ctx.lineTo(cx + (r + 1)    * Math.cos(a), cy + (r + 1)    * Math.sin(a));
+    ctx.moveTo(cx + (tickOuter - iLen) * Math.cos(a), cy + (tickOuter - iLen) * Math.sin(a));
+    ctx.lineTo(cx + tickOuter * Math.cos(a),          cy + tickOuter * Math.sin(a));
     ctx.strokeStyle = isMajor ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.07)";
     ctx.lineWidth = isMajor ? 1.5 : 0.8; ctx.stroke();
     if (isMajor) {
-      const lx = cx + (r + 14) * Math.cos(a);
-      const ly = cy + (r + 14) * Math.sin(a);
       ctx.fillStyle = "#3d5a72";
-      ctx.font = '600 9px "JetBrains Mono", monospace';
+      ctx.font = `600 ${tickFont}px "JetBrains Mono", monospace`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(String(i * 10), lx, ly);
+      ctx.fillText(String(i * 10), cx + labelR * Math.cos(a), cy + labelR * Math.sin(a));
     }
   }
 
+  // Needle and hub, both scaled off the radius for the same reason.
   const needleA = Math.PI + (sc / 100) * Math.PI;
-  const nLen = r - 8;
-  const nBase = 5;
+  const nLen  = r - band * 0.35;
+  const nBase = Math.max(3, r * 0.075);
+  const hubR  = Math.max(4, r * 0.13);
   const perpA = needleA + Math.PI / 2;
   ctx.beginPath();
   ctx.moveTo(cx + nLen  * Math.cos(needleA), cy + nLen  * Math.sin(needleA));
@@ -93,11 +123,11 @@ export function drawGauge(score) {
   ctx.closePath();
   ctx.fillStyle = "#ffffff"; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
 
-  ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+  ctx.beginPath(); ctx.arc(cx, cy, hubR, 0, Math.PI * 2);
   ctx.fillStyle = "#0f1720"; ctx.fill();
-  ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.beginPath(); ctx.arc(cx, cy, hubR * 0.58, 0, Math.PI * 2);
   ctx.fillStyle = fillColor; ctx.fill();
-  ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+  ctx.beginPath(); ctx.arc(cx, cy, hubR * 0.29, 0, Math.PI * 2);
   ctx.fillStyle = "#fff"; ctx.fill();
 }
 

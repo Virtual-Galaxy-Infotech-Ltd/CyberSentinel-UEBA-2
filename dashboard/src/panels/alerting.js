@@ -1,10 +1,11 @@
-// Device registry and proactive alerting (RFP 10, 15).
+// Device registry and proactive alerting.
 //
 // Two panels on one tab, because they are two halves of the same job: you label
 // and prioritise devices so that notification rules can alert on that priority.
 // A rule can also alert purely on score or verdict, so the device registry is
 // useful but not a prerequisite.
 
+import { initEmailSender } from "./email-sender.js";
 import { showToast } from "../ui/toast.js";
 
 let DEVICES = [];
@@ -27,7 +28,7 @@ function fmtWhen(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-// ── Devices (RFP 10) ────────────────────────────────────────────────────────
+// ── Devices ────────────────────────────────────────────────────────
 
 export async function loadDevices() {
   try {
@@ -65,7 +66,7 @@ function renderDevices() {
       <td class="wl-dim">${esc(d.owner) || "—"}</td>
       <td class="wl-dim">${esc(d.notes) || "—"}</td>
       <td class="wl-dim">${esc(d.updated_by) || "—"} · ${fmtWhen(d.updated_at)}</td>
-      <td><button class="fp-btn-inline" onclick="deleteDevice('${esc(d.name)}')">Remove</button></td>
+      <td><button class="fp-btn-inline" data-cap="devices.edit" onclick="deleteDevice('${esc(d.name)}')">Remove</button></td>
     </tr>`).join("");
 }
 
@@ -104,7 +105,7 @@ export async function deleteDevice(name) {
   }
 }
 
-// ── Notification rules (RFP 15) ─────────────────────────────────────────────
+// ── Notification rules ─────────────────────────────────────────────
 
 export async function loadRules() {
   try {
@@ -140,8 +141,8 @@ function renderRules() {
   if (!tb) return;
   if (note) {
     note.textContent = META.email_enabled
-      ? "Email delivery is configured."
-      : "SMTP is not configured, so email rules are stored but cannot deliver. "
+      ? "Email delivery is set up (see Email Sender above)."
+      : "No mailbox is connected, so email rules are stored but cannot deliver. Connect one under Email Sender above. "
         + "Webhook rules work regardless.";
   }
   if (RULES === null) {
@@ -170,8 +171,8 @@ function renderRules() {
       <td>${r.enabled ? '<span class="prio prio-high">on</span>' : '<span class="wl-dim">off</span>'}
           <span class="wl-dim"> ${r.last_fired ? fmtWhen(r.last_fired) : ""}</span></td>
       <td style="white-space:nowrap">
-        <button class="fp-btn-inline" onclick="testRule('${esc(r.id)}','${esc(r.name)}')">Test</button>
-        <button class="fp-btn-inline" onclick="deleteRule('${esc(r.id)}','${esc(r.name)}')">Delete</button>
+        <button class="fp-btn-inline" data-cap="notify.edit" onclick="testRule('${esc(r.id)}','${esc(r.name)}')">Test</button>
+        <button class="fp-btn-inline" data-cap="notify.edit" onclick="deleteRule('${esc(r.id)}','${esc(r.name)}')">Delete</button>
       </td>
     </tr>`;
   }).join("");
@@ -247,6 +248,7 @@ export function initAlerting() {
   on("dev-save-btn", "click", saveDevice);
   on("ntf-save-btn", "click", saveRule);
   // Same reasoning as the reports panel: nothing here may reject into main.js.
+  initEmailSender();
   Promise.all([loadDevices(), loadRules()])
     .catch((e) => console.warn("[ueba] alerting init failed:", e));
 }

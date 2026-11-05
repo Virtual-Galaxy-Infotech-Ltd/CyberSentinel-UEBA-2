@@ -448,6 +448,31 @@ dashboard:
     # configured, email rules are stored but cannot deliver; webhook rules are
     # unaffected.
 
+  # ── Email sender (Alerting → Email Sender) ──────────────────────────────────
+  # Reports and alerts are sent from a mailbox someone connects by signing in
+  # with Google or Microsoft (send-only permission). Clients configure nothing.
+  # The IDs below belong to the vendor's OAuth apps and are set ONCE per product
+  # build; see docs/EMAIL_SETUP.md. Secrets come from the environment.
+  # Leave a client_id empty to hide that provider's Connect button.
+  #
+  # Sending needs outbound HTTPS to the provider. Under egress.mode on_premises
+  # add the hosts for each provider you enable to egress.allow:
+  #   Google:    accounts.google.com, oauth2.googleapis.com, gmail.googleapis.com
+  #   Microsoft: login.microsoftonline.com, graph.microsoft.com
+  email:
+    # The address users open the dashboard on, e.g. https://ueba.client.com.
+    # Google and Microsoft only return to HTTPS addresses (or localhost), and
+    # the exact callback URL, <public_url>/api/email/oauth/callback, must be
+    # registered on the OAuth app. Empty = taken from the browser's request.
+    public_url: ""
+    google:
+      client_id: ""
+      client_secret_env: "UEBA_GOOGLE_CLIENT_SECRET"
+    microsoft:
+      client_id: ""
+      client_secret_env: "UEBA_MS_CLIENT_SECRET"
+      tenant: "common"        # any work/school or personal Microsoft account
+
   # ── Reporting (RFP 34-40, 62) ───────────────────────────────────────────────
   # Out-of-the-box, custom and scheduled reports. Implemented in ueba_reports.py
   # (what a report contains), ueba_report_render.py (PDF/Excel/CSV/HTML/XML) and

@@ -141,12 +141,23 @@ class Recorder:
 
     instances: list = []
 
+    # What the server claims to support. send_email asks before using either,
+    # so these drive the branches rather than just being recorded.
+    extns = ("starttls", "auth")
+
     def __init__(self, host, port, timeout=None):
         self.host, self.port, self.timeout = host, port, timeout
         self.calls: list = []
         self.sent = None
         self.fail_on = None
         Recorder.instances.append(self)
+
+    def ehlo(self, *a, **k):
+        self.calls.append("ehlo")
+
+    def has_extn(self, name):
+        self.calls.append("has_extn:%s" % name)
+        return name.lower() in self.extns
 
     def starttls(self, *a, **k):
         self.calls.append("starttls")
@@ -156,8 +167,11 @@ class Recorder:
         if self.fail_on == "login":
             raise RuntimeError("auth rejected")
 
-    def send_message(self, msg):
+    def send_message(self, msg, from_addr=None, to_addrs=None):
+        # The real call now passes the envelope explicitly, which is what makes
+        # a multi-recipient send reach everyone.
         self.calls.append("send")
+        self.envelope = (from_addr, list(to_addrs or []))
         if self.fail_on == "send":
             raise RuntimeError("550 rejected")
         self.sent = msg
@@ -264,6 +278,50 @@ def main() -> int:
         ok("the default port is the submission port", r.port == 587, str(r.port))
         ok("no username means no login attempt",
            not any(c.startswith("login") for c in r.calls), str(r.calls))
+        ok("the session is always introduced with EHLO",
+           "ehlo" in r.calls, str(r.calls))
+        ok("and the envelope is passed explicitly",
+           getattr(r, "envelope", (None, []))[1] == ["a@example.invalid"],
+           str(getattr(r, "envelope", None)))
+
+        # STARTTLS is now conditional on the server OFFERING it. An internal
+        # relay on port 25 usually does not, and insisting failed every send.
+        class NoTls(Recorder):
+            extns = ("auth",)
+        smtplib.SMTP = NoTls
+        Recorder.instances = []
+        RS.send_email({"host": "relay", "port": 25, "starttls": True},
+                      to=["a@example.invalid"], subject="s", body="b")
+        r = Recorder.instances[-1]
+        ok("a relay that does not offer STARTTLS is not forced into it",
+           "starttls" not in r.calls, str(r.calls))
+        ok("and the message still sends", "send" in r.calls, str(r.calls))
+
+        # Asking for authentication where the server offers none must say so
+        # rather than failing obscurely.
+        class NoAuth(Recorder):
+            extns = ("starttls",)
+        smtplib.SMTP = NoAuth
+        Recorder.instances = []
+        try:
+            RS.send_email({"host": "relay", "port": 25, "username": "u"},
+                          to=["a@example.invalid"], subject="s", body="b")
+            ok("login against a server offering no AUTH is refused", False,
+               "no exception")
+        except RuntimeError as e:
+            ok("login against a server offering no AUTH is refused", True)
+            ok("and the message names the setting to change",
+               "username" in str(e), str(e)[:120])
+        smtplib.SMTP = Recorder
+
+        # Port 465 is implicit TLS. Treating it as plaintext because `ssl` was
+        # left false is the commonest misconfiguration and it used to hang.
+        Recorder.instances = []
+        RS.send_email({"host": "h", "port": 465},
+                      to=["a@example.invalid"], subject="s", body="b")
+        r = Recorder.instances[-1]
+        ok("port 465 is treated as implicit TLS even without ssl:true",
+           r.port == 465 and "starttls" not in r.calls, str(r.calls))
 
         # A rejection must propagate — the caller records it in history, and a
         # swallowed failure would show a report as delivered when it was not.

@@ -1,4 +1,4 @@
-// Search auto-complete / auto-suggest (RFP 28).
+// Search auto-complete / auto-suggest.
 //
 // Suggestions come from the SERVER, built over every alert in the current
 // timeline window rather than the rows the browser happens to have loaded. That

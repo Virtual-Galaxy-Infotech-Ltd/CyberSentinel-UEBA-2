@@ -98,8 +98,8 @@ export function drawRadar(reasons) {
     // Vertical layout: build relative offsets, then shift the group so top
     // labels float above y, bottom labels float below y, sides centered.
     const lineH = 11;
-    const fontReason = 10;
-    const fontCount  = 13;
+    const fontReason = 13;
+    const fontCount  = 16;
     const totalH = lines.length * lineH + fontCount + 2;
     let baseDy;
     if (sinA < -0.2)      baseDy = -totalH + fontReason;     // top half
@@ -164,10 +164,19 @@ export function drawRadar(reasons) {
   // size while giving side labels a few pixels of safe rendering space.
   const PAD_X = 50;
   const PAD_Y = 14;
+  // HEIGHT CAP. The wrapper below is height:100%% of a flex item whose own
+  // height is indefinite, so a percentage flex-basis falls back to content --
+  // meaning this SVG's intrinsic size IS the panel's height, and the intrinsic
+  // height of a viewBox'd SVG at width:100%% is (column width / aspect ratio).
+  // Widen the column and the panel grows without limit: at a 1280px viewport
+  // the "Security Activity Pattern" panel measured 722px, twice its neighbours,
+  // and it dragged the whole grid row with it. --radar-cap (styles.css) bounds
+  // it to the same vertical band as the rest of the overview; preserveAspect-
+  // Ratio="meet" keeps the chart centred and undistorted inside that bound.
   const svgHtml = `
   <svg viewBox="${-PAD_X} ${-PAD_Y} ${W + PAD_X * 2} ${
     H + PAD_Y * 2
-  }" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;max-width:100%;max-height:100%;display:block">
+  }" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;max-width:100%;max-height:var(--chart-cap);display:block">
     <defs>
       <radialGradient id="rg" cx="50%" cy="50%" r="50%">
         <stop offset="0%"   stop-color="#00d4ff" stop-opacity="0.22"/>
@@ -182,7 +191,7 @@ export function drawRadar(reasons) {
     }" width="12" height="8" fill="rgba(0,212,255,0.18)" stroke="rgba(0,212,255,0.7)" stroke-width="1" rx="1"/>
     <text x="26" y="${
       H - 10
-    }" font-family="JetBrains Mono,monospace" font-size="9" fill="#7a9ab5">Alert Count</text>
+    }" font-family="JetBrains Mono,monospace" font-size="12" fill="#7a9ab5">Alert Count</text>
   </svg>`;
 
   const existing = document.getElementById("radar-svg-wrap");
@@ -222,7 +231,7 @@ function _ensureTipEl() {
     "background:rgba(11,17,24,0.96)",
     "color:#c8d8e8",
     "font-family:'IBM Plex Mono',monospace",
-    "font-size:11.5px",
+    "font-size:13.5px",
     "letter-spacing:0.2px",
     "border:1px solid rgba(0,212,255,0.35)",
     "border-radius:4px",

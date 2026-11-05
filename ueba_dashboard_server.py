@@ -59,7 +59,7 @@ except Exception:  # pragma: no cover - orjson should be present, but degrade gr
 
 from flask import (
     Flask, jsonify, request, send_from_directory, Response,
-    stream_with_context, has_request_context,
+    stream_with_context, has_request_context, redirect,
 )
 from flask_cors import CORS
 try:
@@ -223,6 +223,13 @@ except ImportError:
     ueba_reports = ueba_report_render = ueba_report_store = None
     REPORTS_AVAILABLE = False
 
+try:
+    import ueba_mailer         # type: ignore
+    MAILER_AVAILABLE = True
+except Exception as _e:
+    print(f"[dashboard] connected-mailbox email unavailable: {_e}")
+    MAILER_AVAILABLE = False
+
 # Device registry and proactive alerting. Optional on the same terms.
 try:
     import ueba_notify  # type: ignore
@@ -276,6 +283,16 @@ _DEFAULTS = {
         "rules_file":   "/root/NEW_DRIVE/aditya_ueba/notify_rules.json",
         "state_file":   "/root/NEW_DRIVE/aditya_ueba/.state/notify.state",
         "poll_secs":    15,
+    },
+    # Email through a connected Gmail / Microsoft 365 mailbox (ueba_mailer.py).
+    # The OAuth app IDs are the vendor's, set once per product build; clients
+    # only click Connect. See docs/EMAIL_SETUP.md.
+    "email": {
+        "public_url": "",
+        "connection_file": "",
+        "google":    {"client_id": "", "client_secret_env": "UEBA_GOOGLE_CLIENT_SECRET"},
+        "microsoft": {"client_id": "", "client_secret_env": "UEBA_MS_CLIENT_SECRET",
+                      "tenant": "common"},
     },
     # Reporting (RFP 34-40, 62). See the `reporting:` block in ueba_config.yaml.
     "reporting": {
@@ -3599,6 +3616,46 @@ def _smtp_cfg():
     return smtp
 
 
+def _ecfg():
+    return CFG.get("email") or _DEFAULTS["email"]
+
+
+def _email_conn_path():
+    p = _ecfg().get("connection_file")
+    if p:
+        return p
+    return str(Path(_rcfg().get("schedules_file") or "report_schedules.json").with_name(
+        "email_connection.json"))
+
+
+def _email_connection():
+    return ueba_mailer.load(_email_conn_path()) if MAILER_AVAILABLE else None
+
+
+def _email_ready():
+    """True when there is some way to send: a connected mailbox, or SMTP in the YAML."""
+    if _email_connection():
+        return True
+    return REPORTS_AVAILABLE and ueba_report_store.smtp_configured(_smtp_cfg())
+
+
+def _send_mail(to, subject, body, attachment=None, filename=None,
+               mime="application/octet-stream"):
+    """Send through the connected mailbox; fall back to SMTP from the YAML."""
+    if _email_connection():
+        ueba_mailer.send(_ecfg(), _email_conn_path(), to=to, subject=subject, body=body,
+                         attachment=attachment, filename=filename, mime=mime)
+        return
+    if REPORTS_AVAILABLE and ueba_report_store.smtp_configured(_smtp_cfg()):
+        ueba_report_store.send_email(_smtp_cfg(), to=to, subject=subject, body=body,
+                                     attachment=attachment, filename=filename, mime=mime)
+        return
+    raise RuntimeError("No mailbox is connected. Connect one in Alerting → Email Sender.")
+
+
+
+
+
 def _audit_entries_since(since_dt, limit=5000):
     """Audit records newer than `since_dt`, newest first. Used by the audit and
     compliance report (point 37)."""
@@ -3809,7 +3866,8 @@ def _current_username():
 #             trail of everyone else's actions.
 CAPABILITIES = {
     "export":           "viewer",
-    "watchlist.edit":   "analyst",
+    "watchlist.edit":   "admin",
+    "nicknames.edit":   "analyst",
     "fp.edit":          "analyst",
     "incident.confirm": "analyst",
     "privileged.edit":  "admin",
@@ -3822,22 +3880,23 @@ CAPABILITIES = {
     "reports.generate": "analyst",
     "reports.custom":   "analyst",
     "ai.analyze":       "analyst",
-    "reports.schedule": "admin",
-    "devices.edit":     "admin",
-    "notify.edit":      "admin",
-    # Mail-relay settings: a hostname, a port and a credential that the
-    # scheduled reports and the alert-rule emails send through. Admin, with
-    # the rest of the configuration.
+    # analyst, not admin: a deliberate RBAC decision on main — analysts get
+    # alerting and scheduled reports, while watch lists moved the other way.
+    "reports.schedule": "analyst",
+    "devices.edit":     "analyst",
+    "notify.edit":      "analyst",
+    # Mail settings. Admin, with the rest of the configuration.
     #
     # The console panel for this (data-cap="smtp.edit") and its CSS hide rule
-    # shipped before this entry existed, and the consequence is worth keeping
-    # in mind for the next one: _capability_map() only reports capabilities
-    # that appear HERE, and the browser only toggles nocap- classes for
-    # capabilities it was told about. An unknown capability is therefore never
-    # hidden — the panel rendered for every signed-in user, viewers included,
-    # as a set of controls that would all have come back 403. Exactly the way
-    # users.manage once leaked. tests/test_capability_gating.py now fails if a
-    # data-cap, a hide rule and an entry here ever disagree again.
+    # shipped on both sides of this merge without ANY capability entry, and
+    # the consequence is worth keeping in mind for the next one:
+    # _capability_map() only reports capabilities that appear HERE, and the
+    # browser only toggles nocap- classes for capabilities it was told about.
+    # An unknown capability is therefore never hidden — the panel rendered for
+    # every signed-in user, viewers included, as a set of controls that would
+    # all have come back 403. Exactly the way users.manage once leaked.
+    # tests/test_capability_gating.py now fails if a data-cap, a hide rule and
+    # an entry here ever disagree again.
     "smtp.edit":        "admin",
     "audit.view":       "admin",
     "users.manage":     "admin",
@@ -4191,14 +4250,16 @@ def api_scopes_set():
 
 def _capability_map():
     """{capability: allowed} for the caller — what the UI should offer."""
-    # Not enforcing means everyone can do everything, so say so rather than
-    # inventing a role. The UI then renders exactly as it does today.
-    if not _rbac_enforcing():
-        return {c: True for c in CAPABILITIES}
     try:
-        user = ueba_auth.current_user()
+        user = ueba_auth.current_user() if AUTH_MODULE_AVAILABLE else None
     except Exception:
         user = None
+    # Not enforcing and nobody signed in: everyone can do everything, so say so
+    # rather than inventing a role. But someone who HAS signed in gets their own
+    # role either way — a viewer must not be offered analyst actions just
+    # because enforcement is off.
+    if not _rbac_enforcing() and user is None:
+        return {c: True for c in CAPABILITIES}
     return {c: ueba_auth.role_at_least(user, m) for c, m in CAPABILITIES.items()}
 
 
@@ -4216,7 +4277,7 @@ def api_nicknames():
 
 
 @app.route("/api/nicknames", methods=["POST"])
-@_require_cap("watchlist.edit")
+@_require_cap("nicknames.edit")
 def api_nicknames_set():
     """Name an entity, or rename it. Gated on watchlist.edit: naming a device
     is the same class of curation as watch-listing one, so it needs an analyst
@@ -4241,7 +4302,7 @@ def api_nicknames_set():
 
 
 @app.route("/api/nicknames/<path:eid>", methods=["DELETE"])
-@_require_cap("watchlist.edit")
+@_require_cap("nicknames.edit")
 def api_nicknames_delete(eid):
     import ueba_nicknames
     gone = ueba_nicknames.remove(NICKNAMES_FILE, eid)
@@ -4269,6 +4330,96 @@ def api_auth_capabilities():
         "levels":       dict(CAPABILITIES),
         "roles":        list(ueba_auth.ROLES) if AUTH_MODULE_AVAILABLE else [],
     })
+
+
+# -- Email sender: a connected Gmail / Microsoft 365 mailbox --
+
+def _email_redirect_uri():
+    base = (_ecfg().get("public_url") or request.host_url).rstrip("/")
+    return base + "/api/email/oauth/callback"
+
+
+def _email_unavailable():
+    return jsonify({"ok": False, "error": "Email sending is not installed on this server."}), 503
+
+
+@app.route("/api/email/status")
+@_require_cap("notify.edit")
+def api_email_status():
+    if not MAILER_AVAILABLE:
+        return _email_unavailable()
+    conn = _email_connection()
+    smtp_fallback = REPORTS_AVAILABLE and ueba_report_store.smtp_configured(_smtp_cfg())
+    return jsonify({
+        "ok": True,
+        "connection": ueba_mailer.public(conn),
+        "providers": ueba_mailer.available(_ecfg()),
+        "smtp_fallback": bool(smtp_fallback),
+        "redirect_uri": _email_redirect_uri(),
+    })
+
+
+@app.route("/api/email/connect/<provider>", methods=["POST"])
+@_require_cap("notify.edit")
+def api_email_connect(provider):
+    """Start a sign-in. The browser is then sent to Google's or Microsoft's page."""
+    if not MAILER_AVAILABLE:
+        return _email_unavailable()
+    try:
+        url = ueba_mailer.start(_ecfg(), provider, _email_redirect_uri(), _current_username())
+    except ueba_mailer.MailError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "url": url})
+
+
+@app.route("/api/email/oauth/callback")
+def api_email_callback():
+    """Where Google/Microsoft send the browser back. Not cap-gated by decorator:
+    the one-time `state` issued to a permitted user is the check, and the page
+    it lands on is a redirect, not data."""
+    from urllib.parse import quote
+    if not MAILER_AVAILABLE:
+        return redirect("/alerting?email_error=" + quote("Email sending is not installed."))
+    a = request.args
+    try:
+        conn = ueba_mailer.finish(_ecfg(), _email_conn_path(), a.get("state"), a.get("code"),
+                                  error=a.get("error"),
+                                  error_description=a.get("error_description"))
+    except ueba_mailer.MailError as e:
+        return redirect("/alerting?email_error=" + quote(str(e)))
+    except Exception as e:
+        print(f"[dashboard] email sign-in failed: {e}")
+        return redirect("/alerting?email_error=" + quote("Sign-in failed unexpectedly. Try again."))
+    return redirect("/alerting?email_connected=" + quote(conn.get("email") or "mailbox"))
+
+
+@app.route("/api/email/disconnect", methods=["POST"])
+@_require_cap("notify.edit")
+def api_email_disconnect():
+    if not MAILER_AVAILABLE:
+        return _email_unavailable()
+    ueba_mailer.disconnect(_email_conn_path(), _ecfg())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/email/test", methods=["POST"])
+@_require_cap("notify.edit")
+def api_email_test():
+    b = request.get_json(silent=True) or {}
+    to = [t for t in re.split(r"[,;\s]+", str(b.get("to") or "")) if t]
+    conn = _email_connection()
+    if not to and conn and conn.get("email"):
+        to = [conn["email"]]
+    if not to:
+        return jsonify({"ok": False, "error": "Enter an address to send the test to"}), 400
+    try:
+        _send_mail(to=to, subject="CyberSentinel UEBA - test email",
+                   body=("This is a test email from CyberSentinel UEBA.\n\n"
+                         "Scheduled reports and alert notifications will be sent "
+                         "from this mailbox.\n"))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "sent_to": to})
 
 
 def _resolve_report(report_id):
@@ -4304,7 +4455,7 @@ def api_reports_catalogue():
     cat["intervals"] = list(ueba_report_store.INTERVALS)
     cat["weekdays"] = list(ueba_report_store.WEEKDAYS)
     cat["timezone"] = ueba_report_store.local_tz_label()
-    cat["email_enabled"] = ueba_report_store.smtp_configured(_smtp_cfg())
+    cat["email_enabled"] = _email_ready()
     cat["ok"] = True
     return jsonify(cat)
 
@@ -4598,7 +4749,7 @@ def api_reports_schedules_list():
         return _reports_unavailable()
     return jsonify({"ok": True,
                     "timezone": ueba_report_store.local_tz_label(),
-                    "email_enabled": ueba_report_store.smtp_configured(_smtp_cfg()),
+                    "email_enabled": _email_ready(),
                     "entries": ueba_report_store.schedules(_rcfg()["schedules_file"])})
 
 
@@ -4624,9 +4775,9 @@ def api_reports_schedule_save():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     warn = None
-    if rec["recipients"] and not ueba_report_store.smtp_configured(_smtp_cfg()):
-        warn = ("Saved, but SMTP is not configured — this report will be generated "
-                "and stored, not emailed.")
+    if rec["recipients"] and not _email_ready():
+        warn = ("Saved, but no mailbox is connected — this report will be generated "
+                "and stored, not emailed. Connect one in Alerting → Email Sender.")
     return jsonify({"ok": True, "entry": rec, "created": created, "warning": warn})
 
 
@@ -4655,7 +4806,14 @@ def api_reports_schedule_run(sid):
         status = _run_schedule(sched, manual_by=_current_username())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    return jsonify({"ok": True, "status": status})
+    # Record the outcome on the schedule so "Last run" in the list matches what
+    # the button just reported, as a scheduled firing would.
+    try:
+        ueba_report_store.mark_run(_rcfg()["schedules_file"], sid, status)
+    except Exception:
+        pass
+    delivered = not str(status).startswith(("email failed", "email not set up"))
+    return jsonify({"ok": True, "status": status, "delivered": delivered})
 
 
 def _run_schedule(sched, manual_by=None):
@@ -4675,21 +4833,26 @@ def _run_schedule(sched, manual_by=None):
     recipients = sched.get("recipients") or []
     delivery = None
     if recipients:
-        smtp = _smtp_cfg()
-        if not ueba_report_store.smtp_configured(smtp):
-            delivery = "smtp not configured — stored only"
+        if not _email_ready():
+            delivery = "email not set up — stored only"
         else:
             win = (doc.get("window") or {}).get("label", "")
-            ueba_report_store.send_email(
-                smtp, to=recipients,
-                subject=f'{doc.get("title")} — {win}',
-                body=(f'{doc.get("title")}\n{doc.get("subtitle")}\n\n'
-                      f'Period: {win}\n'
-                      f'Generated: {doc.get("generated_at")}\n\n'
-                      f'This report was generated automatically by '
-                      f'{doc.get("site")}.\n'),
-                attachment=data, filename=f"report.{ext}", mime=mime)
-            delivery = f"emailed to {len(recipients)} recipient(s)"
+            try:
+                _send_mail(
+                    to=recipients,
+                    subject=f'{doc.get("title")} — {win}',
+                    body=(f'{doc.get("title")}\n{doc.get("subtitle")}\n\n'
+                          f'Period: {win}\n'
+                          f'Generated: {doc.get("generated_at")}\n\n'
+                          f'This report was generated automatically by '
+                          f'{doc.get("site")}.\n'),
+                    attachment=data, filename=f"report.{ext}", mime=mime)
+                delivery = f"emailed to {len(recipients)} recipient(s)"
+            except Exception as e:
+                # The report itself is fine: keep it in history so it can still
+                # be downloaded, and record exactly why the email did not go.
+                delivery = f"email failed — {e}"
+                print(f"[reports] schedule {sched.get('id')}: {delivery}")
 
     rec = ueba_report_store.record_artifact(
         _rcfg()["history_file"], _rcfg()["output_dir"],
@@ -4767,7 +4930,7 @@ def api_notify_rules_list():
     if not _notify_ready():
         return _notify_unavailable()
     smtp_ok = (REPORTS_AVAILABLE
-               and ueba_report_store.smtp_configured(_smtp_cfg()))
+               and _email_ready())
     return jsonify({
         "ok": True,
         "entries":    ueba_notify.rules(_ncfg()["rules_file"]),
@@ -4801,9 +4964,9 @@ def api_notify_rule_save():
         return jsonify({"ok": False, "error": str(e)}), 500
     warn = None
     if rec["emails"] and not (REPORTS_AVAILABLE
-                              and ueba_report_store.smtp_configured(_smtp_cfg())):
-        warn = ("Saved, but SMTP is not configured — this rule cannot deliver "
-                "email until it is. Webhook delivery is unaffected.")
+                              and _email_ready()):
+        warn = ("Saved, but no mailbox is connected — this rule cannot deliver "
+                "email until one is (Alerting → Email Sender). Webhook delivery is unaffected.")
     return jsonify({"ok": True, "entry": rec, "created": created, "warning": warn})
 
 
@@ -4875,9 +5038,7 @@ def api_notify_rule_test(rid):
 
 def _notify_send_email(to, subject, body):
     """Adapter so the dispatcher never needs to know the SMTP configuration."""
-    if not REPORTS_AVAILABLE:
-        raise RuntimeError("email delivery needs the reporting modules")
-    ueba_report_store.send_email(_smtp_cfg(), to=to, subject=subject, body=body)
+    _send_mail(to=to, subject=subject, body=body)
 
 
 # ── Watch lists (RFP 1) ─────────────────────────────────────────────────────
@@ -7487,7 +7648,7 @@ def main() -> None:
     if REPORTS_AVAILABLE:
         print(f"  Reporting:        {len(ueba_reports.REPORTS)} built-in reports, "
               f"formats: {', '.join(ueba_report_render.available_formats())}"
-              f"{'' if ueba_report_store.smtp_configured(_smtp_cfg()) else '  (email not configured)'}")
+              f"{'' if _email_ready() else '  (email not configured)'}")
     else:
         print("  Reporting:        unavailable (report modules not importable)")
     print(f"  Auth/SSO:         {auth_status}")

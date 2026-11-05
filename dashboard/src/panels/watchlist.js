@@ -1,5 +1,5 @@
 // Watch lists — users, hosts and IPs an analyst has flagged for elevated
-// scrutiny (RFP point 1).
+// scrutiny.
 //
 // The list lives server-side in watchlist.json and is read by the ENGINE, not
 // just by this dashboard: a watched entity gets a small additive boost to its

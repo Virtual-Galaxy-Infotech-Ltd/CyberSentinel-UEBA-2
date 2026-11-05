@@ -211,7 +211,15 @@ _SCRYPT_MAXMEM = 64 * 1024 * 1024
 LOCAL_SUB_PREFIX = "local:"
 MAX_FAILED_LOGINS = 5
 LOCKOUT_SECS = 15 * 60
-MIN_PASSWORD_LEN = 12
+# Lowered from 12 at the operator's request: 6 is the floor, i.e. anything
+# longer than five characters is accepted. Worth knowing what that costs — a
+# 6-character password is brute-forceable offline in seconds if the auth DB is
+# ever read, and scrypt only slows that down, it does not stop it. The controls
+# that still stand between an attacker and an account are MAX_FAILED_LOGINS and
+# LOCKOUT_SECS above, which throttle guessing over the network; they do nothing
+# for an attacker who has the file. Raise this back towards 12 when the estate
+# allows it.
+MIN_PASSWORD_LEN = 6
 
 # Username rules. Tighter than passwords on purpose: a username is not a secret,
 # but it IS what local_sub() turns into a primary key, so it has to survive being
@@ -920,15 +928,17 @@ def role_at_least(user: dict | None, minimum: str) -> bool:
 def require_role(minimum: str = "viewer"):
     """Gate a route on a minimum role.
 
-    A no-op while auth.enforce is off, so the decorator can be applied to
-    routes ahead of the cutover without changing behaviour.
+    While auth.enforce is off, anonymous requests pass through unchanged, so
+    the decorator can be applied ahead of the cutover. A request that DOES carry
+    a session is held to that user's role either way: a signed-in viewer is a
+    viewer whether or not enforcement is on.
     """
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(*a, **kw):
-            if not _cfg().get("enforce"):
-                return fn(*a, **kw)
             user = current_user()
+            if not _cfg().get("enforce") and user is None:
+                return fn(*a, **kw)
             if user is None:
                 return jsonify({"error": "authentication required"}), 401
             if not role_at_least(user, minimum):
