@@ -46,6 +46,7 @@ import ueba_risk_history
 import ueba_privilege
 import ueba_assets
 import ueba_entities
+import ueba_model_tiers
 import ueba_device_identity
 import ueba_peers
 import ueba_supervised
@@ -463,9 +464,12 @@ def build_ueba_block(
                 "threshold":            ae_result["threshold"],
                 "is_anomalous":         ae_result["is_anomalous"],
                 "model_used":           ae_result["model_used"],
-                "model_type": (
+                # Three tiers now (RFP SN 18). The scorer reports which one
+                # judged the event; this no longer has to infer it from the
+                # shape of the model name.
+                "model_type": ae_result.get("model_tier") or (
                     "personal"
-                    if ae_result["model_used"] not in ("global", "unknown", "")
+                    if ueba_model_tiers.is_entity_model(ae_result["model_used"])
                     else "global"
                 ),
             },
@@ -1742,8 +1746,13 @@ class UEBAEngine:
                                     or _raw_data.get("win", {}).get("eventdata", {}).get("subjectUserName")
                                     or _raw_data.get("win", {}).get("eventdata", {}).get("targetUserName")
                                     or (  # only use model_used if it's a real username
+                                        # `cohort:<id>` is a MODEL, not a
+                                        # person. The denylist this replaces
+                                        # would have shown it in the user
+                                        # column, the same way 'global' once
+                                        # leaked there.
                                         _ae_model
-                                        if _ae_model not in ("global", "unknown", "", None)
+                                        if ueba_model_tiers.is_entity_model(_ae_model)
                                         else None
                                     )
                                     or result.get("subject", {}).get("ip")

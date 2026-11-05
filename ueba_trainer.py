@@ -76,6 +76,26 @@ def load_config(path: str) -> dict:
 
 # ── HDF5 Dataset (PyTorch) ────────────────────────────────────────────────────
 
+try:
+    import ueba_model_tiers
+except ImportError:          # pragma: no cover
+    ueba_model_tiers = None
+
+
+def _safe_model_name(name: str) -> str:
+    """One sanitiser, shared with the scorer.
+
+    This expression used to be written out twice here and once in
+    ueba_models/autoencoder.py. The trainer decides which model files to
+    CREATE and the scorer decides which to LOAD; if the two copies ever
+    disagreed about a name, the scorer would quietly serve the global model to
+    everyone and nothing would say so.
+    """
+    if ueba_model_tiers is not None:
+        return ueba_model_tiers.safe_model_name(name)
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(name or ""))
+
+
 class HDF5Dataset(Dataset):
     """
     PyTorch Dataset that reads feature vectors from an HDF5 file.
@@ -583,7 +603,7 @@ class UEBATrainer:
                 continue
 
             # Resume support — skip if model already saved
-            safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in user)
+            safe_name = _safe_model_name(user)
             model_path = self.autoencoder_dir / f"{safe_name}.pt"
             if model_path.exists():
                 log.info("Skipping user '%s' — model already exists at %s", user, model_path)
@@ -608,8 +628,7 @@ class UEBATrainer:
                                                           floor=peruser_floor)
 
             # Save model — sanitize username for filename
-            safe_name = "".join(c if c.isalnum() or c in "-_" else "_"
-                                for c in user)
+            safe_name = _safe_model_name(user)
             model_path = self.autoencoder_dir / f"{safe_name}.pt"
             torch.save(user_model.state_dict(), str(model_path))
             self.thresholds[user] = user_threshold
@@ -624,7 +643,138 @@ class UEBATrainer:
 
         log.info("Per-user autoencoders trained: %d (skipped %d users with sparse data)",
                  trained, skipped_sparse)
+
+        # ── Cohort autoencoders (RFP SN 18) ───────────────────────────────────
+        self._train_cohort_models(h5_path, scaler, ae_trainer, user_indices,
+                                  min_events, peruser_floor)
         self._save_thresholds()
+
+    def _train_cohort_models(self, h5_path, scaler, ae_trainer, user_indices,
+                             min_events, peruser_floor):
+        """One model per behavioural cohort, for entities too quiet to learn alone.
+
+        THE GAP THIS CLOSES. Everything above trains a model only for an
+        entity that clears min_events_per_user — 2000 here. Everyone else was
+        counted into `skipped_sparse` and dropped, so they were judged by
+        global.pt, a model built from the whole estate. On the 2026-11-03 run
+        that left 42 named entities with a model of their own and every other
+        account sharing one. SN 18 is written against exactly that.
+
+        The cohorts come from ueba_peers — the SAME assignment that drives
+        peer-group deviation (SN 42), not a second grouping that could
+        disagree with the first. Members are grouped by how they actually
+        behave (Jensen-Shannon divergence over access distributions), which is
+        why a cohort model is more specific than the global one.
+
+        Two guards, both of which exist to avoid building something worse than
+        what it replaces:
+
+          * a cohort needs >= cohort_min_members, because a "cohort" of one is
+            a per-entity model with none of the generalisation that justifies
+            the tier;
+          * it needs >= cohort_min_rows of POOLED data, because a model fitted
+            on a handful of rows memorises them — the same failure mode that
+            `peruser_floor_frac` exists to contain for sparse per-entity
+            models. Below that the members fall through to global, which is
+            honest rather than falsely specific.
+        """
+        tier_cfg = self.config.get("model_tiers") or {}
+        if not bool(tier_cfg.get("enabled", True)):
+            log.info("Cohort tier disabled in config — sparse entities will use "
+                     "the global model")
+            return
+        if ueba_model_tiers is None:
+            log.warning("ueba_model_tiers unavailable — no cohort models")
+            return
+
+        min_members = int(tier_cfg.get("cohort_min_members",
+                                       ueba_model_tiers.DEFAULT_COHORT_MIN_MEMBERS))
+        min_rows = int(tier_cfg.get("cohort_min_rows",
+                                    ueba_model_tiers.DEFAULT_COHORT_MIN_ROWS))
+
+        groups_path = ((self.config.get("paths") or {}).get("peer_groups_file")
+                       or tier_cfg.get("peer_groups_file") or "")
+        assignment = {}
+        if groups_path and Path(groups_path).exists():
+            try:
+                import ueba_peers
+                assignment = ueba_peers.load(groups_path) or {}
+            except Exception as e:
+                log.warning("peer groups unreadable (%s) — no cohort models", e)
+                assignment = {}
+        if not (assignment.get("members") or {}):
+            log.warning("No peer-group assignment at %r — every sparse entity "
+                        "falls back to the global model. Run "
+                        "build_peer_groups.py to enable the cohort tier.",
+                        groups_path or "<unset>")
+            return
+
+        # Pool the row indices of every entity that did NOT earn its own model.
+        # Measured against rows actually present in this H5, not the profile
+        # store's cumulative total — the window is usually much smaller, and
+        # that mismatch is already guarded above for per-entity models.
+        pooled: dict = {}
+        members: dict = {}
+        for user, indices in user_indices.items():
+            if len(indices) >= min_events:
+                continue        # has, or will have, its own model
+            plan = ueba_model_tiers.plan_training(
+                user, len(indices), assignment, min_events=min_events,
+                cohort_min_rows=min_rows)
+            if plan["tier"] != "cohort":
+                continue
+            key = plan["model"]
+            pooled.setdefault(key, []).extend(indices)
+            members.setdefault(key, []).append(user)
+
+        if not pooled:
+            log.info("No sparse entity was placed in a cohort — nothing to train")
+            return
+
+        log.info("Cohort tier: %d candidate cohort(s) from %d sparse entities",
+                 len(pooled), sum(len(v) for v in members.values()))
+
+        built = 0
+        for key in sorted(pooled):
+            idx = pooled[key]
+            who = members[key]
+            if len(who) < min_members:
+                log.info("Cohort %s: only %d member(s) (< %d) — members fall "
+                         "back to the global model", key, len(who), min_members)
+                continue
+            if len(idx) < min_rows:
+                log.info("Cohort %s: %d member(s) but only %d pooled rows "
+                         "(< %d) — members fall back to the global model",
+                         key, len(who), len(idx), min_rows)
+                continue
+
+            safe_name = _safe_model_name(key)
+            model_path = self.autoencoder_dir / f"{safe_name}.pt"
+            if model_path.exists():
+                log.info("Skipping cohort %s — model already exists at %s",
+                         key, model_path)
+                built += 1
+                continue
+
+            log.info("Training cohort autoencoder %s | members: %d | rows: %d",
+                     key, len(who), len(idx))
+            ds = HDF5Dataset(h5_path, indices=np.array(sorted(set(idx))),
+                             scaler=scaler)
+            model, threshold = ae_trainer.train(ds, key, floor=peruser_floor)
+            torch.save(model.state_dict(), str(model_path))
+            # Keyed by the MODEL name, which is what the scorer now looks up —
+            # a cohort's threshold belongs to the cohort, not to any member.
+            self.thresholds[key] = threshold
+            built += 1
+            log.info("Saved cohort model → %s (threshold: %.6f, members: %s%s)",
+                     model_path, threshold, ", ".join(who[:5]),
+                     "..." if len(who) > 5 else "")
+            del model
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        log.info("Cohort autoencoders trained: %d of %d candidate cohort(s)",
+                 built, len(pooled))
 
     def _save_thresholds(self):
         """Save all autoencoder thresholds to JSON."""
