@@ -464,7 +464,12 @@ dashboard:
     # Google and Microsoft only return to HTTPS addresses (or localhost), and
     # the exact callback URL, <public_url>/api/email/oauth/callback, must be
     # registered on the OAuth app. Empty = taken from the browser's request.
-    public_url: ""
+    # localhost on purpose — Google refuses a private IP as a redirect URI,
+    # and this console is not reachable on a public name. Connect a mailbox
+    # through an ssh tunnel; see docs/EMAIL_SETUP.md. Must stay https on 3026:
+    # that is nginx (whose server_name includes localhost) and the session
+    # cookie is Secure-only, so plain http cannot log in.
+    public_url: "https://localhost:3026"
     google:
       client_id: ""
       client_secret_env: "UEBA_GOOGLE_CLIENT_SECRET"
