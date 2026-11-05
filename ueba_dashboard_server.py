@@ -3825,6 +3825,20 @@ CAPABILITIES = {
     "reports.schedule": "admin",
     "devices.edit":     "admin",
     "notify.edit":      "admin",
+    # Mail-relay settings: a hostname, a port and a credential that the
+    # scheduled reports and the alert-rule emails send through. Admin, with
+    # the rest of the configuration.
+    #
+    # The console panel for this (data-cap="smtp.edit") and its CSS hide rule
+    # shipped before this entry existed, and the consequence is worth keeping
+    # in mind for the next one: _capability_map() only reports capabilities
+    # that appear HERE, and the browser only toggles nocap- classes for
+    # capabilities it was told about. An unknown capability is therefore never
+    # hidden — the panel rendered for every signed-in user, viewers included,
+    # as a set of controls that would all have come back 403. Exactly the way
+    # users.manage once leaked. tests/test_capability_gating.py now fails if a
+    # data-cap, a hide rule and an entry here ever disagree again.
+    "smtp.edit":        "admin",
     "audit.view":       "admin",
     "users.manage":     "admin",
 }

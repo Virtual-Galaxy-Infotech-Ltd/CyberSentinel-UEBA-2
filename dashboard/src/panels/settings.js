@@ -1,5 +1,5 @@
 // Settings — account self-service for everyone, user management for admins
-// (RFP 23, and the identity half of running UEBA without CyberSentinel SIEM).
+// (the identity half of running UEBA without CyberSentinel SIEM).
 //
 // Two panels with deliberately different audiences:
 //
@@ -20,6 +20,7 @@
 import { showToast } from "../ui/toast.js";
 import { state } from "../state.js";
 import { refreshAccount } from "../ui/account-menu.js";
+import { initSmtp, loadSmtp } from "./smtp-settings.js";
 import { initEntities, loadEntities } from "./entities.js";
 
 let _users = [];
@@ -446,6 +447,7 @@ export function initSettings() {
   const entry = document.getElementById("account-settings");
   if (entry) entry.addEventListener("click", refreshSettings);
 
+  initSmtp();
   initEntities();
 
   refreshSettings();
@@ -457,4 +459,5 @@ export function refreshSettings() {
   loadEntities();
   loadMe();
   loadUsers();
+  loadSmtp();
 }
