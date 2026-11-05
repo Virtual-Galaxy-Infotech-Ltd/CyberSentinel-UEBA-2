@@ -312,9 +312,15 @@ _DEFAULTS = {
         # Where the console writes what an admin types into Settings → Email.
         # A separate file, not an edit to ueba_config.yaml: the YAML is site
         # state that several teams read, carries comments a round-trip would
-        # destroy, and is deployed over. This follows the same pattern as the
-        # watch list and the entity register.
-        "smtp_file": "/root/NEW_DRIVE/aditya_ueba/smtp_settings.json",
+        # destroy, and is deployed over. Same pattern as the watch list and
+        # the entity register.
+        #
+        # EMPTY on purpose. A path here would make _smtp_store_path()'s
+        # derivation dead code — it only runs when this is unset, and a
+        # non-empty default is never unset. That mistake sent the first
+        # deployment's settings to /root/NEW_DRIVE/aditya_ueba/, a drive that
+        # no longer exists on this install.
+        "smtp_file": "",
     },
     # The engine rotates ueba_alerts.jsonl at midnight, zipping each day to
     # archive_dir as ueba_alerts_YYYY-MM-DD.jsonl.zip. The dashboard reads the

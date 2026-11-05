@@ -556,6 +556,30 @@ def main() -> int:
     ok("the audit trail records the relay", "host" in fields, str(fields))
     ok("and NEVER the password", "password" not in fields, str(fields))
 
+    # The store path must DERIVE when reporting.smtp_file is unset. A
+    # non-empty default here is never "unset", which made the derivation dead
+    # code and sent the first deployment's settings to a drive that no longer
+    # exists. Asserted with the key explicitly absent.
+    rep2 = dict(rep)
+    rep2.pop("smtp_file", None)
+    base2 = yaml.safe_load((ROOT / "ueba_config.yaml").read_text())
+    dash2 = base2.setdefault("dashboard", {})
+    dash2["reporting"] = rep2
+    dash2["false_positives_file"] = str(wk / "fp.json")
+    cfg2 = wk / "derive.yaml"
+    cfg2.write_text(yaml.safe_dump(base2, sort_keys=False))
+    S.CFG = S.load_dashboard_config(str(cfg2))
+    with S.app.test_request_context("/"):
+        derived = S._smtp_store_path()
+    ok("the default smtp_file is empty, so derivation runs",
+       not (S._DEFAULTS["reporting"].get("smtp_file") or ""),
+       repr(S._DEFAULTS["reporting"].get("smtp_file")))
+    ok("and the path lands beside the site's own state files",
+       derived == (wk / "smtp_settings.json"), str(derived))
+    ok("not on the dead box98 drive",
+       "NEW_DRIVE" not in str(derived), str(derived))
+    S.CFG = S.load_dashboard_config(str(cfgp))
+
     # ── 6. OAuth readiness: say what is missing, before anyone registers ──
     import ueba_mailer as M
     ok("a private-IP callback is flagged",
