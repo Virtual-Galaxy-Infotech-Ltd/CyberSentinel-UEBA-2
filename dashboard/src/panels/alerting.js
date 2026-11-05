@@ -65,7 +65,7 @@ function renderDevices() {
       <td class="wl-dim">${esc(d.owner) || "—"}</td>
       <td class="wl-dim">${esc(d.notes) || "—"}</td>
       <td class="wl-dim">${esc(d.updated_by) || "—"} · ${fmtWhen(d.updated_at)}</td>
-      <td><button class="fp-btn-inline" onclick="deleteDevice('${esc(d.name)}')">Remove</button></td>
+      <td><button class="fp-btn-inline" data-cap="devices.edit" onclick="deleteDevice('${esc(d.name)}')">Remove</button></td>
     </tr>`).join("");
 }
 
@@ -170,8 +170,8 @@ function renderRules() {
       <td>${r.enabled ? '<span class="prio prio-high">on</span>' : '<span class="wl-dim">off</span>'}
           <span class="wl-dim"> ${r.last_fired ? fmtWhen(r.last_fired) : ""}</span></td>
       <td style="white-space:nowrap">
-        <button class="fp-btn-inline" onclick="testRule('${esc(r.id)}','${esc(r.name)}')">Test</button>
-        <button class="fp-btn-inline" onclick="deleteRule('${esc(r.id)}','${esc(r.name)}')">Delete</button>
+        <button class="fp-btn-inline" data-cap="notify.edit" onclick="testRule('${esc(r.id)}','${esc(r.name)}')">Test</button>
+        <button class="fp-btn-inline" data-cap="notify.edit" onclick="deleteRule('${esc(r.id)}','${esc(r.name)}')">Delete</button>
       </td>
     </tr>`;
   }).join("");

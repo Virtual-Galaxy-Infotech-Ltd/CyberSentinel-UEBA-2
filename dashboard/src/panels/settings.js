@@ -20,7 +20,6 @@
 import { showToast } from "../ui/toast.js";
 import { state } from "../state.js";
 import { refreshAccount } from "../ui/account-menu.js";
-import { initSmtp, loadSmtp } from "./smtp-settings.js";
 
 let _users = [];
 let _roles = ["viewer", "analyst", "admin"];
@@ -377,12 +376,10 @@ export function initSettings() {
   const entry = document.getElementById("account-settings");
   if (entry) entry.addEventListener("click", refreshSettings);
 
-  initSmtp();
   refreshSettings();
 }
 
 export function refreshSettings() {
   loadMe();
   loadUsers();
-  loadSmtp();
 }

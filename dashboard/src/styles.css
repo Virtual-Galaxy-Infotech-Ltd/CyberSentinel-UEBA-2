@@ -3937,7 +3937,7 @@ body.nocap-devices-edit [data-cap="devices.edit"],
 body.nocap-notify-edit [data-cap="notify.edit"],
 body.nocap-audit-view [data-cap="audit.view"],
 body.nocap-users-manage [data-cap="users.manage"],
-body.nocap-smtp-edit [data-cap="smtp.edit"] {
+body.nocap-nicknames-edit [data-cap="nicknames.edit"] {
   display: none !important;
 }
 /* users.manage was missing from the list above, so the entire User Management
