@@ -39,6 +39,87 @@ function roleBadge(role, why) {
     color:${col};border-radius:3px;padding:1px 6px;">${esc(role)}</span>`;
 }
 
+const BAND_COLOUR = {
+  critical: "var(--red, #f85149)",
+  high:     "var(--orange, #f0883e)",
+  moderate: "var(--yellow, #d29922)",
+  low:      "var(--green, #3fb950)",
+  none:     "var(--text3)",
+};
+
+// RFP SN 56. The summary used to show only "Max score" — the single worst
+// alert — so one 0.95 event outranked five hundred at 0.70. This renders the
+// composite instead, and renders every component beside it, because a risk
+// number an analyst cannot take apart is a number they cannot argue with.
+function riskSection(risk) {
+  if (!risk || risk.score === null || risk.score === undefined) {
+    return `<div style="font-size:11px;color:var(--text3);">
+      No risk score for this device.</div>`;
+  }
+  const band = String(risk.band || "none");
+  const col = BAND_COLOUR[band] || "var(--text3)";
+  const pct = Math.round((risk.score || 0) * 100);
+  if (!(risk.components || []).length) {
+    return `<div style="font-size:11px;color:var(--text3);">
+      ${esc(risk.why || "No risk score for this device.")}</div>`;
+  }
+  const bars = (risk.components || []).map((c) => {
+    const share = Math.round((c.contribution || 0) * 100);
+    return `<div style="margin-bottom:5px;">
+      <div style="display:flex;gap:6px;align-items:baseline;font-size:10px;">
+        <span style="font-family:var(--mono2);text-transform:uppercase;
+          letter-spacing:1px;min-width:62px;color:var(--text2);">${esc(c.component)}</span>
+        <span style="flex:1;color:var(--text3);">${esc(c.detail || "")}</span>
+        <span style="font-family:var(--mono2);color:var(--text2);">+${share}</span>
+      </div>
+      <div style="height:3px;background:var(--line, rgba(255,255,255,.08));
+        border-radius:2px;margin-top:2px;overflow:hidden;">
+        <div style="height:100%;width:${Math.max(1, share)}%;background:${col};
+          opacity:.75;"></div>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px;">
+      <span style="font-family:var(--mono);font-size:22px;color:${col};">${pct}</span>
+      <span style="font-family:var(--mono2);font-size:9px;letter-spacing:2px;
+        text-transform:uppercase;color:${col};">${esc(band)}</span>
+    </div>
+    <div style="font-size:10px;color:var(--text3);line-height:1.5;margin-bottom:8px;">
+      ${esc(risk.why || "")}
+    </div>
+    ${bars}`;
+}
+
+// Per-dimension reasoning for one peer. Both halves are shown: what the two
+// devices share, and where they diverge. The second is what tells an analyst
+// whether the peer is a fair yardstick at all, and it was the half missing
+// before — the endpoint only ever reported shared signatures.
+function dimensionRows(dims) {
+  if (!(dims || []).length) return "";
+  return (dims || []).map((d) => {
+    const pct = Math.round((d.similarity || 0) * 100);
+    const col = simColor(d.similarity || 0);
+    const drv = (d.drivers || []).slice(0, 3)
+      .map((x) => esc(x.key)).join(", ");
+    const dif = (d.differentiators || []).slice(0, 3).map((x) => {
+      const mark = x.only_here ? "only here" : x.only_there ? "only there" : "";
+      return esc(x.key) + (mark ? ` (${mark})` : "");
+    }).join(", ");
+    return `<div style="padding:3px 0;border-top:1px solid var(--line, rgba(255,255,255,.05));">
+      <div style="display:flex;gap:6px;align-items:baseline;font-size:10px;">
+        <span style="font-family:var(--mono2);text-transform:uppercase;
+          letter-spacing:1px;min-width:68px;color:var(--text2);">${esc(d.dimension)}</span>
+        <span style="flex:1;color:var(--text3);">${esc(d.measures || "")}</span>
+        <span style="font-family:var(--mono2);color:${col};">${pct}%</span>
+      </div>
+      ${drv ? `<div style="font-size:10px;color:var(--text3);padding-left:74px;">
+        shares: ${drv}</div>` : ""}
+      ${dif ? `<div style="font-size:10px;color:var(--text3);padding-left:74px;">
+        differs: ${dif}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
 function kv(label, value) {
   return `<div style="display:flex;justify-content:space-between;gap:10px;
     padding:3px 0;border-bottom:1px solid var(--line, rgba(255,255,255,.06));">
@@ -100,7 +181,13 @@ function peersSection(p) {
       <div style="font-size:10px;color:var(--text3);margin-bottom:5px;">
         ${x.alerts} alerts · ${x.user_count} accounts · ${esc(overlap)}
       </div>
-      ${sigs}
+      ${x.why ? `<div style="font-size:10px;color:var(--text2);margin-bottom:5px;
+        line-height:1.5;">${esc(x.why)}</div>` : ""}
+      ${dimensionRows(x.dimensions)}
+      ${(x.not_compared || []).length ? `<div style="font-size:10px;
+        color:var(--text3);padding-top:3px;">not compared:
+        ${esc((x.not_compared || []).map((n) => n.dimension).join(", "))}</div>` : ""}
+      ${sigs ? `<div style="margin-top:5px;">${sigs}</div>` : ""}
     </div>`;
   }).join("");
   return `<div style="font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5;">
@@ -111,6 +198,13 @@ function peersSection(p) {
 function render(el, summary, peers) {
   const presence = (summary.presence && summary.presence.accounts) || [];
   el.innerHTML = `
+    <div class="ep-chart-card" style="padding:12px;margin-bottom:12px;">
+      <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);
+        letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;">
+        ⬡ Device risk</div>
+      ${riskSection(summary.risk)}
+    </div>
+
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="ep-chart-card" style="padding:12px;">
         <div style="font-family:var(--mono2);font-size:8px;color:var(--text3);
@@ -122,7 +216,8 @@ function render(el, summary, peers) {
         ${kv("Accounts seen (all traffic)", summary.accounts_seen ?? 0)}
         ${kv("Accounts in alerts", summary.user_count ?? 0)}
         ${kv("Alerts in window", summary.alerts ?? 0)}
-        ${kv("Max score", (summary.max_score ?? 0).toFixed ? summary.max_score.toFixed(3) : summary.max_score)}
+        ${kv("Worst single alert", (summary.max_score ?? 0).toFixed
+              ? summary.max_score.toFixed(3) : summary.max_score)}
         ${kv("First seen", esc((summary.first_seen || "—").slice(0, 19)))}
         ${kv("Last seen", esc((summary.last_seen || "—").slice(0, 19)))}
       </div>

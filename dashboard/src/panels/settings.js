@@ -29,7 +29,7 @@ let _me = null;
 // Mirrors password_problem() in ueba_auth.py. Checked client-side purely so a
 // too-short password fails instantly in the form rather than after a round
 // trip — the server remains the authority and rejects it regardless.
-const MIN_PASSWORD = 12;
+const MIN_PASSWORD = 6;
 
 function passwordProblem(pw) {
   if (!pw) return "Enter a password.";
@@ -221,8 +221,8 @@ async function changeMyUsername() {
 // may do, this says what it may do it TO. Empty means unrestricted, which is
 // every account until an admin narrows one — so the column reads "all" rather
 // than "none", because "none" would suggest the opposite of what it means.
-let _scopes = {};        // sub -> {devices, subnets}
-let _mayScope = false;   // only an UNRESTRICTED admin may change a scope
+let _scopes = {};
+let _mayScope = false;
 
 async function loadScopes() {
   try {
@@ -256,16 +256,12 @@ async function editScope(sub, name) {
     `subnets are CIDR (10.0.5.0/24).\n\n` +
     `Leave EMPTY to remove the limit and restore full authority.`, cur);
   if (raw === null) return;
-
-  // Split on the shape rather than asking the admin which kind each entry is:
-  // anything containing a slash or parsing as an address is a subnet.
   const devices = [];
   const subnets = [];
   raw.split(",").map((x) => x.trim()).filter(Boolean).forEach((x) => {
     if (x.includes("/") || /^[0-9.]+$/.test(x) || x.includes(":")) subnets.push(x);
     else devices.push(x);
   });
-
   try {
     const r = await fetch("/api/scopes", {
       method: "POST",
@@ -450,17 +446,15 @@ export function initSettings() {
   const entry = document.getElementById("account-settings");
   if (entry) entry.addEventListener("click", refreshSettings);
 
-  // RFP SN 30 / SN 67 — the tracked-entities panel lives on this page and
-  // binds its own controls.
   initEntities();
 
   refreshSettings();
 }
 
 export function refreshSettings() {
+  // RFP SN 30 / SN 67 — re-read on every visit for the same reason the account
+  // list is: another admin or the config file may have changed the mappings.
+  loadEntities();
   loadMe();
   loadUsers();
-  // Re-read on every visit for the same reason the account list is: another
-  // admin or the config file may have changed the mappings since page load.
-  loadEntities();
 }

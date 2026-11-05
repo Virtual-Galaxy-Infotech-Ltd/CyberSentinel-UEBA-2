@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import json
 import os
+import ipaddress
 import re
 import threading
 from datetime import datetime, timezone
@@ -93,7 +94,8 @@ CUSTOM_PREFIX = "custom:"
 # carries 24,453 distinct accounts because every firewall event's user lands on
 # it — classify that as a server and its "behaviour" is the whole estate's.
 HOST_ROLES = ("server", "endpoint", "appliance")
-ROLE_SOURCES = ("register", "collector", "name_shape", "human_breadth",
+ROLE_SOURCES = ("register", "collector", "name_shape", "owner_name",
+                "human_breadth",
                 "default")
 
 # host.os.family values that mean "network device".
@@ -151,8 +153,75 @@ _NONHUMAN_PREFIX = ("nt authority\\", "nt service\\", "nt virtual machine\\",
                     "font driver host\\")
 _NONHUMAN_EXACT = {"system", "local service", "network service", "local system",
                    "localsystem", "anonymous logon", "-", "unknown", ""}
+
+# Accounts that are not a person, by name. Reported from live data, where four
+# laptops had NO identified user at all — their only "person" was the account
+# the vendor's setup created, so the per-user baseline for `Harsh_777` was
+# being built against `asus`, for `Rupali` against `hp`, for `ruchika` against
+# `lenovo`, and `RootSeeker` against `user`.
+#
+# This is a COUNTING rule, not a filter on detection. Nothing here stops an
+# account's activity being scored: the scoring key comes from
+# resolve_entity(), and root's events remain tracked and remain attributed to
+# root. What changes is only whether the account counts as a COLLEAGUE —
+# which feeds the breadth rule in classify_host() and the "distinct users"
+# figure the console shows.
+_NONHUMAN_ACCOUNTS = frozenset((
+    # Built-in and generic logins.
+    "root", "toor", "admin", "administrator", "administrateur", "guest",
+    "user", "users", "default", "defaultuser", "owner",
+    "test", "tester", "testing", "demo", "sample", "temp",
+    # Names a vendor's setup leaves on a new machine. These are what made four
+    # laptops look like they had a user.
+    "asus", "hp", "lenovo", "dell", "acer", "msi", "toshiba", "samsung",
+    "compaq", "pc", "laptop", "desktop", "workstation",
+    # Display and login managers.
+    "gdm", "gdm3", "lightdm", "sddm", "lxdm", "xdm", "kdm",
+    # Standard UNIX system accounts.
+    "nobody", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
+    "news", "uucp", "proxy", "list", "irc", "gnats",
+    "systemd-network", "systemd-resolve", "systemd-timesync", "messagebus",
+    "syslog", "_apt", "tss", "uuidd", "tcpdump", "landscape", "pollinate",
+    "sshd", "chrony", "ntp", "dnsmasq", "avahi", "colord", "rtkit", "saned",
+    "pulse", "usbmux", "geoclue", "cups-pk-helper", "polkitd",
+    # Service accounts for the things a server runs.
+    "postfix", "dovecot", "exim", "mysql", "postgres", "postgresql", "redis",
+    "mongodb", "memcached", "nginx", "www-data", "apache", "apache2",
+    "httpd", "tomcat", "jenkins",
+    "docker", "containerd", "kubelet", "rancher",
+    # IIS identities. `defaultapppool` was counted as a person on two laptops.
+    "defaultapppool", "iusr", "iwam",
+))
 # DWM-<n> and UMFD-<n> are one per desktop session, so an ordinary Windows
 # machine accumulates dozens; `host:`/`ip:` are typed entity keys, not accounts.
+# Characters an account name cannot contain. These catch PARSING ARTEFACTS
+# rather than unusual names: a username field that captured part of a log
+# line. On live data this rejects exactly two strings out of 24,818 —
+# `session):`, from a PAM line like `pam_unix(sshd:session):`, which was being
+# counted as a person on Crypt0n, and `afnamol,pathuzzz`, which is two
+# usernames joined by a comma and so is nobody.
+#
+# A SPACE is deliberately NOT here. The collector's traffic carries real
+# people spelled `aamir shah`, `aaron choo`, `abdul muiz`; a tidier-looking
+# rule that required [A-Za-z0-9._-] throughout rejected 539 accounts, most of
+# them genuine. Underscores and @ at the start stay allowed for the same
+# reason (`_gayathri_`, `@jacobbiju`).
+_ACCOUNT_STRUCTURAL = re.compile(r"""[()\[\]{}<>:;,/\\"'=|?*\t\r\n]""")
+
+
+def _is_ip_literal(value) -> bool:
+    """An address is not a person.
+
+    42 bare IPs reach the account field via the collector, which attributes
+    every account in the traffic to itself.
+    """
+    try:
+        ipaddress.ip_address(str(value or "").strip())
+        return True
+    except ValueError:
+        return False
+
+
 _PSEUDO_ACCOUNT = re.compile(
     r"^(?:dwm|umfd)-\d+$|^(?:host|ip|endpoint|external|device|addr|agent|name):",
     re.I)
@@ -213,8 +282,13 @@ _SERVER_SHAPE_LONG = re.compile(
     r"(?:^|[-_.])((?i:srv|server|svr|postgres|mysql|oracle|kafka|redis|mongo|"
     r"jenkins|proxy|backup|exch|esx))"
     r"(?:$|[-_.0-9]|[A-Z])")
+# `vm` is deliberately NOT here. It says how a machine is HOSTED, not what it
+# does: a VM is as likely to be a desktop image as a server. On live data it
+# only ever produced false positives — `FixedWindows_VM` is a test VM, and
+# `AnshVM` was already an endpoint because it has no separator before "VM",
+# so the token was not even applied consistently.
 _SERVER_SHAPE_SHORT = re.compile(
-    r"(?:^|[-_.])(dc|ad|db|sql|pg|web|www|http|app|api|mail|smtp|nas|san|vm|"
+    r"(?:^|[-_.])(dc|ad|db|sql|pg|web|www|http|app|api|mail|smtp|nas|san|"
     r"hv|node|gw|fw|vpn|dns|dhcp|ntp|lb|bkp|git|ci)"
     r"(?:$|[-_.0-9])",
     re.I)
@@ -222,6 +296,155 @@ _SERVER_SHAPE_SHORT = re.compile(
 # Hosts that look like a server by shape but are not. Operator-overridable via
 # the register; this is only the default.
 _SERVER_SHAPE_EXCEPT = re.compile(r"^(?:add|adm|admin|adam|adams)$", re.I)
+
+# Not every server token is equally strong, and the difference decides a real
+# case. STRONG tokens name the machine's ROLE — a laptop is not called "srv"
+# or "dc". WEAK tokens are PRODUCT names, and a developer's workstation is
+# routinely named after the stack it is used for: `kafka-prajwal` on this
+# estate is Prajwal's Windows laptop, and the flat name rule called it a
+# server because "kafka" was treated as proof on its own.
+# The spelled-out word "server" is NOT strong, which looks wrong until you
+# read the estate's names. Real infrastructure here is abbreviated —
+# `Access-SRV-2.140`, `DC_AD_srv`, `GPU_SRV`, `CPU-SRV-208` — while the word
+# written out in full turns up in descriptive names for someone's test build:
+# `MDM_ServerAnsh` is the MDM server Ansh was testing, and it is a test VM.
+# Treating "server" as proof promoted it, and the regex had even been widened
+# specially to catch it.
+_STRONG_ROLE_TOKENS = frozenset((
+    "srv", "svr", "exch", "esx",
+    "dc", "ad", "nas", "san", "hv", "gw", "fw", "vpn", "dns", "dhcp", "ntp", "lb",
+))
+
+# Every token the two shape patterns can yield. Used to keep a role word from
+# being read as a person's name: an account called `serveradmin` must not make
+# "server" look like an owner.
+_ALL_ROLE_TOKENS = _STRONG_ROLE_TOKENS | frozenset((
+    "server", "postgres", "mysql", "oracle", "kafka", "redis", "mongo",
+    "jenkins", "proxy", "backup", "db", "sql", "pg", "web", "www", "http",
+    "app", "api", "mail", "smtp", "vm", "node", "bkp", "git", "ci",
+))
+
+# Accounts that pass human_account but name no particular person. They are
+# excluded from the ROSTER only — human_account itself is left alone, because
+# the people COUNT feeds the breadth rule and changing it would move every
+# threshold that was fitted against it.
+_GENERIC_ACCOUNTS = frozenset((
+    "administrator", "admin", "user", "users", "guest", "test", "tester",
+    "root", "system", "localsystem", "networkservice", "localservice",
+    "defaultapppool", "asus", "hp", "dell", "lenovo", "acer", "msi",
+    "gdm", "sshd", "glitch", "virtu", "owner", "pc", "laptop", "desktop",
+))
+
+# A host carrying more people than this is an aggregation point, not somewhere
+# anyone sits, and its account list must never reach the roster: the firewall
+# collector on this estate alone contributes 24,773 accounts — IP addresses
+# and numeric IDs included — and a roster that size matches almost any token.
+ROSTER_AGGREGATION_CAP = 1000
+
+
+def build_roster(host_accounts) -> frozenset:
+    """The estate's people, from {host: [accounts]}.
+
+    Deliberately narrow. Fed the live table this returns 44 names, and not one
+    of them matches any of the five real servers — which is what makes it safe
+    for the owner rule to overrule a name.
+    """
+    out = set()
+    for host, accounts in (host_accounts or {}).items():
+        people = {c.lower() for c in
+                  (human_account(a) for a in (accounts or ())) if c}
+        if len(people) > ROSTER_AGGREGATION_CAP:
+            continue
+        for person in people:
+            stem = _name_stem(person.split("@", 1)[0])
+            if len(stem) >= OWNER_MIN_TOKEN and stem not in _GENERIC_ACCOUNTS:
+                out.add(stem)
+    return frozenset(out)
+
+
+def roster_match(name, roster) -> tuple:
+    """(host_token, person) when a host name IS one of the estate's people.
+
+    Matched whole, not as a substring, which the owner rule below does allow.
+    The looser test cannot be used here: "ansh" sits inside "himanshu", so a
+    substring roster would read Himanshu's laptop as belonging to Ansh. On
+    this estate the exact test still catches what matters — `MDM_ServerAnsh`
+    yields the token `Ansh`, which is a person outright.
+    """
+    if not roster:
+        return ()
+    for tok in _host_name_tokens(name):
+        stem = _name_stem(tok)
+        if len(stem) < OWNER_MIN_TOKEN or stem in _ALL_ROLE_TOKENS:
+            continue
+        if stem in roster:
+            return (tok, stem)
+    return ()
+
+# A hostname token shorter than this is too generic to read as a person's name
+# ("ansh" is a name, "an" is not), and a substring test on two or three
+# characters would match almost any account.
+OWNER_MIN_TOKEN = 4
+
+
+def _name_stem(value) -> str:
+    """Lowercased, with a trailing serial number dropped.
+
+    `prajwal123` and `prajwal` are one person, and `varad.pusadkar` and
+    `Varad2` are one person's name; the digits are a serial, not part of it.
+    """
+    return re.sub(r"\d+$", "", str(value or "").strip().lower())
+
+
+def _host_name_tokens(name) -> list:
+    """The word-ish parts of a host name, splitting camelCase too.
+
+    `MDM_ServerAnsh` has to yield `Ansh`, which a separator-only split misses.
+    """
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", _deescape(str(name or "")).strip())
+    return [t for t in re.split(r"[^A-Za-z0-9]+", spaced) if t]
+
+
+def owner_match(name, accounts) -> tuple:
+    """(host_token, account) when this host is named after someone who uses it.
+
+    The signal for a personal workstation is not that the name looks like a
+    person's — it is that the name carries the name of a person who ACTUALLY
+    LOGS IN. That distinction is what makes this safe to act on: the genuine
+    servers on this estate (`GPU_SRV`, `DC_AD_srv`, `CPU-SRV-208`) have no
+    human accounts on them at all, so no owner can ever match them.
+
+    An estate-wide list of people cannot do this job. Tried on live data it
+    yields 24,814 "names" — the firewall collector attributes every account in
+    the traffic to itself, IPs and numeric IDs included — and against a list
+    that large almost any token matches something.
+
+    Matching is a substring test on the account's local part, not a prefix
+    one: the person behind `kafka-prajwal` signs in with an address of the form
+    `virtual<name>2025@...`, where the name sits in the MIDDLE rather than at
+    the start. The fixtures below use example.invalid rather than the real
+    mailbox: this repo is shared and a live personal address does not belong
+    in a test, while the shape it demonstrates is the whole point.
+
+    """
+    cands = []
+    for t in _host_name_tokens(name):
+        ts = _name_stem(t)
+        if len(ts) >= OWNER_MIN_TOKEN and ts not in _ALL_ROLE_TOKENS:
+            cands.append((t, ts))
+    if not cands:
+        return ()
+    for raw in accounts or ():
+        acct = human_account(raw)
+        if not acct:
+            continue
+        local = _name_stem(acct.lower().split("@", 1)[0])
+        if len(local) < OWNER_MIN_TOKEN:
+            continue
+        for tok, ts in cands:
+            if ts in local or local in ts:
+                return (tok, acct)
+    return ()
 
 # Active-response script paths — the platform acting on itself. See the header.
 _ACTIVE_RESPONSE = re.compile(r"active-response[/\\]", re.I)
@@ -314,22 +537,32 @@ def human_account(raw) -> str:
          `VGINFO\\name` and `VGINFO\name`.
       2. DROP NON-HUMANS. Service accounts, machine accounts (trailing `$`),
          Windows per-session pseudo-users (DWM-178, UMFD-0) and typed entity
-         keys (`host:`, `ip:`) are not people.
+         keys (`host:`, `ip:`) are not people. Nor is an account that is not a
+         person BY NAME — `root`, `gdm`, or the login a vendor's setup leaves
+         behind (`asus`, `hp`, `lenovo`). See _NONHUMAN_ACCOUNTS.
       3. STRIP THE DOMAIN. `VGINFO\name` and a bare `name` are one person.
       4. RE-CHECK the tail, because a qualified name can still resolve to a
          non-human: `SOMEDOMAIN\SYSTEM` passes step 2 and must not pass here.
+      5. REJECT NON-ACCOUNTS. A username field that captured part of a log
+         line is not a person. `session):` was counted as one on Crypt0n.
     """
     s = _deescape(str(raw or "").strip())
     low = s.casefold()
-    if low in _NONHUMAN_EXACT:
+    if low in _NONHUMAN_EXACT or low in _NONHUMAN_ACCOUNTS:
         return ""
     if any(low.startswith(p) for p in _NONHUMAN_PREFIX):
         return ""
     if _PSEUDO_ACCOUNT.search(low) or low.endswith("$"):
         return ""
     tail = s.rsplit("\\", 1)[-1].strip().casefold()
-    if (not tail or tail in _NONHUMAN_EXACT
+    if (not tail or tail in _NONHUMAN_EXACT or tail in _NONHUMAN_ACCOUNTS
             or _PSEUDO_ACCOUNT.search(tail) or tail.endswith("$")):
+        return ""
+    # 5. REJECT WHAT IS NOT AN ACCOUNT AT ALL. Steps 1-4 ask whether a
+    #    well-formed account belongs to a person; this asks whether the string
+    #    is an account in the first place. Without it a log fragment counts as
+    #    a colleague.
+    if _ACCOUNT_STRUCTURAL.search(tail) or _is_ip_literal(tail):
         return ""
     return tail
 
@@ -553,7 +786,7 @@ def set_host_role(path, host: str, role: str) -> tuple:
 
 def classify_host(name, reg: "dict | None" = None,
                   humans_seen: int = 0, os_family: str = "",
-                  os_share: float = 1.0) -> dict:
+                  os_share: float = 1.0, accounts=(), roster=()) -> dict:
     """{'role', 'source', 'why'} for one host name.
 
     Precedence, and each step is here because a weaker one got something wrong:
@@ -573,18 +806,34 @@ def classify_host(name, reg: "dict | None" = None,
                              reported them. Passing a single event's value
                              would make those two appliances.
       3. NAME SHAPE          catches the servers whose names say so, including
-                             the ones only one person logs into.
-      4. HUMAN BREADTH       catches a multi-user server with no naming
+                             the ones only one person logs into. A STRONG
+                             token (srv, dc, server) decides on its own; a
+                             WEAK one is a product name and only decides if
+                             step 4 does not overrule it.
+      4. OWNER NAME          a weak product token loses to the name of a
+                             person who actually logs in. `kafka-prajwal` is
+                             Prajwal's laptop, not a Kafka broker, and the
+                             flat name rule reported it as a server.
+      5. HUMAN BREADTH       catches a multi-user server with no naming
                              convention. Counted as distinct PEOPLE, not raw
                              account strings — see human_account(). The raw
                              count is inflated three- to tenfold by escaping
                              duplicates, service and machine accounts and
                              Windows session pseudo-users, and counting it
                              promoted four laptops to "server" on live data.
-      5. ENDPOINT            the default.
+      6. ENDPOINT            the default.
 
     `humans_seen` is a count of PEOPLE. Passing a raw account count here is the
     mistake this signature was renamed to make obvious.
+
+    `accounts` is the RAW account strings seen on the host; it is canonicalised
+    here, so callers pass what they have rather than pre-cleaning it. Omitting
+    it only costs the owner rule.
+
+    `roster` is the estate's people, from build_roster(). It is what catches a
+    host named after someone who does NOT log into it — `MDM_ServerAnsh` is
+    Ansh's, but the only account ever seen on it is `test`, so the accounts of
+    the host itself prove nothing.
     """
     n = normalise(name)
     if not n:
@@ -612,7 +861,29 @@ def classify_host(name, reg: "dict | None" = None,
                           + _SERVER_SHAPE_SHORT.findall(n))
               if not _SERVER_SHAPE_EXCEPT.match(t)]
     tokens = sorted(set(t.lower() for t in tokens))
+    strong = [t for t in tokens if t in _STRONG_ROLE_TOKENS]
+    if strong:
+        return {"role": "server", "source": "name_shape",
+                "why": "name contains %s" % ", ".join(repr(t) for t in strong)}
+
     if tokens:
+        # Product tokens only. Ask who logs in before believing the name.
+        owned = owner_match(name, accounts)
+        if owned:
+            return {"role": "endpoint", "source": "owner_name",
+                    "why": "named after %s, who signs in to it as %s — %s is a "
+                           "product name, not a server role"
+                           % (owned[0], owned[1], ", ".join(repr(t) for t in tokens))}
+        named = roster_match(name, roster)
+        if named:
+            return {"role": "endpoint", "source": "owner_name",
+                    "why": "named after %s, a person on this estate — %s "
+                           "describes what it runs, not what it is"
+                           % (named[0], ", ".join(repr(t) for t in tokens))}
+        if humans_seen >= HUMAN_BREADTH_THRESHOLD:
+            return {"role": "server", "source": "human_breadth",
+                    "why": "name contains %s and %d distinct people have used it"
+                           % (", ".join(repr(t) for t in tokens), humans_seen)}
         return {"role": "server", "source": "name_shape",
                 "why": "name contains %s" % ", ".join(repr(t) for t in tokens)}
 
@@ -818,8 +1089,14 @@ def selftest() -> int:
     import tempfile
 
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted rather than compared against a literal. The total used to be
+        # written out as `total = 168`, which meant every check added after
+        # that line was run and then not reported — the suite grew and the
+        # number did not move, so the figure quietly stopped being evidence.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -958,9 +1235,13 @@ def selftest() -> int:
     ok("and nothing for a normal os", appliance_os("windows") == "")
 
     # ── name shape: camelCase on long tokens, separators only on short ones ──
+    # These used to assert on MDM_ServerAnsh, on my assumption that it was a
+    # server. It is a test VM — see the owner-name block below. The camelCase
+    # boundary is still a real property of the long pattern, so it is asserted
+    # here on a host whose token is strong.
     ok("a camelCase long token is caught",
-       classify_host("MDM_ServerAnsh")["role"] == "server")
-    ok("upper-case too", classify_host("MDM_SERVERAnsh")["role"] == "server")
+       classify_host("MDM_SrvAnsh")["role"] == "server")
+    ok("upper-case too", classify_host("MDM_SRVAnsh")["role"] == "server")
     ok("srv in camelCase is caught",
        classify_host("app_srvNode")["role"] == "server")
     # The word that must NOT match: a trailing letter is only a boundary when
@@ -973,6 +1254,148 @@ def selftest() -> int:
        classify_host("adam")["role"] == "endpoint")
     ok("a short token with a separator still works",
        classify_host("DC_ATM_SRV")["role"] == "server")
+
+    # ── owner name beats a product token (the kafka-prajwal case) ──
+    # Reported from live data: kafka-prajwal was badged SERVER. It is
+    # Prajwal's Windows laptop. Every host below is a real one from that
+    # estate, with the accounts actually observed on it, so this block is a
+    # regression pin and not an illustration.
+    prajwal = ["virtu", "virtualprajwal2025@example.invalid"]
+    ok("a product token loses to the owner's name",
+       classify_host("kafka-prajwal", None, 2, "windows", 0.93,
+                     prajwal)["role"] == "endpoint")
+    ok("and says who it belongs to",
+       classify_host("kafka-prajwal", None, 2, "windows", 0.93,
+                     prajwal)["source"] == "owner_name")
+    ok("the owner's full account is named in the reason",
+       "virtualprajwal2025@example.invalid" in
+       classify_host("kafka-prajwal", None, 2, "windows", 0.93,
+                     prajwal)["why"])
+    # The match must be a substring of the account's local part: the name sits
+    # in the MIDDLE of virtualprajwal2025, so a prefix test fails here.
+    ok("the owner's name may sit mid-account",
+       owner_match("kafka-prajwal", prajwal)[0].lower() == "prajwal")
+    # Without the accounts the owner rule cannot fire, and a product token is
+    # all that is left — so omitting them must not change the old answer.
+    ok("with no accounts the product token still decides",
+       classify_host("kafka-prajwal", None, 2, "windows", 0.93)["role"]
+       == "server")
+
+    # A STRONG token does outrank the owner — but it has to be a real one.
+    ok("a strong token outranks the owner's name",
+       classify_host("DC_AD_Ansh", None, 1, "linux", 0.98,
+                     ["ansh", "test"])["role"] == "server")
+
+    # ── the roster: a host named after someone who does NOT log into it ──
+    # MDM_ServerAnsh is Ansh's test VM. The only account ever seen on it is
+    # `test`, so the host's own accounts prove nothing and the owner rule
+    # cannot fire; the estate roster is what catches it.
+    roster = build_roster({
+        "Access-SRV-2.140": ["ansh", "aryan", "amaan", "administrator"],
+        "kafka-prajwal":    ["virtu", "virtualprajwal2025@example.invalid"],
+        "Himanshu":         ["pankaj.kamde"],
+    })
+    ok("the roster keeps real people", "ansh" in roster)
+    ok("and drops generic accounts", "administrator" not in roster
+       and "test" not in roster and "virtu" not in roster)
+    ok("MDM_ServerAnsh is Ansh's test VM, not a server",
+       classify_host("MDM_ServerAnsh", None, 1, "linux", 0.98,
+                     ["test"], roster)["role"] == "endpoint")
+    ok("and it says who it is named after",
+       "Ansh" in classify_host("MDM_ServerAnsh", None, 1, "linux", 0.98,
+                               ["test"], roster)["why"])
+    # The roster match is WHOLE-token: "ansh" is a substring of "himanshu",
+    # and a substring roster would hand Himanshu's laptop to Ansh.
+    ok("a name inside another name is not a match",
+       roster_match("Himanshu", roster) == ())
+    ok("but the whole token is", roster_match("MDM_ServerAnsh", roster)[1] == "ansh")
+    # An aggregation point must never reach the roster.
+    big = build_roster({"collector": ["p%d" % i for i in range(1200)]})
+    ok("an aggregation point contributes no roster names", big == frozenset())
+    # The roster must not reach the real servers.
+    for host in ("Access-SRV-2.140", "GPU_SRV", "DC_AD_srv", "CPU-SRV-208",
+                 "DC_ATM_SRV"):
+        ok("the roster does not touch %s" % host,
+           classify_host(host, None, 0, "", 0.0, [], roster)["role"] == "server")
+
+    # ── vm describes hosting, not role ──
+    ok("FixedWindows_VM is a test VM, not a server",
+       classify_host("FixedWindows_VM", None, 0, "", 0.0)["role"] == "endpoint")
+    ok("AnshVM too, as it always was",
+       classify_host("AnshVM", None, 0, "", 0.0)["role"] == "endpoint")
+    ok("a VM that says what it runs is still a server",
+       classify_host("vm-dc-01", None, 0, "", 0.0)["role"] == "server")
+    ok("a real kafka broker with no owner stays a server",
+       classify_host("kafka-01", None, 0, "linux", 1.0,
+                     ["root", "svc_kafka"])["role"] == "server")
+    ok("a multi-user kafka host stays a server",
+       classify_host("kafka-prod", None, 40, "linux", 1.0,
+                     ["amit", "priya"])["source"] == "human_breadth")
+    # The genuine servers on that estate have NO human accounts at all, which
+    # is why the owner rule can never reach them.
+    for host in ("GPU_SRV", "DC_AD_srv", "CPU-SRV-208", "Access-SRV-2.140"):
+        ok("%s is still a server" % host,
+           classify_host(host, None, 0, "", 0.0, [])["role"] == "server")
+    ok("a role word in an account is not an owner",
+       owner_match("backup-node", ["serveradmin", "backupsvc"]) == ())
+    ok("a token under 4 characters is too generic to own a host",
+       owner_match("web-ana", ["ana"]) == ())
+    ok("a serial number is not part of the name",
+       owner_match("redis-varad2", ["varad.pusadkar"])[1] == "varad.pusadkar")
+
+    # ── human_account: a log fragment is not a colleague ──
+    # All four of these were being counted as people on live data.
+    ok("a PAM fragment is not a person", human_account("session):") == "")
+    ok("nor the whole PAM clause",
+       human_account("pam_unix(sshd:session):") == "")
+    ok("two names joined by a comma are nobody",
+       human_account("afnamol,pathuzzz") == "")
+    ok("an IPv4 address is not a person", human_account("10.200.10.152") == "")
+    ok("nor an IPv6 one", human_account("fe80::1") == "")
+    # The rule must not reach real people. The collector carries all of these;
+    # a charset rule tight enough to look tidy rejected 539 accounts, most of
+    # them genuine, so SPACES and leading punctuation stay legal.
+    ok("a name with a space is still a person",
+       human_account("aamir shah") == "aamir shah")
+    ok("underscores around a name are kept",
+       human_account("_gayathri_") == "_gayathri_")
+    ok("a handle is kept", human_account("@jacobbiju") == "@jacobbiju")
+    ok("a numeric staff id is kept", human_account("001372") == "001372")
+    ok("an email address is kept",
+       human_account("virtualprajwal2025@example.invalid")
+       == "virtualprajwal2025@example.invalid")
+    # Crypt0n read as 4 people: crypt0n, gdm, root and `session):`. All three
+    # of the others are gone now, so it is ONE person — which is what the host
+    # always was. The intermediate figure of 3 was pinned here while only the
+    # log artefact had been fixed.
+    ok("only the real person is counted",
+       count_human_accounts(["crypt0n", "gdm", "root", "session):"]) == 1)
+    ok("root is not a person", human_account("root") == "")
+    ok("nor a display manager", human_account("gdm") == "")
+
+    # ── accounts a vendor's setup leaves behind ──
+    # Four laptops had no identified user at all: their only "person" was
+    # this. Reported from live data.
+    for oem, host in (("asus", "Harsh_777"), ("hp", "Rupali"),
+                      ("lenovo", "ruchika"), ("user", "RootSeeker")):
+        ok("%s is not a person (was the only account on %s)" % (oem, host),
+           human_account(oem) == "")
+    ok("a built-in administrator is not a person",
+       human_account("administrator") == "")
+    ok("an IIS app-pool identity is not a person",
+       human_account("defaultapppool") == "")
+    ok("a service account is not a person", human_account("www-data") == "")
+    ok("and the domain-qualified form is caught too",
+       human_account("VGINFO\\Administrator") == "")
+    # It must not reach real people, including ones whose names are short or
+    # sit near a denied word.
+    for person in ("rupali", "harsh", "monish", "nidhi.choudhari",
+                   "pankaj.kamde", "crypt0n", "varad.pusadkar"):
+        ok("%s is still a person" % person, human_account(person) == person)
+    # A COUNTING rule only. The account is still an entity and still scored —
+    # this asserts the rule has not been wired into anything that drops it.
+    ok("root is still a usable entity key",
+       normalise("root", "user") == "root")
 
     # ── human_account ──
     ok("a plain name is a person", human_account("jane.doe") == "jane.doe")
@@ -1196,7 +1619,7 @@ def selftest() -> int:
         ok("status is explicit that no data-asset kind is offered",
            "not offered" in st["data_asset_kind"])
 
-    total = 168
+    total = len(checked)
     if failures:
         print("ueba_entities selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

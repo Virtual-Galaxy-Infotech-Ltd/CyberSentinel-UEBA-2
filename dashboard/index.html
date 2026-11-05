@@ -22,7 +22,7 @@
 })();
 </script>
 </head>
-<body>
+<body class="auth-pending">
 <!-- Liquid-glass refraction filters (iOS 26 style). Displaces the backdrop with
      fractal noise so glass surfaces bend/ripple the content behind them.
      Referenced by liquid-glass.css via backdrop-filter: url(#lg-refract...). -->
@@ -157,7 +157,7 @@
         <circle cx="11" cy="11" r="3" fill="#9b5de5" opacity="0.8"/>
       </svg>
       <span class="banner-heading-title">UEBA</span>
-      <span style="font-family:var(--mono2);font-size:13px;color:var(--purple);letter-spacing:2px;opacity:0.7">BEHAVIOURAL ANALYTICS ENGINE</span>
+      <span style="font-family:var(--mono2);font-size:13.5px;color:var(--purple);letter-spacing:2px;opacity:0.7">BEHAVIOURAL ANALYTICS ENGINE</span>
       <span class="banner-heading-sub" id="last-update-banner"></span>
     </div>
     <div class="unified-banner" id="stats-grid">
@@ -212,7 +212,7 @@
       <div class="banner-divider"></div>
       <!-- Right: Top reasons mini list -->
       <div class="banner-reasons">
-        <div class="banner-reasons-title"><span id="s-users" style="color:var(--purple);font-size:18px;font-family:var(--mono)">—</span> <span style="font-size:13px;color:var(--text3);letter-spacing:1px">USERS AT RISK</span></div>
+        <div class="banner-reasons-title"><span id="s-users" style="color:var(--purple);font-size:18.5px;font-family:var(--mono)">—</span> <span style="font-size:13.5px;color:var(--text3);letter-spacing:1px">USERS AT RISK</span></div>
         <div class="reasons-list" id="reasons-list"></div>
       </div>
     </div>
@@ -224,52 +224,52 @@
       <div class="panel" style="display:flex;flex-direction:column;">
         <div class="panel-header">
           <span class="panel-title">⬡ Behavioural Risk Meter</span>
-          <span id="risk-gauge-agent-label" style="font-family:var(--mono2);font-size:12px;color:var(--accent);letter-spacing:1px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);padding:2px 7px;border-radius:3px;">GLOBAL</span>
+          <span id="risk-gauge-agent-label" style="font-family:var(--mono2);font-size:11.5px;color:var(--accent);letter-spacing:1px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);padding:1px 6px;line-height:1.35;border-radius:3px;">GLOBAL</span>
         </div>
-        <div style="padding:14px 16px;display:flex;flex-direction:column;align-items:center;gap:0;flex:1;">
+        <div style="padding:7px 12px 8px;display:flex;flex-direction:column;align-items:center;gap:0;flex:1;">
           <!-- Gauge canvas — explicit aspect ratio keeps the top "50" tick label inside the canvas -->
-          <canvas id="risk-gauge" style="width:100%;max-width:280px;aspect-ratio:280/170;display:block;"></canvas>
+          <canvas id="risk-gauge" style="width:100%;max-width:clamp(150px,calc(19 * var(--svh)),230px);aspect-ratio:2/1;display:block;"></canvas>
           <!-- Score value -->
           <div style="text-align:center;margin-top:-4px;">
-            <div id="risk-score-val" style="font-family:var(--mono);font-size:44px;line-height:1;font-weight:700;color:var(--green)">—</div>
-            <div style="font-family:var(--mono2);font-size:12px;color:var(--text3);margin-top:3px;letter-spacing:2px">RISK SCORE / 100</div>
+            <div id="risk-score-val" style="font-family:var(--mono);font-size:clamp(23px,calc(3.5 * var(--svh)),35px);line-height:1;font-weight:700;color:var(--green)">—</div>
+            <div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);margin-top:2px;letter-spacing:2px">RISK SCORE / 100</div>
           </div>
           <!-- Verdict pill -->
-          <div id="risk-label-pill" class="risk-pill risk-low" style="margin-top:10px;font-size:14px;padding:5px 20px;letter-spacing:1.5px;">Calculating...</div>
+          <div id="risk-label-pill" class="risk-pill risk-low" style="margin-top:5px;font-size:13px;padding:2px 13px;letter-spacing:1.2px;">Calculating...</div>
           <!-- Zone legend -->
-          <div style="width:100%;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
-            <div style="font-family:var(--mono2);font-size:12px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px;text-align:center;">RISK ZONE REFERENCE</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;">
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(6,214,160,0.06);border:1px solid rgba(6,214,160,0.2);border-radius:4px;">
+          <div style="width:100%;margin-top:7px;border-top:1px solid var(--border);padding-top:7px;">
+            <div style="font-family:var(--mono2);font-size:11.5px;color:var(--text3);letter-spacing:1.5px;margin-bottom:5px;text-align:center;">RISK ZONE REFERENCE</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:3px 7px;background:rgba(6,214,160,0.06);border:1px solid rgba(6,214,160,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#06d6a0;flex-shrink:0;"></div>
-                <div><div style="font-family:var(--mono2);font-size:12px;color:#06d6a0;font-weight:600;">LOW</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">0 – 24</div></div>
+                <div style="display:flex;align-items:baseline;gap:6px;min-width:0;"><div style="font-family:var(--mono2);font-size:11.5px;color:#06d6a0;font-weight:600;">LOW</div><div style="font-family:var(--mono2);font-size:10.5px;color:var(--text3);white-space:nowrap;">0 – 24</div></div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,209,102,0.06);border:1px solid rgba(255,209,102,0.2);border-radius:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:3px 7px;background:rgba(255,209,102,0.06);border:1px solid rgba(255,209,102,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#ffd166;flex-shrink:0;"></div>
-                <div><div style="font-family:var(--mono2);font-size:12px;color:#ffd166;font-weight:600;">MODERATE</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">25 – 49</div></div>
+                <div style="display:flex;align-items:baseline;gap:6px;min-width:0;"><div style="font-family:var(--mono2);font-size:11.5px;color:#ffd166;font-weight:600;">MODERATE</div><div style="font-family:var(--mono2);font-size:10.5px;color:var(--text3);white-space:nowrap;">25 – 49</div></div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,140,66,0.06);border:1px solid rgba(255,140,66,0.2);border-radius:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:3px 7px;background:rgba(255,140,66,0.06);border:1px solid rgba(255,140,66,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#ff8c42;flex-shrink:0;"></div>
-                <div><div style="font-family:var(--mono2);font-size:12px;color:#ff8c42;font-weight:600;">HIGH</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">50 – 74</div></div>
+                <div style="display:flex;align-items:baseline;gap:6px;min-width:0;"><div style="font-family:var(--mono2);font-size:11.5px;color:#ff8c42;font-weight:600;">HIGH</div><div style="font-family:var(--mono2);font-size:10.5px;color:var(--text3);white-space:nowrap;">50 – 74</div></div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,59,92,0.06);border:1px solid rgba(255,59,92,0.2);border-radius:4px;">
+              <div style="display:flex;align-items:center;gap:5px;padding:3px 7px;background:rgba(255,59,92,0.06);border:1px solid rgba(255,59,92,0.2);border-radius:4px;">
                 <div style="width:8px;height:8px;border-radius:50%;background:#ff3b5c;flex-shrink:0;"></div>
-                <div><div style="font-family:var(--mono2);font-size:12px;color:#ff3b5c;font-weight:600;">CRITICAL</div><div style="font-family:var(--mono2);font-size:11px;color:var(--text3);">75 – 100</div></div>
+                <div style="display:flex;align-items:baseline;gap:6px;min-width:0;"><div style="font-family:var(--mono2);font-size:11.5px;color:#ff3b5c;font-weight:600;">CRITICAL</div><div style="font-family:var(--mono2);font-size:10.5px;color:var(--text3);white-space:nowrap;">75 – 100</div></div>
               </div>
             </div>
             <!-- Score breakdown -->
-            <div style="margin-top:10px;padding:8px;background:rgba(0,0,0,0.2);border-radius:4px;border:1px solid var(--border);">
-              <div style="font-family:var(--mono2);font-size:11px;color:var(--text3);letter-spacing:1px;margin-bottom:6px;">SCORE COMPOSITION</div>
-              <div id="gauge-score-breakdown" style="display:flex;flex-direction:column;gap:4px;">
-                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12px;">
+            <div style="margin-top:6px;padding:5px 8px;background:rgba(0,0,0,0.2);border-radius:4px;border:1px solid var(--border);">
+              <div style="font-family:var(--mono2);font-size:10.5px;color:var(--text3);letter-spacing:1px;margin-bottom:4px;">SCORE COMPOSITION</div>
+              <div id="gauge-score-breakdown" style="display:flex;flex-direction:column;gap:2px;line-height:1.3;">
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:11.5px;">
                   <span style="color:var(--text2);">Critical rate (×60)</span>
                   <span id="gauge-crit-contrib" style="color:var(--red);">—</span>
                 </div>
-                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12px;">
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:11.5px;">
                   <span style="color:var(--text2);">Anomalous rate (×20)</span>
                   <span id="gauge-anom-contrib" style="color:var(--orange);">—</span>
                 </div>
-                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:12px;">
+                <div style="display:flex;justify-content:space-between;font-family:var(--mono2);font-size:11.5px;">
                   <span style="color:var(--text2);">Max score (×15)</span>
                   <span id="gauge-max-contrib" style="color:var(--accent);">—</span>
                 </div>
@@ -282,7 +282,7 @@
       <!-- Radar Panel -->
       <div class="panel" style="display:flex;flex-direction:column;">
         <div class="panel-header"><span class="panel-title">⬡ Security Activity Pattern</span></div>
-        <div style="padding:8px;display:flex;align-items:center;justify-content:center;flex:1;min-height:340px;overflow:visible;">
+        <div style="padding:8px;display:flex;align-items:center;justify-content:center;flex:1;min-height:clamp(150px,calc(20 * var(--svh)),250px);overflow:visible;">
           <canvas id="radar-chart" style="width:100%;height:100%;display:block;"></canvas>
         </div>
       </div>
@@ -293,8 +293,8 @@
           <span class="panel-title">↗ Alert Timeline</span>
           <span class="panel-badge" id="timeline-range">Loading...</span>
         </div>
-        <div style="padding:12px 16px;flex:1;min-height:280px;display:flex;flex-direction:column;">
-          <canvas id="timeline-chart" style="width:100%;flex:1;display:block;min-height:220px;"></canvas>
+        <div style="padding:8px 12px;flex:1;min-height:clamp(140px,calc(18.5 * var(--svh)),235px);display:flex;flex-direction:column;">
+          <canvas id="timeline-chart" style="width:100%;flex:1;display:block;min-height:clamp(112px,calc(15 * var(--svh)),185px);max-height:var(--chart-cap);"></canvas>
         </div>
       </div>
     </div>
@@ -319,7 +319,7 @@
             </span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <span style="font-family:var(--mono2);font-size:12px;color:var(--text3);letter-spacing:1px">CLICK TO INVESTIGATE →</span>
+            <span style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);letter-spacing:1px">CLICK TO INVESTIGATE →</span>
             <span class="panel-badge" id="ov-badge">0</span>
           </div>
         </div>
@@ -386,7 +386,7 @@
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">⬡ Hourly Alert Heatmap</span>
-          <span style="font-family:var(--mono2);font-size:12px;color:var(--text3);">Alert density by day × hour</span>
+          <span style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);">Alert density by day × hour</span>
         </div>
         <div style="padding:14px;" id="heatmap-body">
           <div class="loading"><div class="spinner"></div></div>
@@ -405,7 +405,7 @@
           <span class="panel-title">AI Security Analyst</span>
           <span class="ai-live-badge">LIVE</span>
         </div>
-        <span style="font-family:var(--mono2);font-size:13px;color:var(--text3)" id="ai-timestamp">—</span>
+        <span style="font-family:var(--mono2);font-size:13.5px;color:var(--text3)" id="ai-timestamp">—</span>
       </div>
       <div style="padding:20px;" id="ai-analyst-body">
         <div class="loading"><div class="spinner"></div>Generating behavioural analysis report...</div>
@@ -604,10 +604,10 @@
       <div class="panel-header">
         <span class="panel-title">Entity Incidents</span>
         <span class="panel-badge" id="inc-badge2">0</span>
-        <span style="margin-left:auto;font-family:var(--mono2);font-size:13.5px;color:var(--text3)">
+        <span style="margin-left:auto;font-family:var(--mono2);font-size:14px;color:var(--text3)">
           Rollup window
           <select id="inc-window" onchange="window.__setIncidentWindow(this.value)"
-                  style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin-left:4px;font-family:var(--mono2);font-size:13.5px">
+                  style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin-left:4px;font-family:var(--mono2);font-size:14px">
             <option value="15">15 min</option>
             <option value="30">30 min</option>
             <option value="60" selected>1 hour</option>
@@ -634,12 +634,12 @@
   <!-- ENDPOINTS -->
   <div class="page" id="page-endpoints">
     <div class="endpoints-layout">
-      <div class="panel" style="align-self:start;">
+      <div class="panel endpoints-side">
         <div class="panel-header">
           <span class="panel-title">Endpoints</span>
           <span class="panel-badge" id="agents-badge">0</span>
         </div>
-        <div id="agents-list" style="max-height:700px;overflow-y:auto;"></div>
+        <div id="agents-list"></div>
       </div>
       <div class="panel">
         <div class="panel-header">
@@ -1034,9 +1034,9 @@
       </div>
     </div>
 
-    <!-- RFP SN 30 / SN 67. Admin only, same contract as User Management above:
-         data-cap hides the panel without the capability, and every endpoint it
-         calls is independently gated on the server. -->
+    <!-- RFP SN 30 / SN 67. Admin only, same contract as User Management
+         above: data-cap hides the panel without the capability, and every
+         endpoint it calls is independently gated on the server. -->
     <div class="panel" data-cap="entities.edit">
       <div class="panel-header">
         <div class="panel-title">TRACKED ENTITIES</div>
@@ -1055,14 +1055,14 @@
         <input id="set-ent-note" class="wl-input" type="text"
                placeholder="Why (optional)" autocomplete="off"
                style="flex:1 1 200px">
-        <button id="set-ent-btn" class="export-btn wl-add-btn">＋ Track this field</button>
+        <button id="set-ent-btn" class="export-btn wl-add-btn">&#65291; Track this field</button>
       </div>
       <div class="set-note">
         Name any field in the incoming events and its values become tracked
-        entities, scored like any other — no code change, no restart, effective
-        on the next event. A field whose values never repeat (an id, a hash, a
-        timestamp) is <b>refused</b>, because tracking it would create one
-        entity per event; the reason is shown when that happens.
+        entities, scored like any other &mdash; no code change, no restart,
+        effective on the next event. A field whose values never repeat (an id,
+        a hash, a timestamp) is <b>refused</b>, because tracking it would
+        create one entity per event; the reason is shown when that happens.
       </div>
 
       <div class="feed-table-wrap">
@@ -1086,16 +1086,23 @@
         <select id="set-ent-role" class="wl-input" style="min-width:140px">
           <option value="server">server</option>
           <option value="endpoint">endpoint</option>
+          <option value="appliance">appliance</option>
           <option value="">clear the override</option>
         </select>
         <button id="set-ent-host-btn" class="export-btn wl-add-btn">Set role</button>
       </div>
       <div class="set-note">
-        Devices are classified automatically from their name and how many
-        accounts are seen on them. Set an override here when that verdict is
-        wrong — an override always wins, and clearing it restores the automatic
-        one. <span id="set-ent-overrides"></span>
+        Devices are classified automatically from their name, the number of
+        distinct people seen on them, and their operating system. Set an
+        override here when that verdict is wrong &mdash; an override always
+        wins, and clearing it restores the automatic one.
+        <span id="set-ent-overrides"></span>
       </div>
+
+      <!-- RFP SN 30 / SN 67. Everything inside is rendered by
+           src/panels/entities.js, so this anchor is the only markup the
+           behaviour browser needs and a future restore cannot half-apply it. -->
+      <div id="set-ent-behaviour"></div>
     </div>
   </div>
 

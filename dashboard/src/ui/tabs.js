@@ -10,7 +10,6 @@ import { navigate } from "../router.js";
 import { applyTimelineFilter } from "../panels/timeline-filter.js";
 import { renderFeed, toggleEvidence } from "../panels/feed.js";
 import { fetchAll } from "../api.js";
-import { clearDeviceProfileCache } from "../panels/device-profile.js";
 
 export function initTabs() {
   // ── Main tabs (Overview / Alert Feed / User Risk / Campaigns / Endpoints) ──
@@ -94,9 +93,6 @@ export function initTabs() {
       b.classList.add("active");
       state.timelineHours = parseInt(b.dataset.hours);
       try { localStorage.setItem("cs-timeline-hours", String(state.timelineHours)); } catch {}
-      // The device profile pane aggregates over the window, so its cache is
-      // dropped here rather than left to accumulate one entry per window.
-      clearDeviceProfileCache();
       const showingEl = document.getElementById("tl-showing");
       if (showingEl) showingEl.textContent = "LOADING…";
       _tlLoading = true;

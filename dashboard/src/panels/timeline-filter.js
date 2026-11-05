@@ -115,11 +115,11 @@ export function applyTimelineFilter() {
   renderUsers();
   renderOverviewUsers();
   renderAgents();
-  renderOverviewAgents();
-  // RFP SN 30. Roles are fetched separately and the list is re-rendered once
-  // they arrive, rather than blocking this pass on another request — the
-  // endpoint list must not wait on a classification badge to appear at all.
+  // RFP SN 30. Roles are fetched separately and the list repainted when they
+  // arrive, rather than blocking this pass on another request: the endpoint
+  // list must not wait on a badge, and a failed fetch costs the badge only.
   loadDeviceRoles().then(renderAgents);
+  renderOverviewAgents();
 
   if (state.lastStats) {
     updateGauge(state.lastStats, state.feedData);

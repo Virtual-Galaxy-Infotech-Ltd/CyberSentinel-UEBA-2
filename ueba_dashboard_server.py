@@ -62,6 +62,27 @@ from flask import (
     stream_with_context, has_request_context,
 )
 from flask_cors import CORS
+try:
+    import ueba_model_tiers
+    _MODEL_TIERS_OK = True
+except Exception:          # pragma: no cover
+    ueba_model_tiers = None
+    _MODEL_TIERS_OK = False
+
+try:
+    import ueba_device_compare
+    _DEVICE_COMPARE_OK = True
+except Exception:          # pragma: no cover
+    ueba_device_compare = None
+    _DEVICE_COMPARE_OK = False
+
+try:
+    import ueba_entity_profiles
+    _ENTITY_PROFILES_OK = True
+except Exception:          # pragma: no cover
+    ueba_entity_profiles = None
+    _ENTITY_PROFILES_OK = False
+
 
 # SSO / session layer. Optional in the same way orjson and yaml are: if the
 # module (or PyJWT under it) is missing the dashboard still serves, just with
@@ -1943,7 +1964,13 @@ def _resolve_user(alert: dict) -> str:
         return ip
 
     model = ueba.get("raw_scores", {}).get("autoencoder", {}).get("model_used", "")
-    if model and model not in ("global", "unknown", "", None):
+    # `cohort:<id>` names a MODEL, not a person (RFP SN 18). The denylist this
+    # replaces would have shown it here as the account that acted — exactly
+    # how 'global' once leaked into the user column.
+    if model and _MODEL_TIERS_OK:
+        if ueba_model_tiers.is_entity_model(model):
+            return model
+    elif model and model not in ("global", "unknown", "", None):
         return model
 
     return "unknown"
@@ -2900,6 +2927,11 @@ def _build_devices(alerts):
         # dominant family and a minority of network_os events is normal on an
         # ordinary Windows host.
         "os_families": defaultdict(int),
+        # Hour-of-day histogram, for the behavioural comparison (RFP SN 56).
+        # WHEN a machine is busy separates a server from a desk, and separates
+        # a desk from the same desk being used at 3am — neither of which a
+        # signature-id profile can see.
+        "hours": defaultdict(int),
     })
 
     for a in alerts:
@@ -2935,6 +2967,11 @@ def _build_devices(alerts):
         fam = (((a.get("host") or {}).get("os") or {}).get("family") or "")
         if fam:
             d["os_families"][str(fam).strip().lower()] += 1
+        # Hour from the ISO timestamp by slice, not by parsing: these strings
+        # are produced by this pipeline in a fixed format, and a parse here
+        # would run 15 million times on a retrain-sized window.
+        if len(t) >= 13 and t[10] in ("T", " ") and t[11:13].isdigit():
+            d["hours"][str(int(t[11:13]))] += 1
         if t and (not d["first_seen"] or t < d["first_seen"]):
             d["first_seen"] = t
         if t > d["last_seen"]:
@@ -2970,6 +3007,7 @@ def _build_devices(alerts):
             "signatures":     sigs,
             "signature_names": {k: v for k, v in d["signature_names"].items()
                                 if k in sigs},
+            "hours":          dict(d["hours"]),
             "first_seen":     d["first_seen"],
             "last_seen":      d["last_seen"],
         }
@@ -3005,6 +3043,36 @@ def _device_similarity(a_sigs: dict, b_sigs: dict) -> tuple:
     return num / (dx * dy), ranked
 
 
+_ROSTER_CACHE: tuple = (0.0, frozenset())
+_ROSTER_TTL_SECS = 300
+
+
+def _estate_roster():
+    """The estate's people, cached.
+
+    Cached because /api/device classifies every device in one pass and the
+    roster is the same for all of them — building it per device would turn one
+    scan of entity_presence into forty-two.
+    """
+    global _ROSTER_CACHE
+    now = time.time()
+    ts, cached = _ROSTER_CACHE
+    if cached and (now - ts) < _ROSTER_TTL_SECS:
+        return cached
+    roster = frozenset()
+    try:
+        per: dict = {}
+        for host, user in _presence_query(
+                "SELECT value, username FROM entity_presence "
+                "WHERE kind = 'agent'", ()):
+            per.setdefault(host, []).append(user)
+        roster = ueba_entities.build_roster(per)
+    except Exception as e:
+        print("[dashboard] roster unavailable: %s" % e)
+    _ROSTER_CACHE = (now, roster)
+    return roster
+
+
 def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
     """(role, why, humans) for one device.
 
@@ -3020,6 +3088,7 @@ def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
     if not ENTITIES_AVAILABLE:
         return None, "entities module unavailable", 0
     humans = 0
+    accounts: list = []
     try:
         # Capped: the firewall collector carries 33,890 rows and the verdict is
         # decided long before the cap, so reading them all buys nothing.
@@ -3027,16 +3096,36 @@ def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
             "SELECT username FROM entity_presence "
             "WHERE kind = 'agent' AND value = ? COLLATE NOCASE LIMIT 20000",
             (name,))
-        humans = ueba_entities.count_human_accounts(r[0] for r in rows)
+        # Materialised, not a generator: the account strings are needed twice —
+        # once for the count and once for the owner rule — and a generator
+        # would arrive at the second caller already empty.
+        accounts = [r[0] for r in rows]
+        humans = ueba_entities.count_human_accounts(accounts)
     except Exception:
         humans = 0
+        accounts = []
     try:
         v = ueba_entities.classify_host(
             name, ueba_entities.register(_entities_path()), humans, os_family,
-            os_share)
+            os_share, accounts, _estate_roster())
         return v.get("role"), v.get("why"), humans
     except Exception as e:
         return None, str(e), humans
+
+
+def _device_estate(index: dict) -> dict:
+    """The comparators a single device's risk score is measured against.
+
+    Risk is partly relative — "500 alerts" means nothing without knowing the
+    busiest device in the same window — so the window's maxima travel with the
+    score. Derived from the already-cached index, so this costs a pass over a
+    few dozen records rather than a second read of the alert store.
+    """
+    alerts = [int(r.get("alerts") or 0) for r in (index or {}).values()]
+    users = [int(r.get("user_count") or 0) for r in (index or {}).values()]
+    return {"max_alerts": max(alerts) if alerts else 0,
+            "max_users": max(users) if users else 0,
+            "devices": len(index or {})}
 
 
 def _device_match(index: dict, name: str):
@@ -3052,7 +3141,15 @@ def _device_match(index: dict, name: str):
 
 @app.route("/api/device")
 def api_device_list():
-    """Every device in the window, with its role (RFP SN 56)."""
+    """Every KNOWN device with its role (RFP SN 30 / SN 56).
+
+    Registered agents are included even when they have no alerts in the
+    window, which they must be: classification does not need alerts — the name
+    rule needs only a name — and the endpoint list shows every registered
+    agent. Keying the console's role badge on this response while it covered
+    only alerting devices left 30 of 42 agents unbadged, including DC_AD_srv,
+    GPU_SRV and CPU-SRV-208. That is how a working classifier looks broken.
+    """
     index = _device_index()
     rows = []
     for name, d in index.items():
@@ -3063,10 +3160,41 @@ def api_device_list():
             "people_seen": seen, "accounts_seen": seen, "alerts": d["alerts"],
             "max_score": d["max_score"], "top_verdict": d["top_verdict"],
             "user_count": d["user_count"], "last_seen": d["last_seen"],
+            "in_window": True,
         })
+
+    # Registered agents with nothing in this window. Same registry
+    # _build_agents merges, so the two lists cover the same population.
+    known = {r["device"] for r in rows}
+    try:
+        reg = []
+        if AGENTS_REGISTRY.exists():
+            reg = json.loads(AGENTS_REGISTRY.read_text()) or []
+        for entry in reg:
+            name = (entry or {}).get("name")
+            if not name or name in known:
+                continue
+            known.add(name)
+            # No os family is known for a device with no events, so the
+            # appliance test cannot fire — which is correct rather than a
+            # gap: it needs an event mix to decide on.
+            role, why, seen = _device_role(name)
+            rows.append({
+                "device": name, "ip": (entry.get("ip") or ""),
+                "role": role, "role_why": why, "os_family": "",
+                "people_seen": seen, "accounts_seen": seen, "alerts": 0,
+                "max_score": 0.0, "top_verdict": "", "user_count": 0,
+                "last_seen": "", "in_window": False,
+            })
+    except Exception as e:
+        # A broken registry costs the extra rows, not the endpoint.
+        print("[dashboard] agent registry unreadable for /api/device: %s" % e)
+
     rows = _scope_filter(rows, device_keys=("device",), address_keys=("ip",))
     rows.sort(key=lambda r: (-r["alerts"], r["device"]))
-    return jsonify({"ok": True, "count": len(rows), "devices": rows})
+    return jsonify({"ok": True, "count": len(rows),
+                    "in_window": sum(1 for r in rows if r["in_window"]),
+                    "devices": rows})
 
 
 @app.route("/api/device/<path:name>")
@@ -3121,6 +3249,18 @@ def api_device_summary(name):
                      "first_seen": first, "last_seen": last})
         except Exception:
             touched = {}
+    # Composite risk (RFP SN 56). `max_score` stays on the record because the
+    # feed and several panels read it, but it is the worst SINGLE alert — one
+    # 0.95 event outranked five hundred at 0.70, which inverts most triage
+    # questions. `risk` is the answer to "how risky is this machine", with
+    # every component's contribution shown so the number can be argued with.
+    if _DEVICE_COMPARE_OK:
+        try:
+            d["risk"] = ueba_device_compare.risk(d, _device_estate(index))
+        except Exception as e:
+            d["risk"] = {"score": None, "band": "", "components": [],
+                         "why": "risk could not be computed: %s" % e}
+
     d["touched"] = touched
     d["touched_note"] = ("populated from alerts produced after the entity "
                          "classifier shipped; earlier history has none")
@@ -3183,7 +3323,25 @@ def api_device_peers(name):
     for other, d in index.items():
         if other == key:
             continue
-        sim, shared = _device_similarity(mine["signatures"], d["signatures"])
+        # Cosine over signature ids is kept and still reported: it is what
+        # this endpoint ranked on before, and a deployment reading
+        # `similarity_signatures` gets the same number it always did.
+        sim_sig, shared = _device_similarity(mine["signatures"], d["signatures"])
+
+        # Ranking now runs over FOUR dimensions, not one (RFP SN 56). A
+        # signature-id profile says only which detections fired, which is
+        # close to the similar-event retrieval the requirement asks not to
+        # lean on alone — two machines can fire the same rules for different
+        # reasons, at different hours, for different numbers of people.
+        if _DEVICE_COMPARE_OK:
+            cmp_result = ueba_device_compare.compare(mine, d)
+            sim = cmp_result["similarity"]
+            dims = cmp_result["dimensions"]
+            cmp_why = cmp_result["why"]
+            skipped = cmp_result["skipped"]
+        else:
+            sim, dims, cmp_why, skipped = sim_sig, [], "", []
+
         if sim < _DEVICE_MIN_SIMILARITY:
             continue
         their_users = set(d.get("users") or [])
@@ -3192,8 +3350,16 @@ def api_device_peers(name):
         role, why, _ = _device_role(other, d.get("os_family", ""), d.get("os_share", 0.0))
         scored.append({
             "device": other, "similarity": round(sim, 4), "role": role,
+            # The old single-dimension figure, so nothing that read it breaks.
+            "similarity_signatures": round(sim_sig, 4),
             "alerts": d["alerts"], "user_count": d["user_count"],
             "max_score": d["max_score"], "last_seen": d["last_seen"],
+            # Per-dimension similarity, each with what drove it AND what
+            # distinguishes the two devices. The second half is the part an
+            # analyst needs to judge whether a peer is a fair yardstick at all.
+            "dimensions": dims,
+            "why": cmp_why,
+            "not_compared": skipped,
             # Why they match: the rules that drove the score.
             "shared_signatures": [
                 {"signature_id": sid,
@@ -3222,10 +3388,84 @@ def api_device_peers(name):
             % _DEVICE_MIN_SIMILARITY),
         "compared_against": len(index) - 1,
         "min_similarity": _DEVICE_MIN_SIMILARITY,
-        "basis": ("cosine over each device's normalised signature-id profile; "
-                  "account overlap is reported but does not rank"),
+        "basis": (("Jensen-Shannon similarity across %d behavioural "
+                    "dimensions (%s), weighted and renormalised over whichever "
+                    "of them carry data on both devices; account overlap is "
+                    "reported but does not rank. `similarity_signatures` is "
+                    "the signature-only cosine this endpoint used to rank on."
+                    % (len(ueba_device_compare.DIMENSIONS),
+                       ", ".join(k for k, _w, _d in
+                                 ueba_device_compare.DIMENSIONS)))
+                   if _DEVICE_COMPARE_OK else
+                   ("cosine over each device's normalised signature-id "
+                    "profile; account overlap is reported but does not rank")),
+        "dimension_weights": ([{"dimension": k, "weight": w, "measures": dsc}
+                               for k, w, dsc in ueba_device_compare.DIMENSIONS]
+                              if _DEVICE_COMPARE_OK else []),
         "peers": scored[:limit],
     })
+
+
+def _build_entity_profiles(alerts):
+    """Behavioural profiles for every tracked entity kind (RFP SN 30 / SN 67).
+
+    Cached with the other indexes because it walks the whole window once and
+    both the per-kind list and a single entity's page read from it.
+
+    The extractor is the SAME ueba_entities.extract the engine uses, with the
+    operator's live register, so the kinds profiled here are exactly the kinds
+    being tracked — a second definition of "which entities exist" would drift
+    from the first the moment someone added a mapping.
+    """
+    if not (_ENTITY_PROFILES_OK and ENTITIES_AVAILABLE):
+        return {"profiles": {}, "coverage": {}, "available": False}
+    try:
+        reg = ueba_entities.register(_entities_path())
+    except Exception:
+        reg = None
+
+    # THE ALERTS PASSED IN CANNOT BE USED, and the reason is the whole point of
+    # this feature. `alerts` here is the .slimN projection, which keeps a fixed
+    # set of fields and drops `data`, `object` and `context.raw_event`. Built-in
+    # kinds survive that — host.name is kept, so servers and endpoints still
+    # classify — but an OPERATOR-MAPPED field is exactly the kind of arbitrary
+    # path the projection throws away. Measured while building this: a mapping
+    # of `data.appname` produced four values from the full records and ZERO
+    # through the slim ones, with no error anywhere. The feature would have
+    # shipped looking like it worked on built-in kinds and silently never
+    # working on the operator-defined ones it exists for.
+    #
+    # Same root cause as the connection search, and the same remedy, bounded by
+    # the same byte budget so a multi-GB history cannot become an unbounded
+    # scan.
+    alerts = list(_iter_full_alerts(_DEEP_DEFAULT_BUDGET))
+
+    def _extract(alert):
+        return ueba_entities.extract(alert, reg)
+
+    # Coverage for the recognised-kind candidate fields, measured in the same
+    # pass. feed_support() then states what this feed can actually populate
+    # instead of asserting a capability the data cannot back.
+    candidates = set()
+    for _k, (_d, fields) in ueba_entity_profiles.RECOGNISED_KINDS.items():
+        candidates.update(fields)
+    coverage = {f: 0 for f in candidates}
+    for a in alerts:
+        for f in candidates:
+            try:
+                if get_nested(a, f) not in (None, "", "-"):
+                    coverage[f] += 1
+            except Exception:
+                pass
+
+    try:
+        profiles = ueba_entity_profiles.build_profiles(alerts, _extract)
+    except Exception as e:
+        print("[dashboard] entity profiles failed: %s" % e)
+        profiles = {}
+    return {"profiles": profiles,
+            "coverage": {k: v for k, v in coverage.items() if v},
+            "available": True}
 
 
 _ENDPOINT_BUILDERS.update({
@@ -3241,6 +3481,7 @@ _ENDPOINT_BUILDERS.update({
     # Default rollup width only. A non-default ?window= still caches on demand
     # under its own key; it just isn't pre-warmed.
     "incidents:60": lambda alerts: _build_incidents(alerts, 60),
+    "entity_profiles": _build_entity_profiles,
 })
 
 
@@ -3646,6 +3887,40 @@ def _scope_restricted() -> bool:
     return SCOPE_AVAILABLE and ueba_scope.is_restricted(_current_scope())
 
 
+def _device_address(name) -> str:
+    """The address we know for this device, or "".
+
+    Needed because a SUBNET-scoped administrator is defined by addresses while
+    most write routes identify their target by NAME. Without this the subnet
+    axis has nothing to compare and the gate fails closed, so a subnet admin
+    could not manage the very devices inside their range — the RFP example
+    (an admin given 192.168.10.0/24 managing that subnet's devices) was not
+    satisfied, even though the device LIST filtered correctly, because
+    _scope_filter sees whole rows and already has each address.
+
+    The alert index first, then the agent registry, so a device with no
+    events in the window still resolves.
+    """
+    want = str(name or "").strip().casefold()
+    if not want:
+        return ""
+    try:
+        for dev, rec in (_device_index() or {}).items():
+            if str(dev).casefold() == want and rec.get("ip"):
+                return str(rec["ip"])
+    except Exception:
+        pass
+    try:
+        if AGENTS_REGISTRY.exists():
+            for entry in (json.loads(AGENTS_REGISTRY.read_text()) or []):
+                if (str((entry or {}).get("name") or "").casefold() == want
+                        and (entry or {}).get("ip")):
+                    return str(entry["ip"])
+    except Exception:
+        pass
+    return ""
+
+
 def _require_scope(device=None, address=None):
     """None when the caller may act on this target, else a 403 response.
 
@@ -3655,6 +3930,11 @@ def _require_scope(device=None, address=None):
     """
     if not _scope_restricted():
         return None
+    # A target named without an address gets one looked up, so BOTH axes can
+    # be tried. Still fail-closed: an unresolvable name stays unresolvable and
+    # is refused exactly as before.
+    if device and not address:
+        address = _device_address(device) or None
     verdict = ueba_scope.covers(_current_scope(), device, address)
     if verdict["allowed"]:
         return None
@@ -3810,6 +4090,7 @@ def api_rules_sweep():
 
 
 @app.route("/api/scopes")
+@_require_cap("users.manage")
 def api_scopes_list():
     """Who is restricted, and to what (RFP SN 7)."""
     if not SCOPE_AVAILABLE:
@@ -5471,6 +5752,7 @@ def api_device_trail():
 
 
 @app.route("/api/entities")
+@_require_cap("entities.edit")
 def api_entities_status():
     """What kinds exist, what the operator has configured, and what the feed
     supports (RFP SN 30 / SN 67)."""
@@ -5488,6 +5770,25 @@ def api_entities_status():
         "max_cardinality", ueba_entities.DEFAULT_MAX_CARDINALITY)
     st["host_roles"] = list(ueba_entities.HOST_ROLES)
     st["role_sources"] = list(ueba_entities.ROLE_SOURCES)
+
+    # RFP SN 30 names applications, servers, DATABASES and BUSINESS UNITS.
+    # The first two are classified automatically and the rest are reachable
+    # through an operator mapping, so the mechanism covers all of them. What
+    # differs per deployment is whether the feed carries a field to map, and
+    # that is measured rather than claimed — an operator reading this screen
+    # should not have to guess which kinds their own data can support.
+    if _ENTITY_PROFILES_OK:
+        try:
+            cov = (_cached_endpoint("entity_profiles", _build_entity_profiles)
+                   or {}).get("coverage") or {}
+            st["recognised_kinds"] = ueba_entity_profiles.feed_support(cov)
+            st["profiled_kinds"] = sorted(
+                (_cached_endpoint("entity_profiles", _build_entity_profiles)
+                 or {}).get("profiles") or {})
+        except Exception as e:
+            st["recognised_kinds"] = {}
+            st["profiled_kinds"] = []
+            st["recognised_kinds_error"] = str(e)
     return jsonify(st)
 
 
@@ -5516,8 +5817,129 @@ def api_entities_by_kind(kind):
                         LIMIT ?""", (str(kind), limit))]
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "rows": []}), 500
-    return jsonify({"ok": True, "kind": str(kind), "count": len(rows),
-                    "rows": rows})
+    out = {"ok": True, "kind": str(kind), "count": len(rows), "rows": rows}
+    for r in rows:
+        r["source"] = "presence"
+
+    # Behavioural assessment, not just counts (RFP SN 30 / SN 67). This panel
+    # used to answer "which values exist and how often", which inventories an
+    # entity without analysing it. `?assess=0` returns the old shape for a
+    # caller that only wants the list.
+    if _ENTITY_PROFILES_OK and _truthy(request.args.get("assess") or "1"):
+        try:
+            built = _cached_endpoint("entity_profiles",
+                                     _build_entity_profiles) or {}
+            assessed = ueba_entity_profiles.profile_kind(
+                built.get("profiles") or {}, str(kind), limit=limit)
+            out["assessment"] = assessed
+            by_value = {r["value"]: r for r in assessed.get("rows") or []}
+            for r in out["rows"]:
+                hit = by_value.get(r["value"])
+                if not hit:
+                    continue
+                r["scored"] = hit.get("scored")
+                r["self_drift"] = (hit.get("self_drift") or {}).get("score")
+                r["peer_outlier"] = (hit.get("peer_outlier") or {}).get("score")
+                r["why"] = hit.get("why")
+
+            # Values found in the ALERT HISTORY but not yet in entity_presence.
+            #
+            # The two sources fill at different times and that difference was
+            # a usability hole: entity_presence is written by the preprocessor
+            # as events arrive, so a field mapped at 10am has no presence rows
+            # until new traffic carries it — while the alert history already
+            # holds everything needed to profile it. The operator mapped a
+            # field, the screen said nothing was there, and the honest reading
+            # was that the feature had not worked.
+            #
+            # Marked by source rather than merged silently, because "seen in
+            # the stored history" and "recorded by the live pipeline" are
+            # different claims and an operator checking their own mapping
+            # needs to tell them apart.
+            seen = {r["value"] for r in out["rows"]}
+            for hit in (assessed.get("rows") or []):
+                v = hit.get("value")
+                if not v or v in seen:
+                    continue
+                out["rows"].append({
+                    "value": v, "source": "alerts",
+                    "entities": hit.get("actor_count") or 0,
+                    "events": hit.get("events") or 0,
+                    "first_seen": hit.get("first_seen"),
+                    "last_seen": hit.get("last_seen"),
+                    "scored": hit.get("scored"),
+                    "self_drift": (hit.get("self_drift") or {}).get("score"),
+                    "peer_outlier": (hit.get("peer_outlier") or {}).get("score"),
+                    "why": hit.get("why"),
+                })
+            out["count"] = len(out["rows"])
+            out["sources"] = {
+                "presence": sum(1 for r in out["rows"]
+                                if r.get("source") == "presence"),
+                "alerts": sum(1 for r in out["rows"]
+                              if r.get("source") == "alerts"),
+            }
+        except Exception as e:
+            out["assessment_error"] = str(e)
+    return jsonify(out)
+
+
+@app.route("/api/entities/profile/<kind>/<path:value>")
+@_require_cap("entities.edit")
+def api_entity_profile(kind, value):
+    """One entity's behaviour, with both anomaly questions answered (SN 30/67).
+
+    Two scores, never averaged: whether it is behaving unlike ITSELF
+    (self-drift) and whether it is behaving unlike OTHERS OF ITS KIND
+    (peer-outlier). An entity can be stable but unusual for its kind, or
+    typical for its kind but changing fast, and an analyst acts differently on
+    each — see ueba_entity_profiles.
+    """
+    if not _ENTITY_PROFILES_OK:
+        return jsonify({"ok": False,
+                        "error": "entity profiling unavailable"}), 503
+    try:
+        built = _cached_endpoint("entity_profiles", _build_entity_profiles) or {}
+        bucket = (built.get("profiles") or {}).get(str(kind)) or {}
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    want = str(value)
+    prof = bucket.get(want)
+    if prof is None:
+        low = want.casefold()
+        for k, v in bucket.items():
+            if str(k).casefold() == low:
+                prof, want = v, k
+                break
+    if prof is None:
+        # Not an error: the value may be recorded in entity_presence from an
+        # earlier window and simply carry no alerts in this one. Said plainly,
+        # because an empty page that looks like a failure is worse than a
+        # sentence explaining there is nothing to assess.
+        return jsonify({
+            "ok": True, "kind": str(kind), "value": want, "profiled": False,
+            "note": "no alerts for this value in the selected window, so it "
+                    "has no behavioural profile to assess",
+            "values_in_kind": len(bucket)})
+
+    assessment = ueba_entity_profiles.assess(prof, list(bucket.values()))
+    actors = sorted(((a, n) for a, n in (prof.get("actors_all") or {}).items()),
+                    key=lambda kv: -kv[1])[:25]
+    return jsonify({
+        "ok": True, "profiled": True, "kind": str(kind), "value": want,
+        "events": prof.get("events"),
+        "actor_count": prof.get("actor_count"),
+        "actors": [{"entity": a, "events": n} for a, n in actors],
+        "first_seen": prof.get("first_seen"),
+        "last_seen": prof.get("last_seen"),
+        "max_score": round(prof.get("max_score") or 0.0, 4),
+        "split_at": prof.get("split_at"),
+        "halves": {h: (prof.get(h) or {}).get("events", 0)
+                   for h in ("baseline", "recent")},
+        "assessment": assessment,
+        "values_in_kind": len(bucket),
+    })
 
 
 @app.route("/api/entities/mappings", methods=["POST"])
