@@ -264,10 +264,10 @@ let _valueData = null;
 
 function scoreColour(v) {
   if (v === null || v === undefined) return "var(--text3)";
-  if (v >= 0.7) return "var(--red, #f85149)";
-  if (v >= 0.45) return "var(--orange, #f0883e)";
-  if (v >= 0.25) return "var(--yellow, #d29922)";
-  return "var(--green, #3fb950)";
+  if (v >= 0.7) return "var(--red)";
+  if (v >= 0.45) return "var(--orange)";
+  if (v >= 0.25) return "var(--yellow)";
+  return "var(--green)";
 }
 
 function pct(v) {
@@ -281,10 +281,10 @@ function supportSection(st) {
   const rows = names.sort().map((k) => {
     const r = rk[k];
     const on = !!r.supported_by_feed;
-    return `<div style="display:flex;gap:8px;align-items:baseline;padding:2px 0;font-size:10px;">
-      <span style="font-family:var(--mono2);min-width:104px;color:var(--text2);">${esc(k)}</span>
-      <span style="color:${on ? "var(--green, #3fb950)" : "var(--text3)"};
-        font-family:var(--mono2);min-width:74px;">${on ? "available" : "no field"}</span>
+    return `<div style="display:flex;gap:8px;align-items:baseline;padding:2px 0;font-size:12.5px;">
+      <span style="font-family:var(--mono2);min-width:130px;color:var(--text2);">${esc(k)}</span>
+      <span style="color:${on ? "var(--green)" : "var(--text3)"};
+        font-family:var(--mono2);min-width:92px;">${on ? "available" : "no field"}</span>
       <span style="flex:1;color:var(--text3);">${esc(r.describes || "")}${
         on ? ` · ${esc((r.fields_present || []).slice(0, 2).join(", "))}`
            : ` · map any field that carries one`}</span>
@@ -312,8 +312,8 @@ function kindBar(st) {
   const chips = profiled.map((k) => {
     const on = k === _kind;
     return `<button class="export-btn" data-act="kind" data-kind="${esc(k)}"
-      style="font-family:var(--mono2);font-size:10px;padding:2px 8px;
-      ${on ? "border-color:var(--blue, #4aa3ff);color:var(--blue, #4aa3ff);" : ""}">
+      style="font-family:var(--mono2);font-size:12.5px;padding:2px 8px;
+      ${on ? "border-color:var(--accent);color:var(--accent);" : ""}">
       ${esc(k)}</button>`;
   }).join(" ");
   return `<div class="wl-form" style="gap:6px;flex-wrap:wrap;">${chips}</div>`;
@@ -328,16 +328,16 @@ function dimRows(dims, scoreKey, sharedKey, unlikeKey) {
       const mark = x.appeared ? "new" : x.stopped ? "gone" : "";
       return esc(x.key) + (mark ? ` (${mark})` : "");
     }).join(", ");
-    return `<div style="padding:3px 0;border-top:1px solid var(--line, rgba(255,255,255,.05));">
-      <div style="display:flex;gap:6px;align-items:baseline;font-size:10px;">
+    return `<div style="padding:3px 0;border-top:1px solid var(--border);">
+      <div style="display:flex;gap:6px;align-items:baseline;font-size:12.5px;">
         <span style="font-family:var(--mono2);text-transform:uppercase;
-          letter-spacing:1px;min-width:72px;color:var(--text2);">${esc(d.dimension)}</span>
+          letter-spacing:1px;min-width:90px;color:var(--text2);">${esc(d.dimension)}</span>
         <span style="flex:1;color:var(--text3);">${esc(d.measures || "")}</span>
         <span style="font-family:var(--mono2);color:${scoreColour(v)};">${pct(v)}</span>
       </div>
-      ${shared ? `<div style="font-size:10px;color:var(--text3);padding-left:78px;">
+      ${shared ? `<div style="font-size:12.5px;color:var(--text3);padding-left:98px;">
         same: ${shared}</div>` : ""}
-      ${unlike ? `<div style="font-size:10px;color:var(--text3);padding-left:78px;">
+      ${unlike ? `<div style="font-size:12.5px;color:var(--text3);padding-left:98px;">
         differs: ${unlike}</div>` : ""}
     </div>`;
   }).join("");
@@ -345,55 +345,55 @@ function dimRows(dims, scoreKey, sharedKey, unlikeKey) {
 
 function valueDetail() {
   if (!_valueData) {
-    return `<div style="font-size:10px;color:var(--text3);padding:6px 0;">Loading…</div>`;
+    return `<div style="font-size:12.5px;color:var(--text3);padding:6px 0;">Loading…</div>`;
   }
   const d = _valueData;
   if (d.profiled === false) {
-    return `<div style="font-size:10px;color:var(--text3);padding:6px 0;">
+    return `<div style="font-size:12.5px;color:var(--text3);padding:6px 0;">
       ${esc(d.note || "Nothing to assess for this value.")}</div>`;
   }
   const a = d.assessment || {};
   const drift = a.self_drift || {};
   const peer = a.peer_outlier || {};
   const actors = (d.actors || []).slice(0, 8).map((x) =>
-    `<span style="font-family:var(--mono2);font-size:10px;color:var(--text3);
+    `<span style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);
       margin-right:8px;">${esc(x.entity)} <span style="opacity:.6">${x.events}</span></span>`
   ).join("");
   const half = d.halves || {};
   return `<div style="padding:6px 0 2px;">
-    <div style="font-size:10px;color:var(--text2);margin-bottom:6px;line-height:1.5;">
+    <div style="font-size:12.5px;color:var(--text2);margin-bottom:6px;line-height:1.5;">
       ${esc(a.why || "")}
     </div>
-    <div style="font-size:10px;color:var(--text3);margin-bottom:6px;">
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:6px;">
       ${d.events} events · ${d.actor_count} account(s) ·
       ${half.baseline ?? 0} before / ${half.recent ?? 0} after the split
     </div>
     ${actors ? `<div style="margin-bottom:6px;">${actors}</div>` : ""}
 
-    <div style="font-family:var(--mono2);font-size:8px;letter-spacing:2px;
+    <div style="font-family:var(--mono2);font-size:11px;letter-spacing:2px;
       text-transform:uppercase;color:var(--text3);margin-top:8px;">
       Unlike itself — ${pct(drift.score)}</div>
     ${drift.comparable
       ? dimRows(drift.dimensions, "drift", "stable", "changed")
-      : `<div style="font-size:10px;color:var(--text3);">${esc(drift.why || "")}</div>`}
+      : `<div style="font-size:12.5px;color:var(--text3);">${esc(drift.why || "")}</div>`}
 
-    <div style="font-family:var(--mono2);font-size:8px;letter-spacing:2px;
+    <div style="font-family:var(--mono2);font-size:11px;letter-spacing:2px;
       text-transform:uppercase;color:var(--text3);margin-top:10px;">
       Unlike others of its kind — ${pct(peer.score)}</div>
     ${peer.comparable
       ? dimRows(peer.dimensions, "distance", "shared", "unlike")
-      : `<div style="font-size:10px;color:var(--text3);">${esc(peer.why || "")}</div>`}
+      : `<div style="font-size:12.5px;color:var(--text3);">${esc(peer.why || "")}</div>`}
   </div>`;
 }
 
 function kindTable() {
   if (!_kind) return "";
   if (!_kindData) {
-    return `<div style="font-size:10px;color:var(--text3);padding:8px 0;">Loading ${esc(_kind)}…</div>`;
+    return `<div style="font-size:12.5px;color:var(--text3);padding:8px 0;">Loading ${esc(_kind)}…</div>`;
   }
   const rows = _kindData.rows || [];
   if (!rows.length) {
-    return `<div style="font-size:11px;color:var(--text3);padding:8px 0;">
+    return `<div style="font-size:13px;color:var(--text3);padding:8px 0;">
       No values recorded under <b>${esc(_kind)}</b> in this window.</div>`;
   }
   const a = _kindData.assessment || {};
@@ -404,20 +404,20 @@ function kindTable() {
     // just made needs to know which they are looking at.
     const src = r.source === "alerts" ? "history" : "live";
     return `<tr data-act="value" data-value="${esc(r.value)}"
-        style="cursor:pointer;${open ? "background:rgba(255,255,255,.03);" : ""}">
-        <td><span style="font-family:var(--mono);font-size:11px;">${esc(r.value)}</span>
-          <span style="font-family:var(--mono2);font-size:8px;color:var(--text3);
+        style="cursor:pointer;${open ? "background:var(--bg3);" : ""}">
+        <td><span style="font-family:var(--mono);font-size:13px;">${esc(r.value)}</span>
+          <span style="font-family:var(--mono2);font-size:11px;color:var(--text3);
             margin-left:6px;">${src}</span></td>
-        <td style="font-family:var(--mono2);font-size:10px;">${r.events ?? "—"}</td>
-        <td style="font-family:var(--mono2);font-size:10px;">${r.entities ?? "—"}</td>
-        <td style="font-family:var(--mono2);font-size:11px;color:${scoreColour(r.self_drift)};">
+        <td style="font-family:var(--mono2);font-size:12.5px;">${r.events ?? "—"}</td>
+        <td style="font-family:var(--mono2);font-size:12.5px;">${r.entities ?? "—"}</td>
+        <td style="font-family:var(--mono2);font-size:13px;color:${scoreColour(r.self_drift)};">
           ${pct(r.self_drift)}</td>
-        <td style="font-family:var(--mono2);font-size:11px;color:${scoreColour(r.peer_outlier)};">
+        <td style="font-family:var(--mono2);font-size:13px;color:${scoreColour(r.peer_outlier)};">
           ${pct(r.peer_outlier)}</td>
       </tr>
       ${open ? `<tr><td colspan="5" style="padding:0 10px 8px;">${valueDetail()}</td></tr>` : ""}`;
   }).join("");
-  return `<div style="font-size:10px;color:var(--text3);margin:8px 0 6px;line-height:1.5;">
+  return `<div style="font-size:12.5px;color:var(--text3);margin:8px 0 6px;line-height:1.5;">
       ${a.values ?? rows.length} value(s), ${a.scored ?? 0} with enough history to
       score. <b>Drift</b> is how much a value changed between the two halves of
       the window; <b>peer</b> is how unlike the other values of its kind it is.
