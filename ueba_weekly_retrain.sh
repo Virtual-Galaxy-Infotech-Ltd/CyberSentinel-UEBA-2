@@ -130,6 +130,24 @@ CORPUS_DIR="$(dirname "$COMBINED")"
 # CORPUS_DIR included: retrain.py appends to the corpus and will not create
 # its parent, and on a fresh install nothing else has.
 mkdir -p "$TRAINING_DIR" "$STATE_DIR" "$(dirname "$LOG")" "$CORPUS_DIR"
+
+# ── tell the liveness watchdog a retrain is in progress ─────────────────────
+#
+# ueba-engine-watchdog.sh restarts ueba-engine whenever it finds it inactive,
+# every two minutes, with no idea that a retrain deliberately stopped it.
+# Measured on 2026-11-06: the engine was stopped at 13:27:35 and the watchdog
+# had it running again by 13:29:02 — so every weekly run has had its
+# engine-stop silently undone within 90 seconds. The engine then competes for
+# memory with the trainer (available RAM fell to 1 GB on this box) and is live
+# when models/ is replaced at promotion, leaving it on a mix of cached old
+# models and new ones on disk until something restarts it.
+#
+# A pidfile, not a plain flag: a retrain killed mid-run leaves the file
+# behind, and a flag alone would disable the watchdog indefinitely. The
+# watchdog checks the pid is still alive, so a stale file is ignored.
+RETRAIN_PIDFILE="$STATE_DIR/retrain.running"
+echo $$ > "$RETRAIN_PIDFILE"
+trap 'rm -f "$RETRAIN_PIDFILE"' EXIT HUP INT TERM
 exec >> "$LOG" 2>&1
 
 echo "==================================================================="
