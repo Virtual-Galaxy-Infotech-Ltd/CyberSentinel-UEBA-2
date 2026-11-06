@@ -91,6 +91,36 @@ TRAINING_RETENTION_DAYS=${TRAINING_RETENTION_DAYS:-21}
 # paths.training_data in ueba_config.yaml names the same file; keep the two
 # aligned if either moves.
 COMBINED="${UEBA_TRAINING_CORPUS:-$BASE/data/combined_training.jsonl}"
+
+# ── the corpus path must match ueba_config.yaml, and now it is CHECKED ───────
+#
+# The comment above says to keep the two aligned. Nothing enforced it, and on
+# 2026-11-02 they drifted: the config was repointed to /data/ueba_training
+# while this script still derived $BASE/data. The script then pruned a file
+# that did not exist — `[ -f "$COMBINED" ]` is false, so the prune SILENTLY
+# SKIPPED — while the real 84 GB corpus grew untrimmed. That is the disk
+# deadlock described at step 0.5, arrived at by a different route, and nothing
+# reported it because every individual step "succeeded".
+#
+# So: compare them, and refuse to run rather than work on the wrong file.
+# Set UEBA_TRAINING_CORPUS in ueba_site.env to whatever paths.training_data
+# says.
+CFG_CORPUS=$("$VENV_PY" - "$BASE/ueba_config.yaml" <<'PYCFG' 2>/dev/null || true
+import sys, yaml
+try:
+    print((yaml.safe_load(open(sys.argv[1])) or {}).get("paths", {}).get("training_data") or "")
+except Exception:
+    print("")
+PYCFG
+)
+if [ -n "$CFG_CORPUS" ] && [ "$CFG_CORPUS" != "$COMBINED" ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S')  ABORT: corpus path mismatch" >&2
+  echo "  this script : $COMBINED" >&2
+  echo "  config says : $CFG_CORPUS" >&2
+  echo "  The prune would operate on one file while training reads the other." >&2
+  echo "  Set UEBA_TRAINING_CORPUS in ueba_site.env to the config's value." >&2
+  exit 1
+fi
 # Defined at top level, not inside step 0.5: the post-append prune at step
 # 4.5 needs it too, and a variable set inside a skipped block is unset.
 PRUNE_TOOL="$BASE/ueba_prune_corpus.py"
