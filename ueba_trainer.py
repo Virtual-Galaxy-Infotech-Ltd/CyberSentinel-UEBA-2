@@ -96,48 +96,100 @@ def _safe_model_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(name or ""))
 
 
+def feature_matrix_bytes(h5_path: str) -> int:
+    """How much RAM the whole feature matrix needs as float32."""
+    with h5py.File(h5_path, "r") as f:
+        n, dim = f["features"].shape
+        return n * dim * 4
+
+
+def load_feature_matrix(h5_path: str, chunk_rows: int = 2_000_000):
+    """The whole feature matrix, float32, read ONCE.
+
+    WHY THIS EXISTS
+
+    HDF5Dataset used to read the ENTIRE features dataset on every
+    construction and then slice the rows it wanted — the comment said
+    "reading 1.7 GB sequentially takes ~3s", which was true of the file it
+    was written against. The features dataset is **gzip-compressed**, so a
+    full read decompresses every chunk: on a 28,888,489-row file that is
+    ~2,890 chunks and about a minute, no matter how few rows the caller
+    actually wanted.
+
+    Per-user training constructs one Dataset per user. Measured on 2026-11-06:
+    1,003 eligible users, ~118 seconds each, of which almost all was this
+    decompression — roughly 19.5 TB of reads and an estimated **32 hours** for
+    a job whose own documentation says 30-90 minutes. A 1 MB user cost the
+    same minute as a 3 MB one, which is the tell: the cost tracked the FILE,
+    not the request.
+
+    Read once here, reuse for every user, and the whole per-user phase pays
+    that minute a single time.
+
+    Chunked rather than `f["features"][:]` so peak memory is the result plus
+    one chunk (~280 MB) instead of a float64 read plus a float32 copy. h5py
+    converts dtype on assignment into the pre-allocated output.
+    """
+    with h5py.File(h5_path, "r") as f:
+        d = f["features"]
+        n, dim = d.shape
+        out = np.empty((n, dim), dtype=np.float32)
+        log.info("  Reading feature matrix once: %d rows x %d (%.2f GB float32)",
+                 n, dim, out.nbytes / 1024**3)
+        t0 = time.time()
+        for start in range(0, n, chunk_rows):
+            end = min(start + chunk_rows, n)
+            out[start:end] = d[start:end]
+        log.info("  Feature matrix in RAM: %.2f GB in %.1f min",
+                 out.nbytes / 1024**3, (time.time() - t0) / 60)
+        return out
+
+
 class HDF5Dataset(Dataset):
     """
-    PyTorch Dataset that reads feature vectors from an HDF5 file.
-    Preloads all data into RAM for fast GPU feeding.
-    With 178 GB RAM available this is always safe.
-    Falls back to per-row reads only if RAM is insufficient.
+    PyTorch Dataset that serves feature vectors for training.
+
+    `source` is a feature matrix already in RAM (see load_feature_matrix).
+    Pass it whenever more than one Dataset is built from the same file —
+    without it, each construction re-reads and re-decompresses the whole
+    features dataset, which is what made per-user training take 32 hours.
+
+    Without `source` the old behaviour is kept, so a single-shot caller and
+    any out-of-tree user still work.
     """
 
     def __init__(self, h5_path: str, indices: np.ndarray | None = None,
-                 scaler: StandardScaler | None = None):
+                 scaler: StandardScaler | None = None,
+                 source: "np.ndarray | None" = None):
         self.h5_path = h5_path
         self.scaler  = scaler
 
-        with h5py.File(h5_path, "r") as f:
-            total = f["features"].shape[0]
-            feat_dim = f["features"].shape[1]
-            if indices is not None:
-                self.indices = indices
-            else:
-                self.indices = np.arange(total)
-
-            n = len(self.indices)
-            log.info("  Preloading %d rows into RAM (%.0f MB)...",
-                     n, n * feat_dim * 4 / 1024**2)
-
-            # ALWAYS read full dataset sequentially then filter in numpy.
-            # HDF5 fancy indexing (random positions) on compressed files
-            # is extremely slow regardless of subset size.
-            # Reading 1.7 GB sequentially takes ~3s; numpy indexing is instant.
-            full = f["features"][:].astype(np.float32)
-            if indices is None:
-                data = full
-            else:
-                data = full[self.indices]
-                del full
-
-            log.info("  Preload complete: %.0f MB in RAM", data.nbytes / 1024**2)
+        if source is not None:
+            self.indices = (indices if indices is not None
+                            else np.arange(source.shape[0]))
+            # A slice COPIES only the rows asked for; the full-matrix case
+            # takes a view, so the global model does not duplicate 4 GB.
+            data = source if indices is None else source[self.indices]
+        else:
+            with h5py.File(h5_path, "r") as f:
+                total = f["features"].shape[0]
+                feat_dim = f["features"].shape[1]
+                self.indices = (indices if indices is not None
+                                else np.arange(total))
+                n = len(self.indices)
+                log.info("  Preloading %d rows into RAM (%.0f MB)...",
+                         n, n * feat_dim * 4 / 1024**2)
+                full = f["features"][:].astype(np.float32)
+                data = full if indices is None else full[self.indices]
+                if indices is not None:
+                    del full
+                log.info("  Preload complete: %.0f MB in RAM",
+                         data.nbytes / 1024**2)
 
         if scaler is not None:
             data = scaler.transform(data).astype(np.float32)
 
-        self.data = torch.from_numpy(data)
+        self.data = torch.from_numpy(np.ascontiguousarray(data))
 
     def __len__(self):
         return len(self.data)
@@ -525,9 +577,55 @@ class UEBATrainer:
         abs_floor  = float(ae_cfg.get("threshold_floor", 0.05))
         floor_frac = float(ae_cfg.get("peruser_floor_frac", 0.5))
 
+        # ── read the features ONCE and share them ─────────────────────────────
+        #
+        # Every HDF5Dataset used to re-read and re-decompress the whole
+        # features dataset. With 1,003 eligible users that was ~19.5 TB of
+        # reads and an estimated 32 hours (measured 2026-11-06) for a job
+        # documented as 30-90 minutes. One read, reused by the global model,
+        # every per-user model and every cohort model.
+        #
+        # Guarded rather than assumed: the class docstring used to say "with
+        # 178 GB RAM available this is always safe", and this box has 125 GB
+        # with 11 GB free and swap exhausted. If the matrix will not fit in a
+        # safe fraction of what is actually free, fall back to the old
+        # per-call read — slow, but it completes instead of being OOM-killed.
+        shared = None
+        try:
+            need = feature_matrix_bytes(h5_path)
+            avail = None
+            try:
+                with open("/proc/meminfo") as mf:
+                    for line in mf:
+                        if line.startswith("MemAvailable:"):
+                            avail = int(line.split()[1]) * 1024
+                            break
+            except Exception:
+                avail = None
+            budget = int(avail * 0.6) if avail else None
+            if budget is None:
+                log.warning("  Cannot read MemAvailable — loading the feature "
+                            "matrix without a memory guard")
+                shared = load_feature_matrix(h5_path)
+            elif need <= budget:
+                log.info("  Feature matrix %.2f GB fits the budget %.2f GB "
+                         "(60%% of %.2f GB available)",
+                         need / 1024**3, budget / 1024**3, avail / 1024**3)
+                shared = load_feature_matrix(h5_path)
+            else:
+                log.warning("  Feature matrix needs %.2f GB but only %.2f GB "
+                            "of the %.2f GB available is budgeted — falling "
+                            "back to per-call reads. Per-user training will be "
+                            "SLOW; free memory or shrink the corpus window.",
+                            need / 1024**3, budget / 1024**3, avail / 1024**3)
+        except Exception as e:
+            log.warning("  Could not pre-load the feature matrix (%s) — "
+                        "falling back to per-call reads", e)
+            shared = None
+
         # ── Global autoencoder (all data) ─────────────────────────────────────
         log.info("Training global autoencoder...")
-        global_ds = HDF5Dataset(h5_path, scaler=scaler)
+        global_ds = HDF5Dataset(h5_path, scaler=scaler, source=shared)
         global_model, global_threshold = ae_trainer.train(global_ds, "global",
                                                           floor=abs_floor)
 
@@ -623,7 +721,8 @@ class UEBATrainer:
             log.info("Training autoencoder for user '%s' | events: %d",
                      user, len(indices))
 
-            user_ds = HDF5Dataset(h5_path, indices=indices, scaler=scaler)
+            user_ds = HDF5Dataset(h5_path, indices=indices, scaler=scaler,
+                                  source=shared)
             user_model, user_threshold = ae_trainer.train(user_ds, user,
                                                           floor=peruser_floor)
 
@@ -646,11 +745,14 @@ class UEBATrainer:
 
         # ── Cohort autoencoders (RFP SN 18) ───────────────────────────────────
         self._train_cohort_models(h5_path, scaler, ae_trainer, user_indices,
-                                  min_events, peruser_floor)
+                                  min_events, peruser_floor, shared=shared)
+        # Release the matrix before the FAISS build, which has its own
+        # allocations and no need for this one.
+        del shared
         self._save_thresholds()
 
     def _train_cohort_models(self, h5_path, scaler, ae_trainer, user_indices,
-                             min_events, peruser_floor):
+                             min_events, peruser_floor, shared=None):
         """One model per behavioural cohort, for entities too quiet to learn alone.
 
         THE GAP THIS CLOSES. Everything above trains a model only for an
@@ -759,7 +861,7 @@ class UEBATrainer:
             log.info("Training cohort autoencoder %s | members: %d | rows: %d",
                      key, len(who), len(idx))
             ds = HDF5Dataset(h5_path, indices=np.array(sorted(set(idx))),
-                             scaler=scaler)
+                             scaler=scaler, source=shared)
             model, threshold = ae_trainer.train(ds, key, floor=peruser_floor)
             torch.save(model.state_dict(), str(model_path))
             # Keyed by the MODEL name, which is what the scorer now looks up —
