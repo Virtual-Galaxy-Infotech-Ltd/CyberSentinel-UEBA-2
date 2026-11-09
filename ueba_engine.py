@@ -708,6 +708,15 @@ def build_evidence_block(
             "autoencoder_threshold": round(ae_result["threshold"], 4),
             "error_vs_threshold":   f"{round(ae_result['reconstruction_error'] / max(ae_result['threshold'], 0.0001), 1)}x above threshold",
             "model_used":           ae_result["model_used"],
+            # WHICH TIER judged it, beside which model did (RFP SN 18,
+            # sub-point 8). model_used alone answers it only if the reader
+            # knows that a bare name means a personal model and `cohort:` a
+            # shared one; the coverage report should not have to infer that
+            # from a string shape. Named model_tier, matching the scorer.
+            # `raw_scores.autoencoder.model_type` carries the same value under
+            # its historical name and is left alone — the console reads it in
+            # two places and renaming it would break them for nothing.
+            "model_tier":           ae_result.get("model_tier"),
             "if_raw_score":         round(if_result["raw_score"], 4),
         }
     else:
@@ -722,6 +731,15 @@ def build_evidence_block(
             "autoencoder_threshold": round(ae_result["threshold"], 4),
             "error_vs_threshold":   f"{round(ae_result['reconstruction_error'] / max(ae_result['threshold'], 0.0001), 1)}x above threshold",
             "model_used":           ae_result["model_used"],
+            # WHICH TIER judged it, beside which model did (RFP SN 18,
+            # sub-point 8). model_used alone answers it only if the reader
+            # knows that a bare name means a personal model and `cohort:` a
+            # shared one; the coverage report should not have to infer that
+            # from a string shape. Named model_tier, matching the scorer.
+            # `raw_scores.autoencoder.model_type` carries the same value under
+            # its historical name and is left alone — the console reads it in
+            # two places and renaming it would break them for nothing.
+            "model_tier":           ae_result.get("model_tier"),
             "if_raw_score":         round(if_result["raw_score"], 4),
         }
 

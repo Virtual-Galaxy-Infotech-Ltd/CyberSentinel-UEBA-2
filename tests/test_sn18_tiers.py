@@ -277,6 +277,64 @@ def main() -> int:
     ok("an unplaced real entity still uses global",
        r["model_used"] == "global", r["model_used"])
 
+    # ── the tier has to reach the ALERT, not just the scorer ─────────────
+    # score() has reported model_tier since the tier shipped. The alert did
+    # not carry it: the engine copied model_used into the evidence block and
+    # left the tier behind, so a coverage report had to infer "entity" from
+    # the fact that a model name was not the word "global" — exactly the
+    # inference SN 18 sub-point 8 asks to be recorded instead of guessed.
+    import ueba_engine as ENG
+
+    def evidence_for(model_used, model_tier, with_profile=True):
+        ae = {"reconstruction_error": 0.42, "threshold": 0.20,
+              "is_anomalous": True, "deviation_score": 0.9,
+              "model_used": model_used, "model_tier": model_tier}
+        return ENG.build_evidence_block(
+            log_entry={"host": {"name": "h1"}, "security": {"signature": "s"}},
+            if_result={"raw_score": -0.4, "is_anomalous": True},
+            ae_result=ae,
+            fusion={"combined_score": 0.8, "risk_verdict": "anomalous",
+                    "confidence": "high"},
+            anomaly_reasons=["x"],
+            profile=({"first_seen": "2026-01-01", "avg_hour": 10,
+                      "total_events": 5000} if with_profile else None),
+            alerts_today=1)
+
+    for used, tier in (("busy.person", "entity"),
+                       ("cohort:c1", "cohort"),
+                       ("global", "global")):
+        ev = evidence_for(used, tier)
+        base = ev.get("baseline") or {}
+        ok("alert evidence carries model_tier=%s" % tier,
+           base.get("model_tier") == tier,
+           "got %r" % base.get("model_tier"))
+        ok("  ...beside the model that produced it (%s)" % used,
+           base.get("model_used") == used, "got %r" % base.get("model_used"))
+        # The two must not drift: a tier that disagrees with its own model
+        # name is worse than no tier at all, because a report would trust it.
+        ok("  ...and the tier matches what the model name implies",
+           T.tier_of(base.get("model_used")) == base.get("model_tier"),
+           "tier_of(%r)=%r but model_tier=%r" % (
+               base.get("model_used"), T.tier_of(base.get("model_used")),
+               base.get("model_tier")))
+
+    # The engine builds a DIFFERENT evidence block when the entity has no
+    # baseline yet. That branch had its own copy of the field list, which is
+    # how model_used came to be in one and not the other historically.
+    ev = evidence_for("cohort:c1", "cohort", with_profile=False)
+    base = ev.get("baseline") or {}
+    ok("the no-baseline branch carries model_tier too",
+       base.get("model_tier") == "cohort", "got %r" % base.get("model_tier"))
+    ok("the no-baseline branch still names the model",
+       base.get("model_used") == "cohort:c1", "got %r" % base.get("model_used"))
+
+    # A scorer that cannot report a tier must leave the field absent-or-None
+    # rather than inventing one.
+    ev = evidence_for("global", None)
+    ok("a missing tier is recorded as None, not guessed",
+       (ev.get("baseline") or {}).get("model_tier") is None,
+       "got %r" % (ev.get("baseline") or {}).get("model_tier"))
+
     total = len(_checks)
     if _failures:
         print("SN 18 tiers: %d/%d FAILED" % (len(_failures), total))
