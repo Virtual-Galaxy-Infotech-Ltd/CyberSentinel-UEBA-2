@@ -320,6 +320,41 @@ else
   fi
 fi
 
+# ── 3.5 Rebuild peer groups (RFP SN 42) — BEFORE the trainer ─────────────
+# ORDER IS LOAD-BEARING. This used to sit at 5.5, after the engine restart, so
+# that the engine picked the new assignment up through its mtime reload instead
+# of needing a second restart. That reasoning was sound for the ENGINE and wrong
+# for the TRAINER: cohort training (RFP SN 18) reads profiles/peer_groups.json
+# to decide which sparse entities share a model, and at 5.5 the file it read was
+# always the PREVIOUS week's — or, on a first run, absent entirely.
+#
+# Measured on the 08-Nov-2026 run: the trainer looked for the file at 05:37:28
+# and logged "No peer-group assignment — every sparse entity falls back to the
+# global model"; build_peer_groups wrote it at 06:21:40, 44 minutes too late.
+# Zero cohort models were produced, every week, silently.
+#
+# Here the engine is already stopped (step 3), so entity_presence is not being
+# written underneath the clusterer, and the step 5 restart still picks the new
+# assignment up — the original benefit is kept, not traded away.
+#
+# Non-fatal on purpose. Clustering reads entity_presence, which is independent
+# of the models this script is about to rebuild, so a failure here must not mark
+# the retrain itself as failed and must not leave the engine stopped. The builder
+# refuses to overwrite a good assignment with an empty one, so the worst case of
+# a failed run is that last week's grouping stays in force and cohort training
+# uses that instead.
+PEER_TOOL="$BASE/build_peer_groups.py"
+if [ -f "$PEER_TOOL" ]; then
+  echo "  Rebuilding peer groups..."
+  if "$VENV_PY" "$PEER_TOOL" --config "$BASE/ueba_config.yaml" 2>&1 | sed 's/^/    /'; then
+    echo "  Peer groups rebuilt"
+  else
+    echo "  WARNING: peer group rebuild failed — the previous assignment stays in force"
+  fi
+else
+  echo "  No build_peer_groups.py — skipping peer group rebuild"
+fi
+
 # ── 4. Run retrain.py ────────────────────────────────────────────────────
 # Pre-flight space check. retrain.py appends this week's events to a 200+ GB
 # corpus and then writes a ~50 GB features.h5, so starting it on a nearly-full
@@ -378,27 +413,6 @@ else
   setsid "$VENV_PY" ueba_engine.py >> engine.log 2>&1 < /dev/null &
   NEW_PID=$!
   echo "  Engine restart launched (new PID: $NEW_PID, takes ~35s to be fully ready)"
-fi
-
-# ── 5.5 Rebuild peer groups (RFP SN 42) ──────────────────────────────────
-# After the engine is back, so it picks the new assignment up on its next event
-# through the mtime reload rather than needing another restart.
-#
-# Non-fatal on purpose. Clustering reads entity_presence, which is independent
-# of the models this script just rebuilt, so a failure here must not mark the
-# retrain itself as failed and must not leave the engine stopped. The builder
-# refuses to overwrite a good assignment with an empty one, so the worst case
-# of a failed run is that last week's grouping stays in force.
-PEER_TOOL="$BASE/build_peer_groups.py"
-if [ -f "$PEER_TOOL" ]; then
-  echo "  Rebuilding peer groups..."
-  if "$VENV_PY" "$PEER_TOOL" --config "$BASE/ueba_config.yaml" 2>&1 | sed 's/^/    /'; then
-    echo "  Peer groups rebuilt"
-  else
-    echo "  WARNING: peer group rebuild failed — the previous assignment stays in force"
-  fi
-else
-  echo "  No build_peer_groups.py — skipping peer group rebuild"
 fi
 
 # ── 5.6 Retrain the supervised model (RFP SN 20) ──────────────────────────

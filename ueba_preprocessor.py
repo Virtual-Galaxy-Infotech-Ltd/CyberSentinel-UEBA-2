@@ -1834,6 +1834,37 @@ class UserProfileStore:
         self._account_cache = cached
         return cached
 
+    def accounts_on(self, host: str) -> list:
+        """The account names seen on this host — for the OWNER rule (SN 5/SN 30).
+
+        distinct_account_count() answers "how many people", which drives the
+        breadth signal. classify_host's owner rule needs the names themselves:
+        `kafka-prajwal` is only provably Prajwal's laptop because an account
+        whose local part contains "prajwal" signs in to it. Callers that pass
+        only the count get the product-token answer (server) and callers that
+        pass the names get the owner answer (endpoint) — that disagreement was
+        live in three code paths before this existed.
+
+        Raw strings, not canonicalised: the owner rule matches against the
+        account's local part and needs the full address, while the count folds
+        duplicates of one person. Two different questions, two different shapes.
+        """
+        if not host:
+            return []
+        cached = getattr(self, "_account_names_cache", None)
+        if cached is None:
+            cached = {}
+            try:
+                for value, user in self.conn.execute(
+                        "SELECT LOWER(value), username FROM entity_presence "
+                        "WHERE kind = 'agent'"):
+                    if user:
+                        cached.setdefault(value, []).append(user)
+            except Exception as e:
+                _log.debug("account names unavailable: %s", e)
+            self._account_names_cache = cached
+        return cached.get(str(host).strip().casefold(), [])
+
     def _privop_counts(self) -> dict:
         """Entity -> privileged-operation count, read from disk once per process."""
         cached = getattr(self, "_privop_cache", None)

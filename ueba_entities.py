@@ -1017,19 +1017,35 @@ def device_facing(entities: list) -> list:
 
 
 def extract(log: dict, reg: "dict | None" = None, accounts_seen: int = 0,
-            guard: "CardinalityGuard | None" = None) -> list:
+            guard: "CardinalityGuard | None" = None,
+            accounts=(), roster=(), os_family: str = "",
+            os_share: float = 1.0) -> list:
     """Secondary entities this one event touches.
 
     [{'kind','value','source','field','why'}]. The primary entity key is NOT
     included — that is resolve_entity()'s job and this must never compete with
     it. Never raises: a missing secondary entity is worth less than the
     pipeline it would take down.
+
+    `accounts`, `roster`, `os_family` and `os_share` are forwarded to
+    classify_host. They are optional only so existing callers keep working;
+    a caller that can supply them and does not will get a host role decided
+    without the owner rule, which is how one host ended up badged `server`
+    in the entity profiles and `endpoint` on the device page.
     """
     out: list = []
     try:
         host = event_host(log)
         if host:
-            c = classify_host(host, reg, accounts_seen)
+            # accounts/roster/os_family forwarded, not dropped. Passing only
+            # the COUNT leaves classify_host without the owner rule's input, so
+            # a product token decides on its own: `kafka-prajwal` came back
+            # "server — name contains 'kafka'" here while the device page, which
+            # passes the accounts, correctly called it Prajwal's endpoint. The
+            # same host had two roles in one console. Defaults keep every
+            # existing caller behaving exactly as before.
+            c = classify_host(host, reg, accounts_seen, os_family, os_share,
+                              accounts, roster)
             if c["role"]:
                 v = normalise(host)
                 if guard is None or guard.allow(c["role"], v):

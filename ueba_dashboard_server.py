@@ -3108,7 +3108,7 @@ def _estate_roster():
 
 
 def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
-    """(role, why, humans) for one device.
+    """(role, why, humans) for one device — the narrow view of _device_verdict.
 
     `humans` is a count of distinct PEOPLE, canonicalised by
     ueba_entities.human_account — NOT a raw COUNT(DISTINCT username). The first
@@ -3118,33 +3118,54 @@ def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
     accounts, and by Windows per-session pseudo-users.
 
     `os_family` must be the host's DOMINANT family — see classify_host.
+
+    This now delegates rather than classifying again. It and the classify
+    endpoint each used to call classify_host themselves, and the endpoint's
+    call left the accounts out, so the console answered "endpoint" on the
+    device page and "server" on the classify endpoint for the same host in the
+    same process. One classifier call in this file, by construction.
     """
-    if not ENTITIES_AVAILABLE:
-        return None, "entities module unavailable", 0
-    humans = 0
-    accounts: list = []
+    v = _device_verdict(name, os_family, os_share)
+    return v.get("role"), v.get("why"), v.get("accounts_seen", 0)
+
+
+def _device_accounts(name: str) -> list:
+    """The account names seen on this host, for classify_host's owner rule."""
     try:
-        # Capped: the firewall collector carries 33,890 rows and the verdict is
-        # decided long before the cap, so reading them all buys nothing.
-        rows = _presence_query(
+        return [r[0] for r in _presence_query(
             "SELECT username FROM entity_presence "
             "WHERE kind = 'agent' AND value = ? COLLATE NOCASE LIMIT 20000",
-            (name,))
-        # Materialised, not a generator: the account strings are needed twice —
-        # once for the count and once for the owner rule — and a generator
-        # would arrive at the second caller already empty.
-        accounts = [r[0] for r in rows]
+            (name,))]
+    except Exception:
+        return []
+
+
+def _device_verdict(name: str, os_family: str = "", os_share: float = 0.0) -> dict:
+    """The FULL classify_host verdict for one host — the single way to ask.
+
+    _device_role() returns only (role, why, humans), so /api/entities/classify
+    used to re-call classify_host for the rest of the dict — and re-called it
+    with fewer arguments, leaving out the accounts. The console then reported
+    `kafka-prajwal` as an endpoint on the device page and a server on the
+    classify endpoint, from two calls about the same host in the same process.
+    One helper, every caller, same answer.
+    """
+    if not ENTITIES_AVAILABLE:
+        return {"role": None, "why": "entities module unavailable"}
+    accounts = _device_accounts(name)
+    humans = 0
+    try:
         humans = ueba_entities.count_human_accounts(accounts)
     except Exception:
         humans = 0
-        accounts = []
     try:
         v = ueba_entities.classify_host(
             name, ueba_entities.register(_entities_path()), humans, os_family,
             os_share, accounts, _estate_roster())
-        return v.get("role"), v.get("why"), humans
     except Exception as e:
-        return None, str(e), humans
+        return {"role": None, "why": str(e)}
+    v["accounts_seen"] = humans
+    return v
 
 
 def _device_estate(index: dict) -> dict:
@@ -3474,8 +3495,37 @@ def _build_entity_profiles(alerts):
     # scan.
     alerts = list(_iter_full_alerts(_DEEP_DEFAULT_BUDGET))
 
+    # Host -> the accounts seen on it, read ONCE. classify_host's owner rule
+    # needs the account names, and without them a product token decides the
+    # role on its own: these profiles reported `kafka-prajwal` as kind=server
+    # while the device page, which passes the accounts, called it an endpoint.
+    # Per-alert queries were not an option here — this walks the whole window.
+    _acct_map: dict = {}
+    try:
+        for _host, _user in _presence_query(
+                "SELECT value, username FROM entity_presence "
+                "WHERE kind = 'agent'", ()):
+            if _host and _user:
+                _acct_map.setdefault(str(_host).strip().casefold(), []).append(_user)
+    except Exception as e:
+        print("[dashboard] host-account map unavailable: %s" % e)
+    _roster = _estate_roster()
+
     def _extract(alert):
-        return ueba_entities.extract(alert, reg)
+        accounts = ()
+        try:
+            h = ueba_entities.event_host(alert)
+            if h:
+                accounts = _acct_map.get(str(h).strip().casefold(), ())
+        except Exception:
+            accounts = ()
+        seen = 0
+        if accounts:
+            try:
+                seen = ueba_entities.count_human_accounts(accounts)
+            except Exception:
+                seen = 0
+        return ueba_entities.extract(alert, reg, seen, None, accounts, _roster)
 
     # Coverage for the recognised-kind candidate fields, measured in the same
     # pass. feed_support() then states what this feed can actually populate
@@ -6455,9 +6505,9 @@ def api_entities_classify():
                 share = float(idx[k].get("os_share", 0.0) or 0.0)
         except Exception:
             fam, share = "", 0.0
-        role, why, seen = _device_role(host, fam, share)
-        verdict = ueba_entities.classify_host(
-            host, ueba_entities.register(_entities_path()), seen, fam, share)
+        verdict = _device_verdict(host, fam, share)
+        role, why = verdict.get("role"), verdict.get("why")
+        seen = verdict.get("accounts_seen", 0)
         verdict["os_family"] = fam
         verdict["os_share"] = round(share, 4)
     except Exception as e:

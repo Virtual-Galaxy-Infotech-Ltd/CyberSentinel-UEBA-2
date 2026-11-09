@@ -1139,13 +1139,22 @@ class UEBAEngine:
         host_name = ueba_entities.event_host(log_entry)
         if self.entities_cfg.get("enabled", True):
             try:
+                # The ACCOUNTS, not just how many. classify_host's owner rule
+                # needs the names: with only the count a product token decides
+                # alone, and `kafka-prajwal` was recorded into entity_presence
+                # as a SERVER when it is one person's laptop. Every alert and
+                # every peer group built on that presence row inherited it.
+                _accts = (self.profile_store.accounts_on(host_name)
+                          if host_name and hasattr(self.profile_store,
+                                                   "accounts_on") else ())
                 entities = ueba_entities.extract(
                     log_entry,
                     ueba_entities.register(self.entities_file)
                     if self.entities_file else None,
                     accounts_seen=self.profile_store.distinct_account_count(
                         host_name) if host_name else 0,
-                    guard=self.entity_guard)
+                    guard=self.entity_guard,
+                    accounts=_accts)
                 if entities:
                     entity_presence = self.profile_store.record_entities(
                         user, entities) or {}
