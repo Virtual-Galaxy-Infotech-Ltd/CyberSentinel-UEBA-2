@@ -303,6 +303,83 @@ def main() -> int:
            (r.get_json() or {}).get("may_administer") is True)
     clear()
 
+    # ── 6b. a scope ASSIGNED THROUGH THE API actually takes effect ──────────
+    # Everything above this point tests scopes that the harness seeded with
+    # store.set_scope(). That proves ENFORCEMENT and says nothing about the
+    # route an operator actually uses, POST /api/scopes — the same gap that
+    # let three classify_host callers disagree while every test stayed green.
+    #
+    # So: assign through HTTP, then re-read the device list as the account that
+    # was just restricted, and require the new scope to be the one in force.
+    # admin_net's scope is rewritten rather than a sixth account created,
+    # because creating one needs a session minted outside the request cycle and
+    # that would test the harness instead of the product. The original scope is
+    # restored at the end, and the restoration is itself asserted — a scope
+    # that could be set but not changed back would be a trap.
+    as_role("admin_full")
+    r = post("/api/scopes", {"sub": subs["admin_net"],
+                             "scope": {"devices": ["lab-box-7"], "subnets": []}})
+    ok("an unrestricted admin may assign a scope over HTTP",
+       allowed(r), "status %d" % r.status_code)
+    clear()
+
+    as_role("admin_full")
+    r = get("/api/scopes")
+    row = None
+    if r.status_code == 200:
+        for entry in (r.get_json() or {}).get("scoped", []):
+            if entry.get("sub") == subs["admin_net"]:
+                row = entry
+                break
+    # The CONTENT, not the presence. admin_net is in this roster whether or
+    # not the assignment landed — it was seeded with a scope — so checking it
+    # appears asserts nothing. The first version of this check did exactly
+    # that and passed happily against a POST that had done nothing at all.
+    ok("the roster reports the newly assigned scope, not the seeded one",
+       bool(row) and (row.get("scope") or {}).get("devices") == ["lab-box-7"]
+       and not (row.get("scope") or {}).get("subnets"),
+       "row=%s" % (str(row)[:150] if row else "admin_net absent from roster"))
+    clear()
+
+    # The point of the whole exercise: the account is now restricted to what
+    # was just assigned, not to what it was seeded with.
+    as_role("admin_net")
+    r = get("/api/device?hours=0")
+    if ok("the newly scoped admin can still read its device list",
+          r.status_code == 200, "status %d" % r.status_code):
+        got = {row["device"] for row in (r.get_json() or {}).get("devices", [])}
+        ok("the HTTP-assigned scope is the one enforced",
+           got == {"lab-box-7"},
+           "got %s — expected only lab-box-7; the seeded subnet scope would "
+           "show DC_AD_srv as well" % sorted(got))
+        ok("the previous scope is genuinely gone, not merged",
+           "DC_AD_srv" not in got,
+           "DC_AD_srv still visible, so the assignment added rather than replaced")
+    clear()
+
+    # And a write outside the NEW scope is refused, not just hidden from a list.
+    as_role("admin_net")
+    r = post("/api/entities/hosts", {"host": "DC_AD_srv", "role": "server"})
+    ok("a write outside the newly assigned scope is refused",
+       r.status_code == 403, "status %d" % r.status_code)
+    clear()
+
+    # Restore, and prove the restoration took — otherwise every assertion
+    # after this one would be measuring a scope this block left behind.
+    as_role("admin_full")
+    r = post("/api/scopes", {"sub": subs["admin_net"], "scope": SCOPES["admin_net"]})
+    ok("the original scope can be restored over HTTP",
+       allowed(r), "status %d" % r.status_code)
+    clear()
+    as_role("admin_net")
+    r = get("/api/device?hours=0")
+    if r.status_code == 200:
+        got = {row["device"] for row in (r.get_json() or {}).get("devices", [])}
+        ok("restoring the scope restores exactly the original visibility",
+           got == {"DC_AD_srv", "lab-box-7"},
+           "got %s — later sections and the role matrix depend on this" % sorted(got))
+    clear()
+
     # ── 7. the two admin READS that were open to everyone ──
     # Found by the first run of this harness: both served a viewer while the
     # console hid their panels behind an admin capability.
