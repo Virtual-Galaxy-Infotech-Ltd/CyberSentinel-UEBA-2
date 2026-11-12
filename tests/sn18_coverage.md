@@ -29,10 +29,21 @@ COVERAGE ACHIEVED — by event volume (the number that describes detection)
   global     100,825,442   65.31%
 
 PROJECTED after a retrain that builds every cohort model
-  entity         400 entities   0.22%  |      53,565,037 events  34.69%
-  cohort       1,418 entities   0.77%  |       3,325,037 events   2.15%
-  global     182,377 entities  99.01%  |      97,500,405 events  63.15%
+  entity         400 entities   0.22%  |      53,565,081 events  34.69%
+  cohort       1,581 entities   0.86%  |       3,663,504 events   2.37%
+  global     182,214 entities  98.92%  |      97,161,943 events  62.93%
 ```
+
+> **Corrected after first publication.** The projected cohort row first read
+> 1,418 entities / 2.15% of events. That used a plain `name in members` dict
+> test, which is not how the scorer resolves membership: `ueba_peers.cohort_of`
+> falls back to a **case-insensitive** scan when the exact key misses, because
+> the assignment is built from store keys and the caller may hold a
+> differently-cased spelling. `Rahul` was being reported as uncovered while
+> the scorer places it in a cohort, because the assignment spells it `rahul`.
+> The achieved rows were unaffected — cohort coverage is zero either way until
+> cohort models exist — but the projection understated what the next retrain
+> delivers by about 11%.
 
 ## Reading these numbers
 

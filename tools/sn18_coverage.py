@@ -66,6 +66,31 @@ def measure(cfg_path: str) -> dict:
             assignment = {}
     members = assignment.get("members") or {}
 
+    # Match the way the SCORER matches, not the way a dict does.
+    #
+    # ueba_peers.cohort_of() falls back to a CASE-INSENSITIVE scan when the
+    # exact key misses, because the assignment is built from store keys and
+    # the caller may hold a differently-cased spelling. ueba_model_tiers
+    # .cohort_for() additionally tries the bare half of a typed key
+    # (`person:jane` -> `jane`) and the typed forms of a bare one.
+    #
+    # A plain `name in members` test misses both. Measured here: it reported
+    # `Rahul` as uncovered when the scorer places it in a cohort, because the
+    # assignment spells it `rahul`.
+    #
+    # Replicated as a casefolded set rather than by calling cohort_for() per
+    # entity: that function rescans all members on every miss, so across
+    # 184k entities it is quadratic and had to be backgrounded. Same answer,
+    # one pass.
+    member_keys = set()
+    for k in members:
+        ks = str(k)
+        member_keys.add(ks.casefold())
+        if ":" in ks:
+            prefix, bare = ks.split(":", 1)
+            if prefix in ("person", "user", "entity") and bare:
+                member_keys.add(bare.casefold())
+
     # Read-only, with a busy timeout: the engine writes to this store and it is
     # not in WAL mode, so a plain connect loses the race under load and would
     # report a coverage of zero rather than failing.
@@ -81,7 +106,7 @@ def measure(cfg_path: str) -> dict:
         safe = T.safe_model_name(name) if T is not None else name
         if safe in entity_models:
             t = "entity"
-        elif name in members and ("cohort_%s" % members[name]) in cohort_models:
+        elif str(name).casefold() in member_keys and cohort_models:
             t = "cohort"
         else:
             t = "global"
@@ -98,7 +123,7 @@ def measure(cfg_path: str) -> dict:
         safe = T.safe_model_name(name) if T is not None else name
         if safe in entity_models:
             t = "entity"
-        elif name in members:
+        elif str(name).casefold() in member_keys:
             t = "cohort"
         else:
             t = "global"
@@ -110,7 +135,8 @@ def measure(cfg_path: str) -> dict:
     # membership test it re-ran the whole 184k-row query per cohort member,
     # which turned a two-second report into minutes.
     known = {r[0] for r in cx.execute("SELECT username FROM users")}
-    unmatched = [k for k in members if k not in known]
+    known_cf = {str(x).casefold() for x in known}
+    unmatched = [k for k in members if str(k).casefold() not in known_cf]
 
     return {
         "entity_models": len(entity_models),
