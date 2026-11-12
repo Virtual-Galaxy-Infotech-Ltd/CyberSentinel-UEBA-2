@@ -1,0 +1,80 @@
+# UEBA trainer config — 10.166.170.21 (socdr1), TRAINING ONLY.
+#
+# This is NOT a site config. It carries only what ueba_trainer.py reads, with
+# every path made absolute under /data, and it runs no engine and no console.
+# Its single purpose is to answer whether this box can train the models.
+#
+# Deliberately NOT copied from the live site config: that file holds site
+# state — credentials, noise lists, agent mappings, the enriched feed — none
+# of which the trainer touches, and all of which would be wrong here.
+#
+# The trainer writes ONLY under paths.models_dir. Nothing it does here can
+# reach the production install.
+
+paths:
+  # ── output: everything the trainer produces lands here ──
+  models_dir:        /data/ueba_models/
+  autoencoder_dir:   /data/ueba_models/autoencoders/
+  isolation_forest:  /data/ueba_models/isolation_forest.pkl
+  scaler:            /data/ueba_models/scaler.pkl
+
+  # ── input: which entities qualify for their own model ──
+  profile_db:        /data/ueba_profiles/user_profiles.db
+
+  # ── input: cohort assignment (RFP SN 18). Absent is fine — quiet entities
+  #    then fall back to the global model and the trainer says so. ──
+  peer_groups_file:  /data/ueba_profiles/peer_groups.json
+
+  # ── output: only written by Layer 3, which the capability test skips ──
+  faiss_index:       /data/ueba_models/faiss.index
+  faiss_metadata:    /data/ueba_models/metadata.jsonl
+
+preprocessing:
+  # Must match the width of the features.h5 you copied. The trainer asserts
+  # against the file, so a mismatch fails loudly rather than training noise.
+  feature_dim: 35
+  # Rows an entity needs in features.h5 before it earns its own model.
+  min_events_per_user: 2000
+
+autoencoder:
+  architecture:
+    input_dim: 35
+    hidden_dims: [24, 12]
+    activation: relu
+    dropout: 0.1
+  training:
+    epochs: 30
+    batch_size: 4096
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    val_split: 0.2
+    early_stopping_patience: 5
+    scheduler_step: 10
+    scheduler_gamma: 0.5
+  threshold_percentile: 95
+  # cpu, because this box has no GPU. Left as cuda it logs a warning and falls
+  # back every run, which makes the timing you are measuring harder to read.
+  device: cpu
+  inference_device: cpu
+  num_workers: 4
+
+isolation_forest:
+  contamination: 0.005
+  n_estimators: 200
+  max_samples: auto
+  n_jobs: -1
+  random_state: 42
+  training_sample_size: 500000
+
+model_tiers:
+  enabled: true
+  cohort_min_members: 2
+  cohort_min_rows: 500
+
+# Read at import even when Layer 3 is skipped, so it has to be present.
+rag:
+  inference_device: cpu
+  top_k: 5
+  min_similarity: 0.6
+  max_index_size: 2000000
+  index_build_fraction: 0.8
