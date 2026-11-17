@@ -286,15 +286,34 @@ def build_cohorts(profiles: dict, classes: "dict | None" = None,
         if not ent:
             continue
         key = ent.casefold()
-        cls = classes.get(key)
-        if cls:
-            if cls != "person":
-                excluded += 1
-                out["unplaced"][ent] = "not a person (%s)" % cls
-                continue
-        elif not is_groupable(ent):
+        # KIND FIRST, and it is not negotiable.
+        #
+        # This check used to sit in the `elif` below, so it only ran when the
+        # classifier had no opinion. classify_from_alerts() calls anything seen
+        # from a private address a "person" — which is every internal address —
+        # so an entity literally named `ip:192.168.2.19` was classified person,
+        # took the first branch, and never reached is_groupable() at all. The
+        # EXCLUDED_PREFIXES list has carried "ip:" since it was written; it was
+        # simply unreachable for exactly the entities it names.
+        #
+        # Measured on the live store before this change: 4,656 of 4,965 cohort
+        # members were IP addresses, and one behavioural cohort held 3,166 of
+        # them. That is the failure SN 42 warns about directly — a cohort drawn
+        # wide over addresses makes every attacker a behavioural peer of every
+        # other, which is the opposite of what peer deviation is for.
+        #
+        # The classifier may still EXCLUDE (an account seen only from public
+        # addresses is external), but it may never promote something whose kind
+        # already disqualifies it. An address is not a person whichever address
+        # it was seen from.
+        if not is_groupable(ent):
             excluded += 1
             out["unplaced"][ent] = "entity class is not groupable"
+            continue
+        cls = classes.get(key)
+        if cls and cls != "person":
+            excluded += 1
+            out["unplaced"][ent] = "not a person (%s)" % cls
             continue
         total = sum(float(v) for v in (counts or {}).values()
                     if isinstance(v, (int, float)))
@@ -666,8 +685,12 @@ def selftest() -> int:
     import tempfile
 
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -977,7 +1000,7 @@ def selftest() -> int:
         ok("status lists the sources", st["sources"] == list(SOURCES))
         ok("status states the HR position", "no HR" in st["hr_note"])
 
-    total = 114
+    total = len(checked)
     if failures:
         print("ueba_peers selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:
