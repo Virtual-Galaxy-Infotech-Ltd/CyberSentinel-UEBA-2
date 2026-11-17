@@ -558,8 +558,12 @@ def status() -> dict:
 
 def selftest() -> int:
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -761,7 +765,7 @@ def selftest() -> int:
     ok("status lists the operators", ">=" in st["operators"])
     ok("status lists the url indicators", "traversal" in st["url_indicators"])
 
-    total = 100
+    total = len(checked)
     if failures:
         print("ueba_appdecode selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

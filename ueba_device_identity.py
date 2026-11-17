@@ -595,8 +595,12 @@ def selftest() -> int:
     import tempfile
 
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -845,7 +849,7 @@ def selftest() -> int:
            again.holder_at("10.200.10.147", at(400))["device"] == "agent:099")
         again.close()
 
-    total = 82
+    total = len(checked)
     if failures:
         print("ueba_device_identity selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

@@ -478,8 +478,12 @@ def selftest() -> int:
     import os
     import tempfile
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -712,7 +716,7 @@ def selftest() -> int:
     ok("all three can fire together", len(a["findings"]) == 3)
     ok("three reasons produced", len(a["reasons"]) == 3)
 
-    total = 119
+    total = len(checked)
     if failures:
         print("ueba_privilege selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

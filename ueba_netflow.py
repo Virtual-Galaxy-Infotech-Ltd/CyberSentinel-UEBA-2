@@ -589,8 +589,12 @@ def status(window: "FlowWindow | None" = None,
 
 def selftest() -> int:
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -866,7 +870,7 @@ def selftest() -> int:
        "aggregate property" in st["ingest_note"])
     ok("status carries the thresholds", st["thresholds"]["scan_min_ports"] == 20)
 
-    total = 91
+    total = len(checked)
     if failures:
         print("ueba_netflow selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

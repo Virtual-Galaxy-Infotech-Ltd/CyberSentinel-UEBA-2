@@ -260,8 +260,12 @@ def status():
 
 def selftest() -> int:
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -404,7 +408,7 @@ def selftest() -> int:
         ok("reason says how to permit", "egress.allow" in e.reason)
         ok("exception carries url", e.url == "https://8.8.8.8/x")
 
-    total = 48
+    total = len(checked)
     if failures:
         print("ueba_egress selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:

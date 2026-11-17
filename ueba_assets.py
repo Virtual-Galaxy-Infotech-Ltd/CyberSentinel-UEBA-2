@@ -328,8 +328,12 @@ def selftest() -> int:
     import os
     import tempfile
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -483,7 +487,7 @@ def selftest() -> int:
                bytes_down=50 * 1024 * 1024)
     ok("both serials can fire together", len(a["findings"]) >= 3)
 
-    total = 64
+    total = len(checked)
     if failures:
         print("ueba_assets selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:
