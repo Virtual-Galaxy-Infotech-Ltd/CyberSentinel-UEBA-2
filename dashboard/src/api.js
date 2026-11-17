@@ -354,3 +354,38 @@ export async function markCampaignFP(campaignId, reason = "") {
     fetchAll().catch(() => {});
   }
 }
+
+// ── Dashboard layout preferences (SN 23 / Story 3.1) ────────────────────────
+
+/** Fetch the current analyst's saved dashboard layout from the server. */
+export async function fetchDashboardLayout() {
+  const r = await fetch("/api/dashboard/layout", { credentials: "same-origin" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+/** Persist a layout object to the server for the current analyst. */
+export async function saveDashboardLayout(layout) {
+  const r = await fetch("/api/dashboard/layout", {
+    method:  "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(layout),
+  });
+  const data = await r.json();
+  if (!r.ok || data.ok === false)
+    throw new Error((data && data.error) || "HTTP " + r.status);
+  return data;
+}
+
+/** Delete the saved layout so the analyst reverts to the shipped default. */
+export async function resetDashboardLayout() {
+  const r = await fetch("/api/dashboard/layout", {
+    method: "DELETE",
+    credentials: "same-origin",
+  });
+  const data = await r.json();
+  if (!r.ok || data.ok === false)
+    throw new Error((data && data.error) || "HTTP " + r.status);
+  return data;
+}

@@ -184,6 +184,11 @@ CREATE TABLE IF NOT EXISTS used_assertions (
     expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_used_exp ON used_assertions(expires_at);
+CREATE TABLE IF NOT EXISTS dashboard_prefs (
+    sub         TEXT PRIMARY KEY,
+    layout_json TEXT NOT NULL DEFAULT '{}',
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -606,6 +611,41 @@ class AuthStore:
                 "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active=1"
             ).fetchone()
         return int(row["n"] if row else 0)
+
+    # -- dashboard layout preferences -----------------------------------------
+    def get_dashboard_prefs(self, sub: str) -> dict | None:
+        """Return the saved dashboard layout for sub, or None if not set."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT layout_json FROM dashboard_prefs WHERE sub = ?", (sub,)
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["layout_json"])
+        except Exception:
+            return None
+
+    def set_dashboard_prefs(self, sub: str, layout: dict) -> None:
+        """Persist the dashboard layout for sub, overwriting any existing row."""
+        now = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(layout, separators=(",", ":"))
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO dashboard_prefs (sub, layout_json, updated_at) "
+                "VALUES (?, ?, ?)",
+                (sub, payload, now),
+            )
+            self._conn.commit()
+
+    def delete_dashboard_prefs(self, sub: str) -> bool:
+        """Remove any saved layout for sub (reset to default)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM dashboard_prefs WHERE sub = ?", (sub,)
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
 
     # -- sessions ---------------------------------------------------------
     @staticmethod

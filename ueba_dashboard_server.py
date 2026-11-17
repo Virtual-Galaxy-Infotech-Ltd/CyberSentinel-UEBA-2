@@ -309,6 +309,18 @@ _DEFAULTS = {
             "username": "", "password": "", "password_env": "UEBA_SMTP_PASSWORD",
             "from_addr": "ueba@cybersentinel.local", "timeout_secs": 30,
         },
+        # Where the console writes what an admin types into Settings → Email.
+        # A separate file, not an edit to ueba_config.yaml: the YAML is site
+        # state that several teams read, carries comments a round-trip would
+        # destroy, and is deployed over. Same pattern as the watch list and
+        # the entity register.
+        #
+        # EMPTY on purpose. A path here would make _smtp_store_path()'s
+        # derivation dead code — it only runs when this is unset, and a
+        # non-empty default is never unset. That mistake sent the first
+        # deployment's settings to /root/NEW_DRIVE/aditya_ueba/, a drive that
+        # no longer exists on this install.
+        "smtp_file": "",
     },
     # The engine rotates ueba_alerts.jsonl at midnight, zipping each day to
     # archive_dir as ueba_alerts_YYYY-MM-DD.jsonl.zip. The dashboard reads the
@@ -665,6 +677,11 @@ _AUDIT_BODY_FIELDS = {
     # Never "rows" — the export body carries the alert table itself, and copying
     # it into the audit log would duplicate the whole feed on every export.
     "/api/export":         ("format", "title"),
+    # Which relay mail will leave through, and as whom. Deliberately NOT
+    # "password": _audit_body is an allowlist precisely so a secret cannot be
+    # added to an audit trail by accident, and the audit log is readable by
+    # anyone who can read the audit screen.
+    "/api/settings/smtp":  ("host", "port", "username", "from_addr", "to"),
     # Registering a device priority, or creating a rule that mails alerts out
     # of the platform, are both attributable actions.
     "/api/devices":        ("name", "label", "priority", "owner"),
@@ -3091,7 +3108,7 @@ def _estate_roster():
 
 
 def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
-    """(role, why, humans) for one device.
+    """(role, why, humans) for one device — the narrow view of _device_verdict.
 
     `humans` is a count of distinct PEOPLE, canonicalised by
     ueba_entities.human_account — NOT a raw COUNT(DISTINCT username). The first
@@ -3101,33 +3118,54 @@ def _device_role(name: str, os_family: str = "", os_share: float = 0.0):
     accounts, and by Windows per-session pseudo-users.
 
     `os_family` must be the host's DOMINANT family — see classify_host.
+
+    This now delegates rather than classifying again. It and the classify
+    endpoint each used to call classify_host themselves, and the endpoint's
+    call left the accounts out, so the console answered "endpoint" on the
+    device page and "server" on the classify endpoint for the same host in the
+    same process. One classifier call in this file, by construction.
     """
-    if not ENTITIES_AVAILABLE:
-        return None, "entities module unavailable", 0
-    humans = 0
-    accounts: list = []
+    v = _device_verdict(name, os_family, os_share)
+    return v.get("role"), v.get("why"), v.get("accounts_seen", 0)
+
+
+def _device_accounts(name: str) -> list:
+    """The account names seen on this host, for classify_host's owner rule."""
     try:
-        # Capped: the firewall collector carries 33,890 rows and the verdict is
-        # decided long before the cap, so reading them all buys nothing.
-        rows = _presence_query(
+        return [r[0] for r in _presence_query(
             "SELECT username FROM entity_presence "
             "WHERE kind = 'agent' AND value = ? COLLATE NOCASE LIMIT 20000",
-            (name,))
-        # Materialised, not a generator: the account strings are needed twice —
-        # once for the count and once for the owner rule — and a generator
-        # would arrive at the second caller already empty.
-        accounts = [r[0] for r in rows]
+            (name,))]
+    except Exception:
+        return []
+
+
+def _device_verdict(name: str, os_family: str = "", os_share: float = 0.0) -> dict:
+    """The FULL classify_host verdict for one host — the single way to ask.
+
+    _device_role() returns only (role, why, humans), so /api/entities/classify
+    used to re-call classify_host for the rest of the dict — and re-called it
+    with fewer arguments, leaving out the accounts. The console then reported
+    `kafka-prajwal` as an endpoint on the device page and a server on the
+    classify endpoint, from two calls about the same host in the same process.
+    One helper, every caller, same answer.
+    """
+    if not ENTITIES_AVAILABLE:
+        return {"role": None, "why": "entities module unavailable"}
+    accounts = _device_accounts(name)
+    humans = 0
+    try:
         humans = ueba_entities.count_human_accounts(accounts)
     except Exception:
         humans = 0
-        accounts = []
     try:
         v = ueba_entities.classify_host(
             name, ueba_entities.register(_entities_path()), humans, os_family,
             os_share, accounts, _estate_roster())
-        return v.get("role"), v.get("why"), humans
     except Exception as e:
-        return None, str(e), humans
+        return {"role": None, "why": str(e)}
+    v["accounts_seen"] = humans
+    return v
 
 
 def _device_estate(index: dict) -> dict:
@@ -3457,8 +3495,37 @@ def _build_entity_profiles(alerts):
     # scan.
     alerts = list(_iter_full_alerts(_DEEP_DEFAULT_BUDGET))
 
+    # Host -> the accounts seen on it, read ONCE. classify_host's owner rule
+    # needs the account names, and without them a product token decides the
+    # role on its own: these profiles reported `kafka-prajwal` as kind=server
+    # while the device page, which passes the accounts, called it an endpoint.
+    # Per-alert queries were not an option here — this walks the whole window.
+    _acct_map: dict = {}
+    try:
+        for _host, _user in _presence_query(
+                "SELECT value, username FROM entity_presence "
+                "WHERE kind = 'agent'", ()):
+            if _host and _user:
+                _acct_map.setdefault(str(_host).strip().casefold(), []).append(_user)
+    except Exception as e:
+        print("[dashboard] host-account map unavailable: %s" % e)
+    _roster = _estate_roster()
+
     def _extract(alert):
-        return ueba_entities.extract(alert, reg)
+        accounts = ()
+        try:
+            h = ueba_entities.event_host(alert)
+            if h:
+                accounts = _acct_map.get(str(h).strip().casefold(), ())
+        except Exception:
+            accounts = ()
+        seen = 0
+        if accounts:
+            try:
+                seen = ueba_entities.count_human_accounts(accounts)
+            except Exception:
+                seen = 0
+        return ueba_entities.extract(alert, reg, seen, None, accounts, _roster)
 
     # Coverage for the recognised-kind candidate fields, measured in the same
     # pass. feed_support() then states what this feed can actually populate
@@ -3603,17 +3670,120 @@ def _reports_unavailable():
     return jsonify({"ok": False, "error": f"Reporting unavailable — {why}."}), 503
 
 
-def _smtp_cfg():
-    """SMTP settings with the password resolved from the environment first.
+def _smtp_store_path() -> Path:
+    """Where the console's own SMTP settings live.
 
-    Config files on this box are readable by several teams, so the env var is
-    the supported path and the in-file password is only a fallback for sites
-    that have no better option."""
+    Derived from the site's OWN layout rather than from the shipped default,
+    because that default is `/root/NEW_DRIVE/aditya_ueba/...` — a drive that
+    no longer exists on this deployment, yet is still where the unset keys
+    land (nicknames.json and rules.json are sitting there now). A new setting
+    should not add to that, and asking every site to add one more path to
+    ueba_config.yaml for this is friction for no gain.
+
+    So: an explicit `reporting.smtp_file` wins; otherwise this file sits
+    beside whichever operator-state file the site HAS configured; otherwise
+    beside the alert store, which every install must set; and only then the
+    shipped default.
+    """
+    explicit = _rcfg().get("smtp_file")
+    if explicit:
+        return Path(explicit)
+    for key in ("false_positives_file", "watchlist_file", "nicknames_file"):
+        sibling = CFG.get(key)
+        if sibling:
+            return Path(sibling).parent / "smtp_settings.json"
+    try:
+        if ALERTS_FILE and str(ALERTS_FILE):
+            return Path(ALERTS_FILE).parent / "smtp_settings.json"
+    except Exception:
+        pass
+    return Path(_DEFAULTS["reporting"]["smtp_file"])
+
+
+def _smtp_saved() -> dict:
+    """What an admin last saved in the console, or {}."""
+    try:
+        p = _smtp_store_path()
+        if not p.exists():
+            return {}
+        d = json.loads(p.read_text())
+        return d if isinstance(d, dict) else {}
+    except Exception as e:
+        print("[dashboard] smtp settings unreadable: %s" % e)
+        return {}
+
+
+def _smtp_write(values: dict) -> None:
+    """Persist the console's SMTP settings, readable only by this service.
+
+    0600 before anything is written, not after: a file created world-readable
+    and then tightened has already exposed the password to anything watching
+    the directory in between.
+    """
+    p = _smtp_store_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(values, fh, indent=2)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+    os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except Exception:
+        pass
+
+
+def _smtp_cfg():
+    """The effective SMTP settings, lowest precedence first.
+
+      1. reporting.smtp in the YAML — the shipped default, and the only path
+         an air-gapped site with no console access can use.
+      2. whatever an admin saved in Settings → Email, which is what makes the
+         panel work at all.
+      3. the password from `password_env` if that variable is set.
+
+    The environment still wins, because config files on this box are readable
+    by several teams and that was the supported way to hold the password
+    before the console could.
+    """
     smtp = dict((_rcfg().get("smtp") or {}))
+    for k, v in (_smtp_saved() or {}).items():
+        if v not in (None, ""):
+            smtp[k] = v
+        elif k in ("ssl", "starttls") and v is not None:
+            smtp[k] = v
     env_name = smtp.get("password_env")
     if env_name and os.environ.get(env_name):
         smtp["password"] = os.environ[env_name]
     return smtp
+
+
+def _smtp_public(smtp: dict) -> dict:
+    """The settings as the console may see them — never the password itself.
+
+    `has_password` rather than the value, so the form can say "saved, leave
+    blank to keep it" without the secret crossing the wire on every page load.
+    """
+    smtp = smtp or {}
+    return {
+        "host": smtp.get("host") or "",
+        "port": int(smtp.get("port") or 587),
+        "ssl": bool(smtp.get("ssl")),
+        "starttls": bool(smtp.get("starttls", True)),
+        "username": smtp.get("username") or "",
+        "from_addr": smtp.get("from_addr") or "",
+        "has_password": bool(smtp.get("password")),
+        "password_env": smtp.get("password_env") or "",
+        "configured": bool(smtp.get("host")),
+        "timeout_secs": int(smtp.get("timeout_secs") or 30),
+    }
 
 
 def _ecfg():
@@ -4356,6 +4526,12 @@ def api_email_status():
         "providers": ueba_mailer.available(_ecfg()),
         "smtp_fallback": bool(smtp_fallback),
         "redirect_uri": _email_redirect_uri(),
+        # What is actually stopping Connect from working, if anything. The
+        # button being absent told an operator nothing; this tells them
+        # whether an OAuth app is missing, or whether the callback URL this
+        # install presents is one Google will refuse (a private IP is).
+        "readiness": (ueba_mailer.readiness(_ecfg(), _email_redirect_uri())
+                      if hasattr(ueba_mailer, "readiness") else None),
     })
 
 
@@ -6059,6 +6235,113 @@ def api_entities_by_kind(kind):
     return jsonify(out)
 
 
+@app.route("/api/settings/smtp")
+@_require_cap("smtp.edit")
+def api_smtp_get():
+    """The mail-relay settings, without the password.
+
+    The console panel for this shipped before these routes existed, so its
+    buttons returned 404 — the "no mail server is set" message was accurate
+    but there was no way to set one.
+    """
+    return jsonify({"ok": True, "smtp": _smtp_public(_smtp_cfg())})
+
+
+@app.route("/api/settings/smtp", methods=["PUT"])
+@_require_cap("smtp.edit")
+def api_smtp_put():
+    """Save the mail-relay settings.
+
+    A blank password KEEPS the stored one. The form cannot show the existing
+    password, so treating blank as "clear it" would silently break the relay
+    every time anyone changed the port.
+    """
+    b = request.get_json(silent=True) or {}
+    host = str(b.get("host") or "").strip()
+    if not host:
+        return jsonify({"ok": False,
+                        "error": "Enter the mail server, e.g. smtp.gmail.com"}), 400
+    try:
+        port = int(b.get("port") or 587)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Port must be a number"}), 400
+    if not 1 <= port <= 65535:
+        return jsonify({"ok": False,
+                        "error": "Port must be between 1 and 65535"}), 400
+
+    username = str(b.get("username") or "").strip()
+    from_addr = str(b.get("from_addr") or "").strip() or username
+    # Authenticating as someone but sending as nobody is a misconfiguration
+    # every relay rejects, so it is caught here rather than at send time.
+    if username and not from_addr:
+        return jsonify({"ok": False,
+                        "error": "Set a From address, or leave the login "
+                                 "blank for a relay that needs no sign-in"}), 400
+
+    values = {
+        "host": host, "port": port,
+        "ssl": bool(b.get("ssl")),
+        "starttls": bool(b.get("starttls", True)),
+        "username": username,
+        "from_addr": from_addr,
+    }
+    pw = b.get("password")
+    saved = _smtp_saved()
+    if pw:
+        values["password"] = str(pw)
+    elif saved.get("password"):
+        values["password"] = saved["password"]
+
+    try:
+        _smtp_write(values)
+    except Exception as e:
+        return jsonify({"ok": False,
+                        "error": "Could not save: %s" % e}), 500
+    return jsonify({"ok": True, "smtp": _smtp_public(_smtp_cfg())})
+
+
+@app.route("/api/settings/smtp/test", methods=["POST"])
+@_require_cap("smtp.edit")
+def api_smtp_test():
+    """Send one test message and report what actually happened.
+
+    The whole value of this route is the error text. "Test failed" sends an
+    admin to the logs; "Google rejected the password — Gmail needs an App
+    password, not the account password" ends the problem. ueba_report_store
+    already turns the SMTP exception into a sentence, so it is passed straight
+    through rather than flattened.
+    """
+    if not REPORTS_AVAILABLE:
+        return jsonify({"ok": False,
+                        "error": "the reporting module is unavailable"}), 503
+    b = request.get_json(silent=True) or {}
+    to = str(b.get("to") or "").strip()
+    if not to or "@" not in to:
+        return jsonify({"ok": False,
+                        "error": "Enter the address to send the test to"}), 400
+
+    smtp = _smtp_cfg()
+    if not ueba_report_store.smtp_configured(smtp):
+        return jsonify({"ok": False,
+                        "error": "No mail server is set yet — save the "
+                                 "settings first"}), 400
+
+    who = _current_username() or "an administrator"
+    try:
+        ueba_report_store.send_email(
+            smtp, to=[to],
+            subject="CyberSentinel UEBA — test message",
+            body=("This is a test from CyberSentinel UEBA, sent by %s.\n\n"
+                  "Mail is working. Scheduled reports and alert "
+                  "notifications will be delivered this way.\n" % who))
+    except Exception as e:
+        # 200 with ok:false, not 500: the request was well formed and the
+        # relay refused it. The reason is the useful part and the panel shows
+        # it verbatim.
+        return jsonify({"ok": False, "error": str(e)})
+    return jsonify({"ok": True, "to": to})
+
+
 @app.route("/api/entities/profile/<kind>/<path:value>")
 @_require_cap("entities.edit")
 def api_entity_profile(kind, value):
@@ -6222,9 +6505,9 @@ def api_entities_classify():
                 share = float(idx[k].get("os_share", 0.0) or 0.0)
         except Exception:
             fam, share = "", 0.0
-        role, why, seen = _device_role(host, fam, share)
-        verdict = ueba_entities.classify_host(
-            host, ueba_entities.register(_entities_path()), seen, fam, share)
+        verdict = _device_verdict(host, fam, share)
+        role, why = verdict.get("role"), verdict.get("why")
+        seen = verdict.get("accounts_seen", 0)
         verdict["os_family"] = fam
         verdict["os_share"] = round(share, 4)
     except Exception as e:
@@ -6762,6 +7045,120 @@ def unmark_fp_pattern(pat_id):
         if removed:
             save_fp_patterns()
     return jsonify({"ok": True, "removed": bool(removed)})
+
+
+# ── Dashboard layout preferences (SN 23 / Story 3.1) ────────────────────────
+#
+# Preferences are stored server-side so they follow the analyst across
+# machines and sessions. The authenticated user's `sub` is the key — the
+# frontend never supplies a user-id; the server derives it from the session.
+#
+# When auth.enforce is off (or the user is unauthenticated), GET returns a
+# null layout and the frontend falls back to the shipped default. PUT and
+# DELETE require an authenticated session and return 401 otherwise.
+
+VALID_PANEL_IDS = frozenset([
+    # Navigation tab panels
+    "tab-overview", "tab-incidents", "tab-feed", "tab-users", "tab-campaigns",
+    "tab-endpoints", "tab-false-positives", "tab-alerting", "tab-reports",
+    "tab-watchlist", "tab-threatmap",
+    # Overview row-level sections (direct children of #page-overview)
+    "ov-banner", "ov-row-gauge", "ov-row-recent", "ov-row-dist",
+    "ov-ai-analyst", "ov-row-sigs", "ov-row-mitre",
+    # Overview individual sub-panels
+    "ov-gauge", "ov-radar", "ov-timeline",
+    "ov-recent-alerts", "ov-top-users", "ov-endpoints-widget",
+    "ov-score-dist", "ov-heatmap",
+    "ov-top-sigs", "ov-rec-actions", "ov-mitre", "ov-health",
+    # False-positives page sub-panels
+    "fp-patterns", "fp-list",
+])
+
+
+def _layout_sub() -> str | None:
+    """The authenticated user's `sub`, or None when auth is off or unauthenticated."""
+    if not AUTH_MODULE_AVAILABLE:
+        return None
+    user = ueba_auth.current_user()
+    return (user or {}).get("sub") or None
+
+
+@app.route("/api/dashboard/layout", methods=["GET"])
+def api_dashboard_layout_get():
+    """Return the saved layout for the current session's analyst."""
+    store = ueba_auth._store() if AUTH_MODULE_AVAILABLE else None
+    sub = _layout_sub()
+    if store is None or sub is None:
+        return jsonify({"ok": True, "layout": None, "is_custom": False})
+    try:
+        layout = store.get_dashboard_prefs(sub)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "layout": layout, "is_custom": layout is not None})
+
+
+def _validate_panel_list(entries, field_name: str):
+    """Validate a list of panel preference objects.
+
+    Returns (cleaned_list, error_string).  error_string is None on success.
+    """
+    if not isinstance(entries, list):
+        return None, f"{field_name} must be an array"
+    seen = set()
+    cleaned = []
+    for item in entries:
+        if not isinstance(item, dict):
+            return None, f"each entry in {field_name} must be an object"
+        pid = item.get("id")
+        if not isinstance(pid, str) or pid not in VALID_PANEL_IDS:
+            return None, f"unknown panel id: {pid!r}"
+        if pid in seen:
+            return None, f"duplicate panel id: {pid!r}"
+        seen.add(pid)
+        visible = item.get("visible", True)
+        if not isinstance(visible, bool):
+            return None, "panel.visible must be a boolean"
+        cleaned.append({"id": pid, "visible": visible})
+    return cleaned, None
+
+
+@app.route("/api/dashboard/layout", methods=["PUT"])
+def api_dashboard_layout_save():
+    """Persist the authenticated analyst's dashboard layout."""
+    store = ueba_auth._store() if AUTH_MODULE_AVAILABLE else None
+    sub = _layout_sub()
+    if store is None or sub is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
+
+    body = request.get_json(silent=True) or {}
+    layout = {}
+
+    for field in ("panels", "overview_rows", "overview_panels", "other"):
+        if field in body:
+            cleaned, err = _validate_panel_list(body[field], field)
+            if err:
+                return jsonify({"ok": False, "error": err}), 400
+            layout[field] = cleaned
+
+    try:
+        store.set_dashboard_prefs(sub, layout)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/dashboard/layout", methods=["DELETE"])
+def api_dashboard_layout_reset():
+    """Delete the saved layout so the analyst reverts to the shipped default."""
+    store = ueba_auth._store() if AUTH_MODULE_AVAILABLE else None
+    sub = _layout_sub()
+    if store is None or sub is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
+    try:
+        store.delete_dashboard_prefs(sub)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
 
 
 # ── Engine health ────────────────────────────────────────────────────────────
