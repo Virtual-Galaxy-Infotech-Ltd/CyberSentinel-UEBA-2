@@ -568,12 +568,34 @@ def selftest() -> int:
     import tempfile
 
     failures = []
+    checked = []
 
     def ok(label, cond):
+        # Counted, not compared against a literal — the same trap
+        # ueba_entities had: checks added after a hardcoded total ran but were
+        # never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
     T0 = datetime(2026, 11, 2, 9, 0, tzinfo=timezone.utc)
+
+    # FREEZE THE CLOCK for the duration of the suite.
+    #
+    # T0 is a fixed instant, and the fixtures evaluate rules at fixed offsets
+    # from it — but build() defaults a rule's `starts_at` to the REAL now, and
+    # evaluate() treats a rule as `not_started` before that. So whether a
+    # check passed depended on the wall clock: the suite was only valid while
+    # real UTC sat inside the hour straddling T0. Two separate checks failed
+    # as the day moved past it, at different times, which read like two
+    # unrelated bugs.
+    #
+    # Pinning `starts_at=T0` at each call site would need 27 edits and would
+    # go stale the moment someone added a 28th. Freezing the clock fixes every
+    # one of them at once and makes the suite deterministic.
+    global now_utc
+    _real_now_utc = now_utc
+    now_utc = lambda: T0
 
     def at(h):
         return T0 + timedelta(hours=h)
@@ -735,7 +757,10 @@ def selftest() -> int:
 
         # hit counting and self-ending
         path2 = Path(td) / "r2.json"
-        hr2, _ = build("three strikes", ["alice"], "after_hits", hits=3)
+        # Explicit, though the frozen clock above now makes it redundant:
+        # this is the check whose failure led to the clock being frozen.
+        hr2, _ = build("three strikes", ["alice"], "after_hits", hits=3,
+                       starts_at=T0)
         add(path2, hr2)
         seen = []
         for i in range(5):
@@ -814,7 +839,10 @@ def selftest() -> int:
         ok("status explains the no-stacking rule",
            "escalation nobody chose" in st["effect_note"])
 
-    total = 104
+    # Clock restored before the summary, which both return paths share.
+    now_utc = _real_now_utc
+
+    total = len(checked)
     if failures:
         print("ueba_rules selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:
