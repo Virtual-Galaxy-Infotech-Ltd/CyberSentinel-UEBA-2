@@ -539,8 +539,13 @@ def selftest() -> int:
     import tempfile
 
     failures = []
+    checked = []
+    skipped: list = []
 
     def ok(label, cond):
+        # Counted, not a literal. A hardcoded total means every check added
+        # after it runs and is never reported.
+        checked.append(label)
         if not cond:
             failures.append(label)
 
@@ -797,8 +802,9 @@ def selftest() -> int:
                res["state"] == "blocked")
             qg.close()
     else:
-        ok("egress absent: guard checks skipped", True)
-        ok("egress absent: guard checks skipped 2", True)
+        # No ok() here. These checks need ueba_egress, and asserting True in
+        # its absence reports coverage that was not exercised.
+        skipped.append("destination guard (needs ueba_egress)")
 
     # ── egress interaction, which is the SN 64 constraint ──
     if ueba_egress is not None:
@@ -824,9 +830,7 @@ def selftest() -> int:
             ueba_egress.install(ueba_egress.EgressPolicy(mode="on_premises"))
             q.close()
     else:
-        for lbl in ("egress absent 1", "egress absent 2", "egress absent 3",
-                    "egress absent 4", "egress absent 5"):
-            ok(lbl, True)
+        skipped.append("egress policy interaction (needs ueba_egress)")
 
     # ── status ──
     st = status(None, "", False)
@@ -840,12 +844,16 @@ def selftest() -> int:
     ok("status reports a missing secret",
        st["callback_secret_configured"] is False)
 
-    total = 99
+    total = len(checked)
     if failures:
         print("ueba_soar selftest: %d/%d FAILED" % (len(failures), total))
         for f in failures:
             print("  ✗ %s" % f)
         return 1
+    if skipped:
+        # Said out loud rather than counted as passes.
+        for sk in skipped:
+            print("  \u2014 skipped: %s" % sk)
     print("ueba_soar selftest: all %d checks passed" % total)
     return 0
 
