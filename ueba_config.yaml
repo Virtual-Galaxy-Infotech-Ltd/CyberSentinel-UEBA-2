@@ -76,6 +76,17 @@ paths:
 preprocessing:
   chunk_size: 50000
   min_events_per_user: 2000
+  # The most rows ONE entity may train on. 0 disables the cap.
+  #
+  # Not about model quality — 2,000,000 rows is a thousand times the minimum
+  # and far more than a 35-dimension autoencoder needs. It is about peak
+  # memory: the slice, the scaled copy, the torch tensor and the train/val
+  # split each materialise their own array, so an uncapped entity costs
+  # several times its own size.
+  #
+  # The 15-Nov-2026 retrain died here. One address entity held 18,952,805
+  # rows, reached 28.9 GB RSS, and was killed by the kernel six hours in.
+  max_events_per_user: 2000000
 
   feature_fields:
     temporal:

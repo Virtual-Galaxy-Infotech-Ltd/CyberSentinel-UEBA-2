@@ -260,6 +260,20 @@ class Autoencoder(nn.Module):
 
 # ── Autoencoder Trainer ───────────────────────────────────────────────────────
 
+# Entity keys that must never receive a model of their own. See the call site
+# in train_autoencoders() for why this is narrower than ueba_peers'.
+_UNMODELLABLE_PREFIXES = ("ip:", "addr:")
+_UNMODELLABLE_EXACT = ("unknown", "-", "n/a", "none")
+
+
+def _is_address_or_unknown(entity) -> bool:
+    """True when this entity key is an address or the absence of an identity."""
+    e = str(entity or "").strip().casefold()
+    if not e or e in _UNMODELLABLE_EXACT:
+        return True
+    return e.startswith(_UNMODELLABLE_PREFIXES)
+
+
 class AutoencoderTrainer:
     """Trains a single autoencoder and computes its anomaly threshold."""
 
@@ -566,6 +580,11 @@ class UEBATrainer:
         import sqlite3
 
         min_events = self.config["preprocessing"]["min_events_per_user"]
+        # 0 or absent disables the cap. The default is deliberately generous:
+        # 1000x the minimum, far more than a 35-dimension autoencoder needs,
+        # and still only ~0.3 GB per materialised copy.
+        max_rows = int((self.config.get("preprocessing") or {})
+                       .get("max_events_per_user", 2_000_000) or 0)
         ae_trainer = AutoencoderTrainer(self.config, self.device)
 
         # Threshold floors (see AutoencoderTrainer.train). `threshold_floor` is an
@@ -656,6 +675,38 @@ class UEBATrainer:
         conn.close()
 
         eligible_users = [(r[0], r[1]) for r in rows]
+
+        # ── entity kinds that must never get a model of their own ──
+        #
+        # An IP address is not an identity. It is a lease: it moves between
+        # machines, and a model trained on it follows the address rather than
+        # the person or the host. On this estate 17,671 of 184,548 tracked
+        # entities are addresses and they carry 33.6% of all events, so a
+        # third of the training budget was being spent modelling leases.
+        #
+        # It is also what killed the 15-Nov-2026 retrain. The trainer reached
+        # `ip:192.168.2.19 | events: 23,691,006`, loaded 18,952,805 samples,
+        # and the kernel killed it at 28.9 GB RSS — exit -9, six hours in, no
+        # cohort models, engine left on the previous week's.
+        #
+        # `unknown` is excluded for the same reason it is excluded from peer
+        # grouping: it is the absence of an identity, not one. It is the
+        # single largest entity on this store at 51.5% of all events.
+        #
+        # NARROWER than ueba_peers.is_groupable() on purpose. That function
+        # also excludes `host:`, because a host is not a PERSON and peer
+        # groups compare people. The trainer legitimately models hosts — a
+        # device baseline is the whole of SN 56 — so only addresses and
+        # non-identities are dropped here.
+        before = len(eligible_users)
+        eligible_users = [(u, n) for u, n in eligible_users
+                          if not _is_address_or_unknown(u)]
+        if before != len(eligible_users):
+            log.info("Excluded %d entities that cannot have a stable model "
+                     "(addresses and 'unknown'): they are scored by the global "
+                     "or cohort model instead",
+                     before - len(eligible_users))
+
         log.info("Users eligible for personal autoencoder: %d (>= %d events)",
                  len(eligible_users), min_events)
 
@@ -717,6 +768,31 @@ class UEBATrainer:
                          user, len(indices), min_events)
                 skipped_sparse += 1
                 continue
+
+            # ── cap the rows any ONE entity may train on ──
+            #
+            # Defence in depth behind the address filter. Even a legitimate
+            # entity can grow large enough to take the box down, and the cost
+            # is not one copy of the rows but several: the slice out of the
+            # shared matrix, the scaler's output, the torch tensor, and the
+            # train/validation split each materialise their own array.
+            #
+            # On 15-Nov an 18,952,805-row entity reached 28.9 GB RSS and was
+            # killed. The cap keeps peak memory proportional to the cap rather
+            # than to whatever the busiest entity happens to be that week.
+            #
+            # Sampled by STRIDE, not at random: the feature matrix is roughly
+            # chronological, so an evenly spaced sample covers the whole window
+            # while a random one can cluster. This is the same approach the
+            # scaler and the Isolation Forest already use, and it is
+            # deterministic, so a rerun trains on the same rows.
+            if max_rows and len(indices) > max_rows:
+                stride = int(np.ceil(len(indices) / max_rows))
+                kept = indices[::stride][:max_rows]
+                log.info("Capping '%s': %d rows -> %d (stride=%d). A model does "
+                         "not need more, and the uncapped slice is what killed "
+                         "the 15-Nov run.", user, len(indices), len(kept), stride)
+                indices = kept
 
             log.info("Training autoencoder for user '%s' | events: %d",
                      user, len(indices))
