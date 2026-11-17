@@ -232,7 +232,8 @@ def main() -> int:
     st = asg["stats"]
     print()
     for k in ("entities_seen", "eligible", "excluded_not_person",
-              "excluded_sparse", "truncated", "placed", "unplaced", "cohorts"):
+              "excluded_sparse", "excluded_flat", "truncated", "placed",
+              "unplaced", "cohorts"):
         print("  %-22s %s" % (k, st.get(k)))
     print("  %-22s %s" % ("by_source", st.get("by_source")))
     print()
@@ -259,6 +260,25 @@ def main() -> int:
     if args.dry_run:
         print("\n  dry run: nothing written")
         return 0
+
+    # A feed whose entities each touched one thing cannot support peer
+    # grouping, and that is worth saying out loud rather than publishing a
+    # handful of cohorts that look like a result. Measured 17-Nov-2026: 613 of
+    # 674 entities had a single-key profile, 571 of them the same key.
+    _flat = int(st.get("excluded_flat") or 0)
+    _seen = max(int(st.get("entities_seen") or 0), 1)
+    if _flat and _flat * 100 // _seen >= 50:
+        print()
+        print("  ! %d of %d entities (%d%%) touched too few distinct things to "
+              "have a comparable profile." % (_flat, _seen, _flat * 100 // _seen))
+        print("    Peer grouping needs BREADTH, not volume: an entity seen only "
+              "on one host is at distance 0 from")
+        print("    every other entity seen only on that host, which is a fact "
+              "about the host and not a peer group.")
+        print("    Widening what the feed records per entity — applications, "
+              "assets, not just the agent — is what")
+        print("    makes SN 42 meaningful here. The cohorts below are built "
+              "from the %d entities that remain." % int(st.get("eligible") or 0))
 
     ueba_peers.save(out_path, asg)
     print("\n  wrote %s (%d cohorts, %d members)"

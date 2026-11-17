@@ -145,6 +145,44 @@ def main() -> int:
        "elif not is_groupable(ent):" not in src,
        "the check is reachable only when the classifier is silent")
 
+    # ── 5b. a point is not a distribution ────────────────────────────────
+    # Entities that touched exactly ONE thing sit at distance 0 from every
+    # other entity that touched that same thing, so they cluster perfectly
+    # and say nothing. On the live store this produced a 567-member cohort at
+    # mean 0.000, sd 0.000 — "everyone who appeared on host X", which is a
+    # fact about the host and not a peer group.
+    flatprof = {("flat%d" % i): {"agent:host-a": 300} for i in range(8)}
+    rich = {("rich%d" % i): {"agent:host-a": 300, "agent:host-b": 150,
+                             "application:chrome.exe": 90} for i in range(4)}
+    both = dict(flatprof); both.update(rich)
+    asg5 = P.build_cohorts(both, classes={}, operator={}, min_size=2,
+                           min_events=20, max_distance=0.9,
+                           max_entities=10000, use_directory=False)
+    m5 = set(asg5.get("members") or {})
+    ok("single-dimension entities are not clustered",
+       not [x for x in m5 if str(x).startswith("flat")],
+       "clustered %s — a point mass has nothing to compare"
+       % sorted(x for x in m5 if str(x).startswith("flat")))
+    ok("entities with a real distribution still are",
+       len([x for x in m5 if str(x).startswith("rich")]) >= 2,
+       "members=%s — the guard must not empty the cohorts it exists to build"
+       % sorted(m5))
+    ok("and the exclusion is counted separately from sparse",
+       int((asg5.get("stats") or {}).get("excluded_flat", 0)) >= 8,
+       "stats=%s" % (asg5.get("stats") or {}))
+    ok("the reason names the dimension count",
+       "distinct access" in str((asg5.get("unplaced") or {}).get("flat0", "")),
+       "unplaced=%r" % (asg5.get("unplaced") or {}).get("flat0"))
+
+    # Opt-out must work: a site whose feed is genuinely one-dimensional can
+    # set it to 1 and get the old behaviour rather than empty cohorts.
+    asg6 = P.build_cohorts(flatprof, classes={}, operator={}, min_size=2,
+                           min_events=20, max_distance=0.9, max_entities=10000,
+                           use_directory=False, min_dimensions=1)
+    ok("min_dimensions=1 restores the old behaviour",
+       len(set(asg6.get("members") or {})) >= 2,
+       "the guard must be switchable, not absolute")
+
     # ── 6. the prefixes that make the guard mean anything ──
     for pfx in ("ip:", "host:", "external:", "service:"):
         ok("EXCLUDED_PREFIXES still contains %r" % pfx,

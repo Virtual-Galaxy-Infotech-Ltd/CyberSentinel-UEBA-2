@@ -113,6 +113,21 @@ DEFAULT_MIN_SIZE = 4
 # happened to touch.
 DEFAULT_MIN_EVENTS = 20
 
+# Distinct things an entity must have touched before its profile is a
+# DISTRIBUTION rather than a point.
+#
+# Divergence between two identical point masses is zero whatever they are, so
+# entities that touched exactly one thing cluster perfectly with every other
+# entity that touched that same one thing — at distance 0.000, sd 0.000. The
+# result is not a peer group. It is "everyone who appeared on host X", which
+# is a fact about the host, not a behavioural similarity between people.
+#
+# Measured on the live store, 17-Nov-2026: of 674 entities reaching the
+# clusterer, 613 (90.9%) had exactly one key, and 571 of those shared the SAME
+# key. That produced a 567-member cohort whose members were indistinguishable
+# from one another by construction.
+DEFAULT_MIN_DIMENSIONS = 2
+
 # Maximum divergence at which two entities are still considered peers. 0 is
 # identical behaviour, 1 is no overlap at all. 0.45 was chosen against the
 # local sample: the real users pair at 0.001-0.166 while unrelated accounts sit
@@ -241,6 +256,7 @@ def build_cohorts(profiles: dict, classes: "dict | None" = None,
                   operator: "dict | None" = None,
                   min_size: int = DEFAULT_MIN_SIZE,
                   min_events: int = DEFAULT_MIN_EVENTS,
+                  min_dimensions: int = DEFAULT_MIN_DIMENSIONS,
                   max_distance: float = DEFAULT_MAX_DISTANCE,
                   max_entities: int = DEFAULT_MAX_ENTITIES,
                   use_directory: bool = True) -> dict:
@@ -265,6 +281,7 @@ def build_cohorts(profiles: dict, classes: "dict | None" = None,
     group must not be.
     """
     params = {"min_size": int(min_size), "min_events": int(min_events),
+              "min_dimensions": int(min_dimensions),
               "max_distance": float(max_distance),
               "deviation_sigma": DEFAULT_DEVIATION_SIGMA,
               "use_directory": bool(use_directory)}
@@ -280,7 +297,7 @@ def build_cohorts(profiles: dict, classes: "dict | None" = None,
 
     # ── eligibility ──
     eligible: dict = {}
-    excluded = truncated = sparse = 0
+    excluded = truncated = sparse = flat = 0
     for entity, counts in (profiles or {}).items():
         ent = str(entity or "").strip()
         if not ent:
@@ -361,13 +378,43 @@ def build_cohorts(profiles: dict, classes: "dict | None" = None,
                     groups.setdefault(name, []).append(ent)
 
     # ── 3. behavioural leader clustering ──
+    #
+    # A POINT IS NOT A DISTRIBUTION, and this is the only stage that cares.
+    #
+    # Divergence between two identical point masses is zero whatever they are,
+    # so an entity that touched exactly one thing sits at distance 0.000 from
+    # every other entity that touched that same thing. They cluster perfectly
+    # and the cohort says nothing: it is "everyone who appeared on host X",
+    # which is a fact about the host, not a behavioural similarity.
+    #
+    # Measured on the live store, 17-Nov-2026: 613 of 674 entities reaching
+    # the clusterer had a single-key profile and 571 of those shared the SAME
+    # key, producing a 567-member cohort at mean 0.000, sd 0.000.
+    #
+    # Applied HERE and not at eligibility, because the operator and directory
+    # stages above do not use profile distance at all. An operator naming a
+    # cohort, or colleagues sharing a domain prefix, is a claim about who they
+    # ARE; it does not become wrong because the feed records one thing about
+    # them. Excluding them earlier removed the two cohorts on this estate that
+    # were actually sound — caught by the directory selftest, which builds its
+    # fixture from single-key profiles for exactly that reason.
+    flat_members = {e for e in order
+                    if len(eligible[e]["profile"]) < min_dimensions}
+    flat = len(flat_members)
+    for e in flat_members:
+        if e not in assigned:
+            out["unplaced"][e] = (
+                "profile has only %d distinct access(es); %d needed before it "
+                "is a distribution rather than a point"
+                % (len(eligible[e]["profile"]), int(min_dimensions)))
+
     for leader in order:
-        if leader in assigned:
+        if leader in assigned or leader in flat_members:
             continue
         lp = eligible[leader]["profile"]
         members = [leader]
         for other in order:
-            if other == leader or other in assigned:
+            if other == leader or other in assigned or other in flat_members:
                 continue
             if profile_distance(lp, eligible[other]["profile"]) <= max_distance:
                 members.append(other)
@@ -424,6 +471,7 @@ def build_cohorts(profiles: dict, classes: "dict | None" = None,
         "eligible": len(eligible),
         "excluded_not_person": excluded,
         "excluded_sparse": sparse,
+        "excluded_flat": flat,
         "truncated": truncated,
         "placed": len(out["members"]),
         "unplaced": len(out["unplaced"]),
@@ -805,7 +853,10 @@ def selftest() -> int:
     ok("and are counted", c2["stats"]["excluded_sparse"] == 4)
     ok("and each says why", "below the 20 needed" in c2["unplaced"]["person:a"])
 
-    two = {"person:a": {"h": 50}, "person:b": {"h": 50}}
+    # Two dimensions on purpose: a single-key profile is now rejected by the
+    # min_dimensions guard, and this case is about min_SIZE. A fixture that
+    # trips two guards cannot show which one it is testing.
+    two = {"person:a": {"h": 50, "h2": 25}, "person:b": {"h": 50, "h2": 25}}
     c3 = build_cohorts(two, min_size=4, min_events=10)
     ok("a cohort below min_size is not published", c3["cohorts"] == {})
     ok("its would-be members are unplaced", len(c3["unplaced"]) == 2)
@@ -815,11 +866,14 @@ def selftest() -> int:
     # ── build: no chaining ──
     # a~b and b~c, but a is nothing like c. Leader clustering must not put all
     # three in one cohort on the strength of b.
+    # Each carries a small second dimension so the min_dimensions guard does
+    # not remove a, c and d before the chaining geometry can be tested. The
+    # shape is unchanged: a and d are alike, b sits between, c is the far end.
     chain = {
-        "person:a": {"x": 100},
+        "person:a": {"x": 100, "w": 1},
         "person:b": {"x": 50, "y": 50},
-        "person:c": {"y": 100},
-        "person:d": {"x": 100},
+        "person:c": {"y": 100, "w": 1},
+        "person:d": {"x": 100, "w": 1},
     }
     ch = build_cohorts(chain, min_size=2, min_events=10, max_distance=0.6,
                        use_directory=False)
