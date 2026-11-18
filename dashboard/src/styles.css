@@ -4398,6 +4398,106 @@ body:has(#page-overview.active) .customise-btn {
   display: inline-flex;
 }
 
+/* ── Panel search bar (Endpoints + User Risk) ───────────────────────────────── */
+.panel-search {
+  padding: 8px var(--pad-x);
+  border-bottom: 1px solid var(--border);
+  background: rgba(7, 11, 17, 0.5);
+  position: relative;
+  z-index: 10;
+}
+.psearch-wrap {
+  position: relative;
+}
+.psearch-wrap::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 13px;
+  height: 13px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233d5a72' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E") no-repeat center / contain;
+  pointer-events: none;
+  z-index: 1;
+}
+.psearch-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(0, 212, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono2);
+  font-size: 13px;
+  padding: 6px 10px 6px 30px;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.psearch-input::placeholder { color: var(--text3); opacity: 0.7; }
+.psearch-input:focus {
+  border-color: rgba(0, 212, 255, 0.4);
+  background: rgba(0, 212, 255, 0.05);
+}
+.psearch-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--bg2);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  border-radius: 5px;
+  z-index: 300;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.psearch-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(26, 40, 56, 0.5);
+  transition: background 0.1s;
+}
+.psearch-item:last-child { border-bottom: none; }
+.psearch-item:hover, .psearch-item.focused { background: rgba(0, 212, 255, 0.08); }
+.psearch-item-name {
+  font-family: var(--mono2);
+  font-size: 13px;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.psearch-item-meta {
+  font-family: var(--mono2);
+  font-size: 11.5px;
+  color: var(--text3);
+  flex-shrink: 0;
+}
+.psearch-item-cnt {
+  font-family: var(--mono2);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.psearch-hl {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+html.light .panel-search { background: rgba(240, 244, 248, 0.8); }
+html.light .psearch-input { background: #fff; color: var(--text); }
+html.light .psearch-input:focus { border-color: rgba(0, 136, 187, 0.5); background: rgba(0, 136, 187, 0.04); }
+html.light .psearch-dropdown { background: #fff; border-color: rgba(0, 136, 187, 0.3); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14); }
+html.light .psearch-item { border-bottom-color: var(--border); }
+html.light .psearch-item:hover, html.light .psearch-item.focused { background: rgba(0, 136, 187, 0.07); }
+
 /* ── Dashboard customisation modal ──────────────────────────────────────────── */
 .cust-overlay {
   position: fixed;

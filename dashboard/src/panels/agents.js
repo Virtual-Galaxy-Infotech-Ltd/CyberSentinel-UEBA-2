@@ -84,11 +84,110 @@ export function renderOverviewAgents() {
   }).join("");
 }
 
+// ── Endpoint search ───────────────────────────────────────────────────────────
+
+let _epQuery = "";
+let _epFocusIdx = -1;
+
+function _escHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function _highlight(text, q) {
+  if (!q) return _escHtml(text);
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) return _escHtml(text);
+  return _escHtml(text.slice(0, idx))
+    + '<mark class="psearch-hl">' + _escHtml(text.slice(idx, idx + q.length)) + '</mark>'
+    + _escHtml(text.slice(idx + q.length));
+}
+
+function _applyEpFilter() {
+  const q = _epQuery;
+  document.querySelectorAll("#agents-list .agent-item").forEach((el) => {
+    const name = (el.querySelector(".agent-name")?.textContent || "").toLowerCase();
+    const ip   = (el.querySelector(".agent-ip")?.textContent   || "").toLowerCase();
+    el.style.display = (!q || name.includes(q) || ip.includes(q)) ? "" : "none";
+  });
+}
+
+function _buildEpSuggestions() {
+  const q = _epQuery;
+  const sugg = document.getElementById("ep-suggestions");
+  if (!sugg) return;
+  if (!q) { sugg.hidden = true; _epFocusIdx = -1; return; }
+  const matches = state.agentsData
+    .filter((a) => a.agent.toLowerCase().includes(q) || (a.ip || "").toLowerCase().includes(q))
+    .slice(0, 8);
+  if (!matches.length) { sugg.hidden = true; _epFocusIdx = -1; return; }
+  sugg.innerHTML = matches.map((a) => {
+    const hasCrit = a.highly_anomalous > 0;
+    const hasAnom = a.anomalous > 0;
+    const cntColor = hasCrit ? "var(--red)" : hasAnom ? "var(--orange)" : "var(--text3)";
+    return `<div class="psearch-item" data-name="${_escHtml(a.agent)}">
+      <span class="psearch-item-name">${_highlight(a.agent, q)}</span>
+      <span class="psearch-item-meta">${_escHtml(a.ip || "")}</span>
+      <span class="psearch-item-cnt" style="color:${cntColor}">${a.alert_count}</span>
+    </div>`;
+  }).join("");
+  sugg.hidden = false;
+  _epFocusIdx = -1;
+  sugg.querySelectorAll(".psearch-item").forEach((item) => {
+    item.addEventListener("mousedown", (e) => { e.preventDefault(); _selectEp(item.dataset.name); });
+  });
+}
+
+function _setEpFocus(idx) {
+  const sugg = document.getElementById("ep-suggestions");
+  if (!sugg || sugg.hidden) return;
+  const items = sugg.querySelectorAll(".psearch-item");
+  _epFocusIdx = Math.max(-1, Math.min(idx, items.length - 1));
+  items.forEach((el, i) => el.classList.toggle("focused", i === _epFocusIdx));
+  if (_epFocusIdx >= 0) items[_epFocusIdx].scrollIntoView({ block: "nearest" });
+}
+
+function _selectEp(name) {
+  const input = document.getElementById("ep-search");
+  const sugg  = document.getElementById("ep-suggestions");
+  if (input) { input.value = name; _epQuery = name.toLowerCase(); }
+  if (sugg)  sugg.hidden = true;
+  _applyEpFilter();
+  loadAgentDetail(name);
+}
+
+export function initEndpointSearch() {
+  const input = document.getElementById("ep-search");
+  const sugg  = document.getElementById("ep-suggestions");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    _epQuery = input.value.trim().toLowerCase();
+    _applyEpFilter();
+    _buildEpSuggestions();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (!sugg || sugg.hidden) return;
+    if (e.key === "ArrowDown")  { e.preventDefault(); _setEpFocus(_epFocusIdx + 1); }
+    else if (e.key === "ArrowUp")  { e.preventDefault(); _setEpFocus(_epFocusIdx - 1); }
+    else if (e.key === "Enter") {
+      const focused = sugg.querySelector(".psearch-item.focused");
+      if (focused) { e.preventDefault(); _selectEp(focused.dataset.name); }
+    }
+    else if (e.key === "Escape") { sugg.hidden = true; _epFocusIdx = -1; }
+  });
+  input.addEventListener("focus", () => { if (_epQuery) _buildEpSuggestions(); });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#ep-search, #ep-suggestions")) {
+      if (sugg) sugg.hidden = true;
+    }
+  });
+}
+
 export function renderAgents() {
   document.getElementById("agents-badge").textContent = state.agentsData.length;
   if (!state.agentsData.length) {
     document.getElementById("agents-list").innerHTML =
       '<div class="empty-state" style="padding:30px 10px"><p>NO AGENTS</p></div>';
+    _applyEpFilter();
     return;
   }
   document.getElementById("agents-list").innerHTML = state.agentsData.map((a) => {
@@ -105,6 +204,7 @@ export function renderAgents() {
       <span class="agent-alert-count ${cntCls}">${a.alert_count}</span>
     </div>`;
   }).join("");
+  _applyEpFilter();
 }
 
 export function goToFeedWithFilter(filter) {

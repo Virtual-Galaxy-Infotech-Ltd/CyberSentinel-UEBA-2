@@ -36,8 +36,9 @@ import {
   saveSchedule, runScheduleNow, deleteSchedule, deleteReport, downloadReportAs,
 } from "./panels/reports.js";
 import { jumpToAlert, toggleEvidence } from "./panels/feed.js";
-import { goToAgent, loadAgentDetail, switchAgentTab, goToFeedWithFilter } from "./panels/agents.js";
+import { goToAgent, loadAgentDetail, switchAgentTab, goToFeedWithFilter, initEndpointSearch } from "./panels/agents.js";
 import { loadUserDetail, closeUserDetail, initUserDetail } from "./panels/user-detail.js";
+import { initUserSearch } from "./panels/users.js";
 import { drawTimeline } from "./charts/timeline.js";
 import { drawRadar } from "./charts/radar.js";
 import { applyDashboardLayout } from "./panels/dashboard-layout.js";
@@ -167,6 +168,8 @@ initWatchlist();
 initReports();
 initAlerting();
 initUserDetail();
+initEndpointSearch();
+initUserSearch();
 initShortcuts();
 initThreatMap();   // live firewall geoIP globe (lazy — builds on first tab open)
 

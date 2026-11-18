@@ -590,6 +590,12 @@
         <span class="panel-title">User Risk Leaderboard</span>
         <span class="panel-badge" id="users-badge">0</span>
       </div>
+      <div class="panel-search">
+        <div class="psearch-wrap">
+          <input id="ur-search" type="text" class="psearch-input" placeholder="Search users…" autocomplete="off" spellcheck="false"/>
+          <div id="ur-suggestions" class="psearch-dropdown" hidden></div>
+        </div>
+      </div>
       <div class="leaderboard">
         <div class="user-row header-row">
           <span>#</span><span>User</span><span>Risk Index</span>
@@ -641,6 +647,12 @@
         <div class="panel-header">
           <span class="panel-title">Endpoints</span>
           <span class="panel-badge" id="agents-badge">0</span>
+        </div>
+        <div class="panel-search">
+          <div class="psearch-wrap">
+            <input id="ep-search" type="text" class="psearch-input" placeholder="Search endpoints, IPs…" autocomplete="off" spellcheck="false"/>
+            <div id="ep-suggestions" class="psearch-dropdown" hidden></div>
+          </div>
         </div>
         <div id="agents-list"></div>
       </div>
