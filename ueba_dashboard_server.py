@@ -7047,6 +7047,120 @@ def unmark_fp_pattern(pat_id):
     return jsonify({"ok": True, "removed": bool(removed)})
 
 
+# ── Dashboard layout preferences (SN 23 / Story 3.1) ────────────────────────
+#
+# Preferences are stored server-side so they follow the analyst across
+# machines and sessions. The authenticated user's `sub` is the key — the
+# frontend never supplies a user-id; the server derives it from the session.
+#
+# When auth.enforce is off (or the user is unauthenticated), GET returns a
+# null layout and the frontend falls back to the shipped default. PUT and
+# DELETE require an authenticated session and return 401 otherwise.
+
+VALID_PANEL_IDS = frozenset([
+    # Navigation tab panels
+    "tab-overview", "tab-incidents", "tab-feed", "tab-users", "tab-campaigns",
+    "tab-endpoints", "tab-false-positives", "tab-alerting", "tab-reports",
+    "tab-watchlist", "tab-threatmap",
+    # Overview row-level sections (direct children of #page-overview)
+    "ov-banner", "ov-row-gauge", "ov-row-recent", "ov-row-dist",
+    "ov-ai-analyst", "ov-row-sigs", "ov-row-mitre",
+    # Overview individual sub-panels
+    "ov-gauge", "ov-radar", "ov-timeline",
+    "ov-recent-alerts", "ov-top-users", "ov-endpoints-widget",
+    "ov-score-dist", "ov-heatmap",
+    "ov-top-sigs", "ov-rec-actions", "ov-mitre", "ov-health",
+    # False-positives page sub-panels
+    "fp-patterns", "fp-list",
+])
+
+
+def _layout_sub() -> str | None:
+    """The authenticated user's `sub`, or None when auth is off or unauthenticated."""
+    if not AUTH_MODULE_AVAILABLE:
+        return None
+    user = ueba_auth.current_user()
+    return (user or {}).get("sub") or None
+
+
+@app.route("/api/dashboard/layout", methods=["GET"])
+def api_dashboard_layout_get():
+    """Return the saved layout for the current session's analyst."""
+    store = ueba_auth._store() if AUTH_MODULE_AVAILABLE else None
+    sub = _layout_sub()
+    if store is None or sub is None:
+        return jsonify({"ok": True, "layout": None, "is_custom": False})
+    try:
+        layout = store.get_dashboard_prefs(sub)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "layout": layout, "is_custom": layout is not None})
+
+
+def _validate_panel_list(entries, field_name: str):
+    """Validate a list of panel preference objects.
+
+    Returns (cleaned_list, error_string).  error_string is None on success.
+    """
+    if not isinstance(entries, list):
+        return None, f"{field_name} must be an array"
+    seen = set()
+    cleaned = []
+    for item in entries:
+        if not isinstance(item, dict):
+            return None, f"each entry in {field_name} must be an object"
+        pid = item.get("id")
+        if not isinstance(pid, str) or pid not in VALID_PANEL_IDS:
+            return None, f"unknown panel id: {pid!r}"
+        if pid in seen:
+            return None, f"duplicate panel id: {pid!r}"
+        seen.add(pid)
+        visible = item.get("visible", True)
+        if not isinstance(visible, bool):
+            return None, "panel.visible must be a boolean"
+        cleaned.append({"id": pid, "visible": visible})
+    return cleaned, None
+
+
+@app.route("/api/dashboard/layout", methods=["PUT"])
+def api_dashboard_layout_save():
+    """Persist the authenticated analyst's dashboard layout."""
+    store = ueba_auth._store() if AUTH_MODULE_AVAILABLE else None
+    sub = _layout_sub()
+    if store is None or sub is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
+
+    body = request.get_json(silent=True) or {}
+    layout = {}
+
+    for field in ("panels", "overview_rows", "overview_panels", "other"):
+        if field in body:
+            cleaned, err = _validate_panel_list(body[field], field)
+            if err:
+                return jsonify({"ok": False, "error": err}), 400
+            layout[field] = cleaned
+
+    try:
+        store.set_dashboard_prefs(sub, layout)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/dashboard/layout", methods=["DELETE"])
+def api_dashboard_layout_reset():
+    """Delete the saved layout so the analyst reverts to the shipped default."""
+    store = ueba_auth._store() if AUTH_MODULE_AVAILABLE else None
+    sub = _layout_sub()
+    if store is None or sub is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
+    try:
+        store.delete_dashboard_prefs(sub)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
 # ── Engine health ────────────────────────────────────────────────────────────
 @app.route("/api/compliance/residency")
 def compliance_residency():

@@ -27,28 +27,7 @@ set -euo pipefail
 # Site-specific values come from ueba_site.env, which install_ueba.sh writes per
 # deployment, so this script is identical at every customer. The fallback keeps
 # the original lab path working for any install that predates the site file.
-# The site env sits next to the product, not next to this script. This
-# script is installed to /usr/local/bin, so deriving the path from
-# $BASH_SOURCE looked for /usr/local/bin/ueba_site.env — which does not
-# exist, so BASE silently fell back to the original host's
-# /root/NEW_DRIVE/aditya_ueba. FEED_FILE then pointed at a file that is not
-# there and every single run exited at step 1 with "SKIP: feed file missing".
-#
-# Measured on 2026-11-06: that is every run in the log. The stall detection
-# below — heartbeats, forensics, the confirm window — has therefore NEVER run
-# on this install. All the watchdog has ever done is step 0, restart when
-# systemd reports the engine dead, which is also what fought the weekly
-# retrain's deliberate engine-stop.
-#
-# Candidates in order: an explicit override, then the usual install roots,
-# then the old script-relative guess so an original-host install still works.
-_SITE_ENV=""
-for _c in "${UEBA_SITE_ENV:-}" \
-          /opt/ueba/ueba_site.env \
-          /root/NEW_DRIVE/aditya_ueba/ueba_site.env \
-          "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ueba_site.env"; do
-  if [ -n "$_c" ] && [ -r "$_c" ]; then _SITE_ENV="$_c"; break; fi
-done
+_SITE_ENV="${UEBA_SITE_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ueba_site.env}"
 # shellcheck source=/dev/null
 [[ -r "$_SITE_ENV" ]] && . "$_SITE_ENV"
 
@@ -71,25 +50,6 @@ log() { echo "$(date -Is) $*" >>"$WD_LOG"; }
 
 # --- 0. process must exist; if systemd says it's dead, restart outright ---
 if ! systemctl is-active --quiet ueba-engine; then
-  # A retrain stops the engine ON PURPOSE, for up to an hour and a half. This
-  # check used to fire regardless and had it running again inside 90 seconds
-  # (13:27:35 stopped, 13:29:02 restarted, 2026-11-06), so the engine then
-  # competed for memory with the trainer — available RAM fell to 1 GB on this
-  # box — and was live when models/ was replaced at promotion, leaving it on a
-  # mix of cached old models and new ones on disk.
-  #
-  # A pidfile rather than a plain flag, and the pid is checked: a retrain
-  # killed mid-run leaves the file behind, and trusting the file alone would
-  # disable the watchdog indefinitely.
-  RETRAIN_PIDFILE="${RETRAIN_PIDFILE:-$BASE/.state/retrain.running}"
-  if [ -f "$RETRAIN_PIDFILE" ]; then
-    _rpid="$(cat "$RETRAIN_PIDFILE" 2>/dev/null || true)"
-    if [ -n "$_rpid" ] && kill -0 "$_rpid" 2>/dev/null; then
-      log "SKIP: retrain in progress (pid $_rpid) — engine stop is deliberate"
-      exit 0
-    fi
-    log "stale retrain pidfile (pid '${_rpid:-none}' not running) — ignoring it"
-  fi
   log "engine not active -> restart"
   echo "$now" >"$STAMP_RESTART"
   systemctl restart ueba-engine

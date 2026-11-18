@@ -7,38 +7,23 @@
 #  that used to be hardcoded for the lab pair (98 <-> 23) is asked for here and
 #  written into ueba_config.yaml, so the same tree deploys at any bank.
 #
-#  This is stage 2 of a two-stage install. Stage 1 is check_dependencies.sh,
-#  which verifies packages, versions and host capacity and changes nothing;
-#  this script runs it first and refuses to continue if it fails. That split
-#  exists because the expensive failures used to happen late — a missing
-#  python3-venv surfaced at step 7, after the SSH key had been authorised on the
-#  customer's SIEM and the config had been written.
-#
 #  What it does, in order:
-#     1. Dependencies     — delegated to check_dependencies.sh (stage 1)
-#     2. Endpoints        — SIEM address/port and UEBA address/port, and the
-#                           topology DERIVED from them (same host or separate)
-#     3. Site details     — client name, feed source, SIEM paths
-#     4. Install location — install dir (or --dir), data dir, resource caps
-#     5. Connectivity     — bridge transport: direct SSH, or a reverse tunnel
-#                           originated from the SIEM when inbound is blocked
-#     6. SSH trust        — generate a keypair, help you authorise it, test it
-#     7. Discovery        — pull the SIEM agent registry -> agents.json
-#     8. Configuration    — render ueba_config.yaml + the bridge env file
-#     9. Runtime          — venv + CPU-only wheels, systemd units
-#    10. Bring-up         — first sync, optional training, start services
+#     1. Preflight        — OS, python, RAM, disk, ports, required tools
+#     2. Site details     — client name, SIEM host/port/user, paths
+#     3. Install location — base dir, dashboard bind address
+#     4. SSH trust        — generate a keypair, help you authorise it, test it
+#     5. Discovery        — pull the SIEM agent registry -> agents.json
+#     6. Configuration    — render ueba_config.yaml + the bridge env file
+#     7. Runtime          — venv + CPU-only wheels, systemd units
+#     8. Bring-up         — first sync, optional training, start services
 #
 #  Safe to re-run: every step detects existing state and offers to keep it.
 #  Nothing outside the install dir is touched except the systemd unit files.
 #
 #  Usage:
-#     sudo ./install_ueba.sh                          interactive
-#     sudo ./install_ueba.sh --dir /opt/ueba          install directory from the command line
-#     sudo ./install_ueba.sh --dir /opt/ueba --data-dir /data/ueba \
-#                            --siem 10.200.10.98:22 --dash 0.0.0.0:3026
+#     sudo ./install_ueba.sh                 interactive
 #     sudo ./install_ueba.sh --unattended answers.env
-#     sudo ./install_ueba.sh --dry-run                show what would happen, change nothing
-#     sudo ./install_ueba.sh --skip-depcheck          stage 1 already run separately
+#     sudo ./install_ueba.sh --dry-run       show what would happen, change nothing
 #
 set -uo pipefail
 
@@ -47,14 +32,6 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGFILE="/tmp/ueba-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=0
 UNATTENDED=""
-SKIP_DEPCHECK=0
-
-# Values supplied on the command line. ask() treats a preset variable as a
-# DEFAULT and still prompts, which is right for an answers file and wrong for
-# an explicit --dir: an operator who named the directory in the command should
-# not be asked to confirm it. fixed() distinguishes the two.
-declare -A PRESET=()
-fixed() { [[ -n "${PRESET[$1]:-}" ]]; }
 
 # ── Styling ───────────────────────────────────────────────────────────────────
 if [[ -t 1 ]] && [[ "${TERM:-dumb}" != "dumb" ]]; then
@@ -66,7 +43,7 @@ else
 fi
 
 TICK="${GRN}✔${R}"; CROSS="${RED}✘${R}"; WARN="${YEL}▲${R}"; INFO="${BLU}•${R}"
-STEP_TOTAL=10
+STEP_TOTAL=8
 STEP_NOW=0
 
 log()   { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOGFILE"; }
@@ -174,108 +151,9 @@ v_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )) && return 0; w
 v_abs()  { [[ "$1" = /* ]] && return 0; warn "Must be an absolute path (starting with /)."; return 1; }
 v_user() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] && return 0; warn "Not a valid username."; return 1; }
 
-# ── Address helpers ───────────────────────────────────────────────────────────
-# Every address this host answers on: loopback, its own name, and each global
-# IPv4/IPv6 on every interface. Collected once, because the topology question
-# below is asked against it.
-local_addresses() {
-  {
-    printf '127.0.0.1\nlocalhost\n::1\n'
-    hostname 2>/dev/null
-    hostname -f 2>/dev/null
-    hostname -I 2>/dev/null | tr ' ' '\n'
-    ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1
-  } 2>/dev/null | sed '/^$/d' | tr 'A-Z' 'a-z' | sort -u
-}
-
-# is_local_address <host> — true when <host> is this machine.
-#
-# This is what decides co-located vs separate, and it is decided by comparing
-# the SIEM address the operator typed against the addresses this host actually
-# holds, rather than by asking them which it is. Two reasons: an operator
-# installing on the SIEM host has already told us the answer by typing its own
-# IP, and answering a yes/no wrongly silently produces the other topology —
-# an unattended co-located install that builds an SSH bridge to itself.
-is_local_address() {
-  local want; want="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
-  [[ -z "$want" ]] && return 1
-  local a
-  while read -r a; do [[ "$a" == "$want" ]] && return 0; done < <(local_addresses)
-  # A hostname that resolves onto one of our own addresses counts too — the
-  # operator may type the SIEM's DNS name on the SIEM itself.
-  if have_cmd getent; then
-    local r
-    while read -r r; do
-      [[ -z "$r" ]] && continue
-      while read -r a; do [[ "$a" == "$r" ]] && return 0; done < <(local_addresses)
-    done < <(getent ahostsv4 "$want" 2>/dev/null | awk '{print tolower($1)}' | sort -u)
-  fi
-  return 1
-}
-
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-# tcp_open <host> <port> [timeout] — is anything accepting connections there
-tcp_open() {
-  local h="$1" p="$2" t="${3:-6}"
-  if have_cmd nc; then nc -z -w "$t" "$h" "$p" >/dev/null 2>&1; return $?; fi
-  timeout "$t" bash -c "exec 3<>/dev/tcp/${h}/${p}" >/dev/null 2>&1
-}
-
 # ── Steps ─────────────────────────────────────────────────────────────────────
-# Stage 1 lives in its own script so a customer's platform team can run it
-# before the change window, without sudo and without this installer. Running it
-# again here is deliberate: the host that was certified a week ago is not
-# necessarily the host in front of us now.
 preflight() {
-  step "Dependencies"
-
-  if (( SKIP_DEPCHECK )); then
-    warn "--skip-depcheck: stage 1 was not run"
-    say "${DIM}Only use this when check_dependencies.sh has already passed on THIS host.${R}"
-    return 0
-  fi
-
-  local dc="$SELF_DIR/check_dependencies.sh"
-  if [[ ! -f "$dc" ]]; then
-    warn "check_dependencies.sh not found beside the installer — using the built-in checks"
-    preflight_builtin
-    return 0
-  fi
-
-  local args=(--for-install --dir "${BASE_DIR:-/opt/cybersentinel/ueba}")
-  [[ -n "${DATA_DIR:-}" ]] && args+=(--data-dir "$DATA_DIR")
-  [[ -n "${DASH_PORT:-}" ]] && args+=(--dash-port "$DASH_PORT")
-  [[ -n "${SIEM_HOST:-}" ]] && args+=(--siem "${SIEM_HOST}:${SIEM_PORT:-22}")
-  [[ -n "${KAFKA_BROKERS:-}" ]] && args+=(--kafka "${KAFKA_BROKERS%%,*}")
-  [[ -n "${WHEELHOUSE:-}" ]] && args+=(--wheelhouse "$WHEELHOUSE")
-  local report="/tmp/ueba-depcheck-$(date +%Y%m%d-%H%M%S).json"
-  args+=(--json "$report")
-
-  say "${DIM}stage 1: $dc${R}"
-  blank
-  # Its output goes straight to the terminal rather than into the log: this is
-  # the one report the operator has to read, and a spinner over it would hide
-  # exactly the lines that matter.
-  bash "$dc" "${args[@]}"
-  local rc=$?
-  DEPCHECK_REPORT="$report"
-
-  if (( rc != 0 )); then
-    if (( DRY_RUN )); then
-      warn "dependency check failed (rc=$rc) — continuing because this is a dry run"
-      return 0
-    fi
-    die "Dependency check failed. Fix the items marked ✘ above and re-run. Report: $report"
-  fi
-  ok "dependency check passed ${GRY}(report: $report)${R}"
-}
-
-preflight_builtin() {
-  # No step() here — this runs inside the Dependencies step, as its fallback,
-  # and a second step() would advance the progress bar twice.
-  blank
-  say "${B}Built-in preflight${R} ${DIM}(reduced — stage 1 checks far more)${R}"
+  step "Preflight"
   local fail=0
 
   [[ $EUID -eq 0 ]] && ok "running as root" || { bad "must run as root (use sudo)"; fail=1; }
@@ -318,98 +196,9 @@ preflight_builtin() {
   ok "preflight passed"
 }
 
-collect_endpoints() {
-  step "Endpoints"
-  say "${DIM}The two addresses that define this deployment: where the SIEM is,${R}"
-  say "${DIM}and where UEBA will be served from. The topology is worked out from${R}"
-  say "${DIM}them rather than asked for separately.${R}"
-  blank
-
-  # Backwards compatibility with the answers files written before this step
-  # existed. They carry SELF_IP and CO_LOCATED but no SIEM_HOST or UEBA_HOST,
-  # and an unattended re-install of an existing site must not change behaviour
-  # because the questions were reorganised.
-  if [[ -n "$UNATTENDED" ]]; then
-    [[ -z "${UEBA_HOST:-}" && -n "${SELF_IP:-}" ]] && UEBA_HOST="$SELF_IP"
-    [[ -z "${SIEM_HOST:-}" && "${CO_LOCATED:-}" == "1" ]] && SIEM_HOST="${SELF_IP:-localhost}"
-  fi
-
-  say "${B}SIEM${R}"
-  ask SIEM_HOST "CyberSentinel SIEM manager host or IP" "" v_host
-  # The SSH port, not the Kafka port. This is the port the agent-registry
-  # discovery and (on a separate install) the feed bridge both go through.
-  # Kafka is asked for later, and only when it is the feed.
-  ask SIEM_PORT "SIEM SSH port"                        "22" v_port
-
-  blank
-  say "${B}UEBA${R}"
-  local guess; guess="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
-  [[ -z "$guess" ]] && guess="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  # One address, used for three things: the URL printed at the end, the
-  # suppression entry that stops this server's own sync and SSH traffic being
-  # scored as alerts against the estate it watches, and the tunnel endpoint the
-  # SIEM dials back to in reverse mode.
-  if fixed UEBA_HOST; then
-    note "UEBA hosting address: ${B}${UEBA_HOST}${R} ${GRY}(from the command line)${R}"
-  else
-    ask UEBA_HOST "Address this UEBA instance will be reached at" "${guess:-}" v_host
-  fi
-  if fixed DASH_PORT; then
-    note "console port: ${B}${DASH_PORT}${R} ${GRY}(from the command line)${R}"
-  else
-    ask DASH_PORT "UEBA console port" "${DASH_PORT:-3026}" v_port
-  fi
-  SELF_IP="$UEBA_HOST"
-
-  # Bind address is derived, not asked. Binding the loopback when the operator
-  # gave a routable address produces a console that answers only to an SSH
-  # port-forward, which reads as "the dashboard is down".
-  if [[ -z "${DASH_HOST:-}" ]]; then
-    case "$UEBA_HOST" in
-      127.0.0.1|localhost|::1) DASH_HOST="127.0.0.1" ;;
-      *)                       DASH_HOST="0.0.0.0" ;;
-    esac
-  fi
-
-  # ── Topology, derived ───────────────────────────────────────────────────────
-  blank
-  say "${B}Topology${R}"
-  local derived=0
-  if is_local_address "$SIEM_HOST"; then derived=1; fi
-
-  if [[ -n "${CO_LOCATED:-}" ]]; then
-    # An answers file wins, but say so and say what we would have concluded —
-    # a mismatch between the two is worth seeing before the install, not after.
-    note "co-located mode: ${CO_LOCATED} ${GRY}(from answers file)${R}"
-    if [[ "$CO_LOCATED" != "$derived" ]]; then
-      local verdict="is not"; (( derived )) && verdict="is"
-      warn "the answers file says CO_LOCATED=${CO_LOCATED}, but ${SIEM_HOST} ${verdict} an address of this host"
-      say "${DIM}Proceeding with the answers file. If that is wrong, stop now (Ctrl-C).${R}"
-    fi
-  elif (( derived )); then
-    CO_LOCATED=1
-    ok "${SIEM_HOST} is an address of this host — ${B}same server${R}"
-    say "${DIM}The SIEM pipeline already publishes every enriched event to Kafka, so${R}"
-    say "${DIM}the engine consumes the topic directly: no bridge, no SSH to ourselves,${R}"
-    say "${DIM}no second copy of the data on disk, and offsets kept by Kafka.${R}"
-  else
-    CO_LOCATED=0
-    ok "${SIEM_HOST} is not an address of this host — ${B}separate servers${R}"
-    say "${DIM}The feed has to cross the network, so a bridge is configured at step 5.${R}"
-    # Showing the comparison is what makes the automatic answer auditable. An
-    # operator who typed a VIP, a NAT address or a second interface the host
-    # does not hold can see immediately why we concluded what we did.
-    say "${DIM}this host holds: $(local_addresses | grep -E '^[0-9]' | paste -sd' ' -)${R}"
-    if ! ask_yn "Is that right — UEBA and the SIEM are on different servers?" y; then
-      CO_LOCATED=1
-      note "overridden: treating this as a same-server install"
-    fi
-  fi
-}
-
 collect_site() {
   step "Site details"
-  say "${DIM}Who this install is for, and how the feed reaches it.${R}"
+  say "${DIM}Where this UEBA instance lives, and which SIEM it feeds from.${R}"
   blank
   ask CLIENT_NAME "Client / bank name"                ""
 
@@ -425,13 +214,23 @@ collect_site() {
   #               SSH, no second copy of the data on disk, and offsets kept
   #               durably by Kafka instead of by our own byte counter.
   #
-  # CO_LOCATED is already settled: collect_endpoints derived it from the SIEM
-  # address against this host's own addresses, and an answers file overrides
-  # that explicitly. Nothing here asks again — a second yes/no is a second
-  # chance to answer it differently from the addresses already given.
+  # CO_LOCATED may be preset by an answers file. It must be read BEFORE falling
+  # back to ask_yn, because ask_yn ignores the answers file by design and
+  # returns its default under --unattended — so an unattended co-located
+  # install would otherwise build a bridge install without saying so.
   blank
+  if [[ -z "${CO_LOCATED:-}" ]]; then
+    if ask_yn "Is UEBA being installed ON the SIEM host itself?" n; then
+      CO_LOCATED=1
+    else
+      CO_LOCATED=0
+    fi
+  else
+    note "co-located mode: ${CO_LOCATED} ${GRY}(from answers file)${R}"
+  fi
+
   if [[ "$CO_LOCATED" == "1" ]]; then
-    SIEM_USER="root"
+    SIEM_HOST="localhost"; SIEM_PORT="22"; SIEM_USER="root"
     ask KAFKA_BROKERS "Kafka brokers the SIEM pipeline uses" \
         "localhost:39092"
     ask KAFKA_TOPIC   "Enriched Kafka topic" "enriched"
@@ -460,9 +259,9 @@ collect_site() {
     fi
     ask AGENT_LOCAL_CMD "Command to read the agent registry" "$AGENT_LOCAL_CMD"
   else
-    # Address and port were taken at step 2; only the account and the paths on
-    # the far side are still unknown.
-    note "SIEM: ${B}${SIEM_HOST}:${SIEM_PORT}${R} ${GRY}(from step 2)${R}"
+    CO_LOCATED=0
+    ask SIEM_HOST   "CyberSentinel SIEM manager host or IP" "" v_host
+    ask SIEM_PORT   "SIEM SSH port"                     "22" v_port
     ask SIEM_USER   "SSH user on the SIEM"              "root" v_user
     ask SIEM_ENRICHED_DIR "Enriched-log directory on the SIEM" \
         "/home/${SIEM_USER}/CyberSentinel-Event-Correlation-Kafka/data/enriched" v_abs
@@ -473,21 +272,10 @@ collect_site() {
 
 collect_local() {
   step "Install location"
-
-  # --dir is the whole point of the flag: an operator who named the directory
-  # on the command line has already decided, and a prompt that offers to change
-  # it invites a different answer than the change record says.
-  if fixed BASE_DIR; then
-    note "install directory: ${B}${BASE_DIR}${R} ${GRY}(from --dir)${R}"
-  else
-    ask BASE_DIR "UEBA install directory" "${BASE_DIR:-/opt/cybersentinel/ueba}" v_abs
-  fi
-  if fixed DATA_DIR; then
-    note "data directory: ${B}${DATA_DIR}${R} ${GRY}(from --data-dir)${R}"
-  else
-    ask DATA_DIR "Data directory (needs ~500 GB, grows ~65 GB/month)" "${DATA_DIR:-/data/ueba}" v_abs
-  fi
-  note "console: ${B}http://${UEBA_HOST}:${DASH_PORT}${R} ${GRY}(bind ${DASH_HOST} — from step 2)${R}"
+  ask BASE_DIR  "UEBA install directory" "/opt/cybersentinel/ueba" v_abs
+  ask DATA_DIR  "Data directory (needs ~500 GB, grows ~65 GB/month)" "/data/ueba" v_abs
+  ask DASH_HOST "Dashboard bind address" "0.0.0.0"
+  ask DASH_PORT "Dashboard port"         "3026" v_port
 
   # Resource caps. On a dedicated host these are a safety net; on the SIEM host
   # they are the contract that stops UEBA becoming the reason the SIEM dies.
@@ -510,10 +298,9 @@ collect_local() {
     MEM_DASHBOARD="${MEM_DASHBOARD:-6G}"
   fi
 
-  # SELF_IP is the UEBA address from step 2. It is suppressed as an alert
-  # source, or this server's own sync and SSH traffic scores as alerts against
-  # the estate it is supposed to be watching.
-  SELF_IP="${SELF_IP:-$UEBA_HOST}"
+  # This server's own IP must be suppressed, or its sync/SSH traffic becomes alerts.
+  local guess; guess="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
+  ask SELF_IP "This server's IP (suppressed as an alert source)" "${guess:-}" v_host
 
   if [[ -e "$BASE_DIR" ]]; then
     warn "$BASE_DIR already exists."
@@ -521,473 +308,6 @@ collect_local() {
     REUSE=1
   else
     REUSE=0
-  fi
-}
-
-configure_bridge() {
-  step "Connectivity"
-
-  # Everything downstream — setup_ssh, discover, agent_sync, the feed bridge —
-  # goes through this pair rather than SIEM_HOST/SIEM_PORT directly. On a
-  # reverse-tunnel install the SIEM is not reachable at its own address from
-  # here at all; it is reachable at 127.0.0.1 on a port it published itself.
-  SIEM_SSH_HOST="$SIEM_HOST"
-  SIEM_SSH_PORT="$SIEM_PORT"
-  BRIDGE_MODE="none"
-  FEED_MODE="files"
-  # setup_ssh owns this key, but the reverse-tunnel handover bundle has to quote
-  # its public half, and that bundle is written here. Name it now; both steps
-  # treat an existing key as the key.
-  SSH_KEY="${SSH_KEY:-/root/.ssh/id_ueba}"
-
-  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
-    FEED_MODE="kafka"
-    SIEM_SSH_HOST="localhost"
-    say "${DIM}Same server: the feed never crosses the network. The engine consumes${R}"
-    say "${DIM}the enriched topic the SIEM pipeline already publishes, so there is${R}"
-    say "${DIM}no bridge, no tunnel and no second copy of the data on disk.${R}"
-    blank
-    local kb="${KAFKA_BROKERS:-}"; kb="${kb%%,*}"
-    if [[ -n "$kb" ]] && tcp_open "${kb%:*}" "${kb##*:}" 6; then
-      ok "Kafka broker reachable at ${kb}"
-    else
-      warn "cannot open ${kb:-the broker} from here"
-      say "${DIM}The engine has no source until that broker answers. On a containerised${R}"
-      say "${DIM}SIEM the advertised listener is often the container port, not 9092.${R}"
-    fi
-    ok "no bridge required"
-    return 0
-  fi
-
-  # ── Separate hosts ──────────────────────────────────────────────────────────
-  say "${DIM}UEBA and the SIEM are on different hosts, so the feed has to cross${R}"
-  say "${DIM}the network. Which direction it is allowed to cross in is a firewall${R}"
-  say "${DIM}question, and at a bank the answer is usually not the obvious one.${R}"
-  blank
-
-  # Probe first, then ask. An operator should be choosing between options they
-  # have just watched succeed or fail, not guessing.
-  local direct_ok=0
-  if tcp_open "$SIEM_HOST" "$SIEM_PORT" 8; then
-    direct_ok=1
-    ok "UEBA → SIEM: ${SIEM_HOST}:${SIEM_PORT} accepts connections"
-  else
-    warn "UEBA → SIEM: cannot open ${SIEM_HOST}:${SIEM_PORT} from this host"
-  fi
-
-  if [[ -z "${BRIDGE_MODE_PRESET:-}" ]]; then
-    blank
-    say "${B}Bridge transport${R}"
-    say "  ${B}1${R} direct   ${DIM}— UEBA dials the SIEM over SSH. Simplest: one key, no${R}"
-    say "            ${DIM}  extra daemon. Needs outbound UEBA → SIEM:${SIEM_PORT} open.${R}"
-    say "  ${B}2${R} reverse  ${DIM}— the SIEM dials UEBA and publishes its own SSH port on${R}"
-    say "            ${DIM}  UEBA's loopback. Use this when the SIEM sits in a zone${R}"
-    say "            ${DIM}  that accepts no inbound connections, which is the normal${R}"
-    say "            ${DIM}  posture for a bank's SIEM segment. Needs outbound${R}"
-    say "            ${DIM}  SIEM → UEBA on one port instead.${R}"
-    blank
-    local def="1"; (( direct_ok )) || def="2"
-    (( direct_ok )) || note "direct failed its probe, so reverse is offered as the default"
-    ask BRIDGE_CHOICE "Transport (1 direct / 2 reverse)" "$def"
-    case "$BRIDGE_CHOICE" in
-      1|direct)  BRIDGE_MODE="direct" ;;
-      2|reverse) BRIDGE_MODE="reverse" ;;
-      *) warn "unrecognised answer '${BRIDGE_CHOICE}' — using direct"; BRIDGE_MODE="direct" ;;
-    esac
-  else
-    BRIDGE_MODE="$BRIDGE_MODE_PRESET"
-    note "bridge transport: ${BRIDGE_MODE} ${GRY}(preset)${R}"
-  fi
-
-  case "$BRIDGE_MODE" in
-    direct)  configure_bridge_direct ;;
-    reverse) configure_bridge_reverse ;;
-  esac
-}
-
-configure_bridge_direct() {
-  blank
-  ok "transport: ${B}direct${R} — UEBA dials ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT}"
-  SIEM_SSH_HOST="$SIEM_HOST"
-  SIEM_SSH_PORT="$SIEM_PORT"
-
-  # The feed itself can take one of two shapes over that same SSH transport,
-  # and they are not equivalent.
-  #
-  #   files  — ueba_sync_bridge.sh pulls rotated enriched chunks and appends
-  #            them to a local file the engine tails. Proven, and resilient to
-  #            a link that comes and goes, but it is a second copy of the data
-  #            and the engine is always behind by part of a rotation interval.
-  #   kafka  — an SSH local-forward carries the SIEM's broker port to this
-  #            host, and the engine consumes the topic directly as its own
-  #            consumer group. Live, no duplicate on disk, and offsets kept
-  #            durably by Kafka. It needs the tunnel to be up for the engine to
-  #            see anything, which is why it is not the default.
-  blank
-  say "${B}Feed shape${R}"
-  say "  ${B}1${R} files  ${DIM}— pull rotated enriched chunks over SSH (default, proven)${R}"
-  say "  ${B}2${R} kafka  ${DIM}— forward the broker port over SSH and consume the topic live${R}"
-  blank
-  ask FEED_CHOICE "Feed (1 files / 2 kafka over the tunnel)" "1"
-  case "$FEED_CHOICE" in
-    2|kafka)
-      FEED_MODE="kafka"
-      ask KAFKA_REMOTE "Broker as the SIEM sees it (host:port on that host)" "localhost:39092"
-      ask KAFKA_LOCAL_PORT "Local port to publish it on here" "39092" v_port
-      ask KAFKA_TOPIC "Enriched Kafka topic" "enriched"
-      # Its own group, always. Kafka divides a topic's partitions among a
-      # group's members, so reusing one of the pipeline's groups (enricher,
-      # correlation, scorer, enriched-file-sink) would take partitions away
-      # from that consumer and the SIEM's own file sink would quietly stop
-      # seeing a share of events, with nothing logged anywhere.
-      KAFKA_GROUP="ueba-engine"
-      KAFKA_BROKERS="127.0.0.1:${KAFKA_LOCAL_PORT}"
-      install_forward_tunnel
-      ;;
-    *)
-      FEED_MODE="files"
-      ok "feed: rotated enriched chunks over SSH (ueba-bridge)"
-      ;;
-  esac
-}
-
-# A long-lived SSH local-forward, run as a unit so systemd owns its lifetime.
-# ExitOnForwardFailure matters: without it ssh happily stays connected after
-# the forward is refused, and the engine then fails to reach a broker that
-# looks, from the outside, like it has a healthy tunnel to it.
-install_forward_tunnel() {
-  local unit=/etc/systemd/system/ueba-tunnel.service
-  if (( DRY_RUN )); then
-    note "${DIM}[dry-run]${R} would install $unit forwarding 127.0.0.1:${KAFKA_LOCAL_PORT} → ${KAFKA_REMOTE}"
-    return 0
-  fi
-  cat >"$unit" <<EOF
-[Unit]
-Description=CyberSentinel UEBA Kafka forward tunnel (${CLIENT_NAME})
-Documentation=man:ssh(1)
-After=network-online.target
-Wants=network-online.target
-Before=ueba-engine.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/ssh -NT \\
-  -i ${SSH_KEY:-/root/.ssh/id_ueba} -p ${SIEM_PORT} \\
-  -o ExitOnForwardFailure=yes \\
-  -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \\
-  -o StrictHostKeyChecking=accept-new -o BatchMode=yes \\
-  -L 127.0.0.1:${KAFKA_LOCAL_PORT}:${KAFKA_REMOTE} \\
-  ${SIEM_USER}@${SIEM_HOST}
-Restart=always
-RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload >>"$LOGFILE" 2>&1
-  ok "installed ueba-tunnel.service (127.0.0.1:${KAFKA_LOCAL_PORT} → ${KAFKA_REMOTE})"
-  note "the engine starts after it: Before=ueba-engine.service"
-}
-
-# ── Reverse tunnel ────────────────────────────────────────────────────────────
-# The SIEM originates the connection and publishes its own sshd onto this
-# host's loopback; the bridge then talks to 127.0.0.1:<local port> exactly as
-# if the SIEM were local. This is the topology the lab pair ran on, and the one
-# a bank's network team will usually accept, because the protected segment
-# makes an outbound connection and accepts none.
-#
-# Three things are deliberate here:
-#
-#   * A dedicated sshd on its own port, not the host's. The customer's main
-#     sshd is hardened to their standard and audited; adding our forwarding
-#     policy to it is a change to a control we do not own. A second daemon with
-#     its own config file touches nothing on port 22.
-#   * A tunnel-only account with no shell, and authorized_keys options that
-#     permit forwarding and nothing else — no pty, no agent, no X11, no command.
-#     The key that the SIEM holds cannot be used to run anything here.
-#   * PermitListen pinned to one port on the loopback. Even with that key, the
-#     SIEM cannot publish an arbitrary service onto this host, and cannot expose
-#     it beyond the loopback.
-configure_bridge_reverse() {
-  blank
-  ok "transport: ${B}reverse${R} — the SIEM dials this host"
-
-  ask TUNNEL_SSHD_PORT  "Port for the UEBA-side tunnel daemon (SIEM connects here)" "9022" v_port
-  ask TUNNEL_LOCAL_PORT "Loopback port the SIEM's SSH will appear on here"          "2222" v_port
-  ask TUNNEL_USER       "Restricted local account for the tunnel"                   "ueba-tunnel" v_user
-
-  SIEM_SSH_HOST="127.0.0.1"
-  SIEM_SSH_PORT="$TUNNEL_LOCAL_PORT"
-
-  if ! port_is_free "$TUNNEL_SSHD_PORT"; then
-    warn "port ${TUNNEL_SSHD_PORT} is already in use on this host"
-    say "${DIM}Pick another, or stop whatever holds it — the tunnel daemon cannot bind it.${R}"
-  fi
-
-  if (( DRY_RUN )); then
-    note "${DIM}[dry-run]${R} would create user ${TUNNEL_USER}, a dedicated sshd on ${TUNNEL_SSHD_PORT},"
-    note "${DIM}[dry-run]${R} a keypair for the SIEM, and a handover bundle under $BASE_DIR/handover"
-    return 0
-  fi
-
-  mkdir -p "$BASE_DIR/handover"
-  chmod 700 "$BASE_DIR/handover"
-
-  # ── 1. the restricted account ──
-  local home="/var/lib/${TUNNEL_USER}"
-  if id "$TUNNEL_USER" >/dev/null 2>&1; then
-    ok "account ${TUNNEL_USER} already exists"
-    home="$(getent passwd "$TUNNEL_USER" | cut -d: -f6)"
-  else
-    local nologin; nologin="$(command -v nologin || echo /usr/sbin/nologin)"
-    if useradd --system --create-home --home-dir "$home" --shell "$nologin" "$TUNNEL_USER" >>"$LOGFILE" 2>&1; then
-      ok "created tunnel-only account ${TUNNEL_USER} ${GRY}(no shell)${R}"
-    else
-      die "could not create ${TUNNEL_USER} — create it by hand and re-run"
-    fi
-  fi
-  mkdir -p "$home/.ssh"; chmod 700 "$home/.ssh"
-
-  # ── 2. the key the SIEM will hold ──
-  TUNNEL_KEY="/root/.ssh/id_ueba_tunnel"
-  if [[ -f "$TUNNEL_KEY" ]]; then
-    ok "tunnel keypair exists: $TUNNEL_KEY"
-  else
-    spin "generating the SIEM-side tunnel keypair" \
-      ssh-keygen -t ed25519 -N "" -f "$TUNNEL_KEY" -C "siem-reverse-tunnel@${CLIENT_NAME// /_}" \
-      || die "could not generate the tunnel keypair"
-  fi
-
-  # restrict disables everything (pty, agent and X11 forwarding, port
-  # forwarding, user rc); port-forwarding then re-enables only forwarding, and
-  # permitlisten narrows that to the single loopback port we expect.
-  local akline="restrict,port-forwarding,permitlisten=\"127.0.0.1:${TUNNEL_LOCAL_PORT}\" $(cat "${TUNNEL_KEY}.pub")"
-  touch "$home/.ssh/authorized_keys"
-  if grep -qF "$(cut -d' ' -f2 <"${TUNNEL_KEY}.pub")" "$home/.ssh/authorized_keys" 2>/dev/null; then
-    ok "tunnel key already authorised for ${TUNNEL_USER}"
-  else
-    printf '%s\n' "$akline" >>"$home/.ssh/authorized_keys"
-    ok "authorised the tunnel key for ${TUNNEL_USER} ${GRY}(forwarding only, one port)${R}"
-  fi
-  chmod 600 "$home/.ssh/authorized_keys"
-  chown -R "${TUNNEL_USER}:${TUNNEL_USER}" "$home/.ssh"
-
-  # ── 3. the dedicated daemon ──
-  local sshd_cfg="/etc/ssh/sshd_config.ueba-tunnel"
-  cat >"$sshd_cfg" <<EOF
-# UEBA reverse-tunnel SSH daemon — generated by install_ueba.sh for ${CLIENT_NAME}
-# Deliberately NOT part of /etc/ssh/sshd_config: the host's own daemon is
-# hardened and audited to the customer's standard, and this policy is ours.
-Port ${TUNNEL_SSHD_PORT}
-ListenAddress 0.0.0.0
-PidFile /run/sshd-ueba-tunnel.pid
-
-# No HostKey lines on purpose: the defaults are the host's existing keys, so
-# this daemon presents the same identity on ${TUNNEL_SSHD_PORT} as the main one
-# does on 22. A second set would make the SIEM's known_hosts entry depend on
-# which port it reached us on.
-
-AllowUsers ${TUNNEL_USER}
-PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitRootLogin no
-UsePAM no
-
-# Forwarding: remote-forwards ONLY — 'remote' refuses -L and -D outright, so
-# even a stolen key cannot use this host as a jump box into our network. Pinned
-# to the one loopback port we expect to be published.
-AllowTcpForwarding remote
-GatewayPorts no
-PermitListen 127.0.0.1:${TUNNEL_LOCAL_PORT}
-AllowAgentForwarding no
-X11Forwarding no
-PermitTTY no
-PermitTunnel no
-
-# Reap a tunnel whose far end has gone away. Without this a half-open tunnel
-# keeps the loopback port bound and the bridge blocks in banner exchange
-# forever — ConnectTimeout only covers TCP connect.
-ClientAliveInterval 30
-ClientAliveCountMax 3
-TCPKeepAlive yes
-LoginGraceTime 30
-MaxAuthTries 3
-MaxStartups 3:30:10
-LogLevel VERBOSE
-EOF
-  ok "wrote $sshd_cfg"
-
-  if /usr/sbin/sshd -t -f "$sshd_cfg" >>"$LOGFILE" 2>&1; then
-    ok "sshd accepts the tunnel config"
-  else
-    warn "sshd rejected $sshd_cfg — see $LOGFILE"
-  fi
-
-  cat >/etc/systemd/system/sshd-ueba-tunnel.service <<EOF
-[Unit]
-Description=SSH daemon for the UEBA reverse tunnel (port ${TUNNEL_SSHD_PORT}, ${CLIENT_NAME})
-Documentation=man:sshd(8)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStartPre=/bin/mkdir -p /run/sshd
-ExecStartPre=/usr/sbin/sshd -t -f ${sshd_cfg}
-ExecStart=/usr/sbin/sshd -D -e -f ${sshd_cfg}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload >>"$LOGFILE" 2>&1
-  spin "starting the tunnel daemon on ${TUNNEL_SSHD_PORT}" \
-    systemctl enable --now sshd-ueba-tunnel || warn "tunnel daemon did not start — check journalctl -u sshd-ueba-tunnel"
-
-  # ── 4. firewall ──
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -qi active; then
-    if ask_yn "ufw is active — allow ${SIEM_HOST} to reach port ${TUNNEL_SSHD_PORT}?" y; then
-      ufw allow from "$SIEM_HOST" to any port "$TUNNEL_SSHD_PORT" proto tcp >>"$LOGFILE" 2>&1 \
-        && ok "ufw: allowed ${SIEM_HOST} → ${TUNNEL_SSHD_PORT}/tcp" \
-        || warn "ufw rule failed — add it by hand"
-    fi
-  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    note "firewalld is active — allow the tunnel port:"
-    say "    ${CYA}firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=${SIEM_HOST} port port=${TUNNEL_SSHD_PORT} protocol=tcp accept' && firewall-cmd --reload${R}"
-  else
-    note "no active host firewall detected — nothing to open locally"
-  fi
-
-  # ── 5. the handover bundle ──
-  # The UEBA-side key has to exist before the bundle can quote it, and the
-  # bundle is the one artefact the customer's SIEM team will be working from.
-  # setup_ssh (step 6) treats an existing key as the key, so generating it here
-  # is not a second key.
-  if [[ ! -f "$SSH_KEY" ]]; then
-    spin "generating the UEBA-side keypair early (for the handover bundle)" \
-      ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "ueba@${CLIENT_NAME// /_}" \
-      || warn "could not generate $SSH_KEY — the bundle will say so"
-  fi
-
-  # The SIEM side cannot be configured from here: it is the customer's host and
-  # usually someone else's change request. So everything that side needs is
-  # written out as a bundle to hand over, rather than described in a mail.
-  local hv="$BASE_DIR/handover/siem-reverse-tunnel"
-  mkdir -p "$hv"; chmod 700 "$hv"
-  cp "$TUNNEL_KEY" "$hv/id_ueba_tunnel"; chmod 600 "$hv/id_ueba_tunnel"
-  cp "${TUNNEL_KEY}.pub" "$hv/id_ueba_tunnel.pub"
-
-  cat >"$hv/ueba-reverse-tunnel.service" <<EOF
-# Install on the SIEM host as /etc/systemd/system/ueba-reverse-tunnel.service
-#
-# Publishes this SIEM's own SSH port onto the UEBA host's loopback, so UEBA can
-# pull the enriched feed and the agent registry without anything connecting
-# inbound to this machine.
-[Unit]
-Description=Reverse SSH tunnel to the CyberSentinel UEBA host (${UEBA_HOST})
-Documentation=man:ssh(1)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-# -N: no remote command. -T: no pty. ExitOnForwardFailure: if the loopback port
-# is already bound on the UEBA side, fail loudly instead of sitting connected
-# with no tunnel — the failure mode that is impossible to diagnose from here.
-ExecStart=/usr/bin/ssh -NT \\
-  -i /etc/ueba/id_ueba_tunnel \\
-  -p ${TUNNEL_SSHD_PORT} \\
-  -o ExitOnForwardFailure=yes \\
-  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\
-  -o StrictHostKeyChecking=accept-new -o BatchMode=yes \\
-  -R 127.0.0.1:${TUNNEL_LOCAL_PORT}:127.0.0.1:${SIEM_PORT} \\
-  ${TUNNEL_USER}@${UEBA_HOST}
-Restart=always
-RestartSec=15
-StartLimitIntervalSec=300
-StartLimitBurst=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  cat >"$hv/README.txt" <<EOF
-CyberSentinel UEBA — reverse tunnel, SIEM-side setup
-Generated $(date '+%F %T') for ${CLIENT_NAME}
-
-WHAT THIS IS
-  UEBA is installed on ${UEBA_HOST} and needs to read the enriched feed and the
-  agent registry from this SIEM. The bank's network policy does not allow an
-  inbound connection into the SIEM segment, so the direction is reversed: this
-  SIEM makes one outbound SSH connection to the UEBA host and publishes its own
-  SSH port on that host's loopback. Nothing connects into this machine.
-
-  SIEM (${SIEM_HOST})  --outbound tcp/${TUNNEL_SSHD_PORT}-->  UEBA (${UEBA_HOST})
-  UEBA then reads the SIEM through 127.0.0.1:${TUNNEL_LOCAL_PORT} on its own loopback.
-
-WHAT TO DO ON THIS SIEM HOST  (3 steps, ~5 minutes)
-
-  1. Install the key
-       sudo install -d -m 700 /etc/ueba
-       sudo install -m 600 id_ueba_tunnel /etc/ueba/id_ueba_tunnel
-
-  2. Install and start the unit
-       sudo install -m 644 ueba-reverse-tunnel.service /etc/systemd/system/
-       sudo systemctl daemon-reload
-       sudo systemctl enable --now ueba-reverse-tunnel
-       systemctl status ueba-reverse-tunnel
-
-  3. Authorise UEBA to read this host
-     UEBA connects back through the tunnel as ${SIEM_USER}. Append the UEBA
-     public key below to ${SIEM_USER}'s ~/.ssh/authorized_keys here:
-
-$(sed 's/^/       /' "${SSH_KEY:-/root/.ssh/id_ueba}.pub" 2>/dev/null || echo "       <run install_ueba.sh step 6 first, then copy /root/.ssh/id_ueba.pub>")
-
-FIREWALL REQUEST FOR THE NETWORK TEAM
-  Allow: ${SIEM_HOST}  ->  ${UEBA_HOST}  tcp/${TUNNEL_SSHD_PORT}   (outbound from the SIEM)
-  Nothing inbound to ${SIEM_HOST} is required.
-
-WHAT THE KEY CAN DO ON THE UEBA HOST
-  Nothing but hold the tunnel open. It is authorised for the account
-  '${TUNNEL_USER}', which has no shell, with options
-  restrict,port-forwarding,permitlisten="127.0.0.1:${TUNNEL_LOCAL_PORT}" —
-  so it cannot run a command, open a terminal, forward anything else, or expose
-  the forwarded port off the loopback.
-
-VERIFYING IT WORKS
-  On the SIEM:  systemctl is-active ueba-reverse-tunnel
-  On UEBA:      ss -ltnp | grep ${TUNNEL_LOCAL_PORT}
-                ssh -i ${SSH_KEY:-/root/.ssh/id_ueba} -p ${TUNNEL_LOCAL_PORT} ${SIEM_USER}@127.0.0.1 true
-
-IF IT WILL NOT STAY UP
-  'ExitOnForwardFailure=yes' means the tunnel exits rather than running without
-  a forward, so a restart loop here usually means port ${TUNNEL_LOCAL_PORT} is
-  still bound on the UEBA host by a previous tunnel. On UEBA:
-      systemctl restart sshd-ueba-tunnel
-EOF
-  chmod 600 "$hv/README.txt" "$hv/ueba-reverse-tunnel.service"
-
-  blank
-  ok "handover bundle written: ${B}$hv${R}"
-  say "    ${DIM}id_ueba_tunnel  — the private key the SIEM needs (transfer it securely)${R}"
-  say "    ${DIM}ueba-reverse-tunnel.service — ready to install on the SIEM${R}"
-  say "    ${DIM}README.txt      — the three commands, and the firewall request${R}"
-  blank
-  warn "the SIEM side is not configured yet — it is a different host"
-  say "${DIM}Until that unit is running on ${SIEM_HOST}, 127.0.0.1:${TUNNEL_LOCAL_PORT} here is dead,${R}"
-  say "${DIM}so discovery and the first sync below will be skipped rather than fail.${R}"
-}
-
-port_is_free() {
-  local p="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ! ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
-  else
-    return 0
   fi
 }
 
@@ -1001,12 +321,6 @@ setup_ssh() {
       || die "could not generate an SSH key"
   fi
 
-  # Reverse-tunnel installs reach the SIEM at 127.0.0.1 on the tunnel's port,
-  # and only once the SIEM side is up. Everything below uses the effective
-  # endpoint rather than the SIEM's own address.
-  SIEM_SSH_HOST="${SIEM_SSH_HOST:-$SIEM_HOST}"
-  SIEM_SSH_PORT="${SIEM_SSH_PORT:-$SIEM_PORT}"
-
   blank
   say "${B}Authorise this key on the SIEM${R} (${SIEM_USER}@${SIEM_HOST}):"
   blank
@@ -1018,20 +332,14 @@ setup_ssh() {
     note "${DIM}[dry-run]${R} would offer ssh-copy-id and test the connection"
   elif [[ -n "$UNATTENDED" ]]; then
     note "unattended: assuming the key is already authorised on the SIEM"
-  elif [[ "${BRIDGE_MODE:-none}" == "reverse" ]]; then
-    # There is nothing to copy the key to yet: the only route to the SIEM is a
-    # tunnel the SIEM has not opened. The handover bundle already carries this
-    # public key and the instruction to authorise it.
-    note "reverse tunnel: authorise it on the SIEM using the handover bundle"
-    say "${DIM}  $BASE_DIR/handover/siem-reverse-tunnel/README.txt — step 3${R}"
   elif ask_yn "Try ssh-copy-id now (asks for the SIEM password)?" y; then
-    ssh-copy-id -i "${SSH_KEY}.pub" -p "$SIEM_SSH_PORT" "${SIEM_USER}@${SIEM_SSH_HOST}" 2>&1 | tee -a "$LOGFILE" || \
+    ssh-copy-id -i "${SSH_KEY}.pub" -p "$SIEM_PORT" "${SIEM_USER}@${SIEM_HOST}" 2>&1 | tee -a "$LOGFILE" || \
       warn "ssh-copy-id did not complete — authorise the key manually, then continue"
   else
     say "${DIM}Authorise it manually, then press Enter.${R}"; read -r _ || true
   fi
 
-  SSH_BASE=(ssh -i "$SSH_KEY" -p "$SIEM_SSH_PORT"
+  SSH_BASE=(ssh -i "$SSH_KEY" -p "$SIEM_PORT"
             -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15)
   if (( DRY_RUN )); then note "${DIM}[dry-run]${R} skipping connectivity test"; return 0; fi
   # Co-located: there is no remote SIEM to reach — this host is it. Testing
@@ -1041,17 +349,8 @@ setup_ssh() {
     note "co-located: no SSH to the SIEM needed (this host is the SIEM)"
     return 0
   fi
-  if "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_SSH_HOST}" true 2>>"$LOGFILE"; then
-    ok "SSH to ${SIEM_USER}@${SIEM_SSH_HOST}:${SIEM_SSH_PORT} works"
-    SSH_READY=1
-  elif [[ "${BRIDGE_MODE:-none}" == "reverse" ]]; then
-    # Not a failure: the far end of the tunnel is a change on someone else's
-    # host. Dying here would throw away a correct local install over a step
-    # that is explicitly scheduled to happen later.
-    SSH_READY=0
-    warn "no route to the SIEM yet — the reverse tunnel is not up"
-    say "${DIM}Expected at this point. The install continues; discovery and the first${R}"
-    say "${DIM}sync are skipped, and both pick themselves up once the tunnel is live.${R}"
+  if "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" true 2>>"$LOGFILE"; then
+    ok "SSH to ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT} works"
   else
     die "SSH failed. Authorise the key above on the SIEM and re-run."
   fi
@@ -1065,19 +364,6 @@ discover() {
   # a round trip to ourselves, and fails outright where root@localhost is not
   # permitted. The dashboard needs agents.json to turn agent ids into endpoint
   # names — without it every endpoint displays as a bare IP.
-  # Reverse tunnel not up yet: there is no route to query. Say what is deferred
-  # and how to finish it, rather than failing a step whose precondition is a
-  # change on the customer's SIEM.
-  if [[ "${SSH_READY:-1}" == "0" ]]; then
-    warn "skipping discovery — no route to the SIEM yet"
-    say "${DIM}Once the reverse tunnel is up on ${SIEM_HOST}, run:${R}"
-    say "    ${CYA}sudo $SELF_DIR/install_ueba.sh --dir $BASE_DIR${R}  ${DIM}(re-runs and picks up here)${R}"
-    say "${DIM}The dashboard's agent poller also fills agents.json by itself every 5${R}"
-    say "${DIM}minutes once the tunnel answers, so this is self-healing.${R}"
-    AGENT_COUNT=0
-    return 0
-  fi
-
   if [[ "${CO_LOCATED:-0}" == "1" ]]; then
     if [[ -r "$SIEM_CLIENT_KEYS" ]]; then
       mkdir -p "$BASE_DIR"
@@ -1086,12 +372,12 @@ discover() {
       warn "cannot read $SIEM_CLIENT_KEYS — endpoints will show as IPs until agents.json exists"
       return 0
     fi
-  elif "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_SSH_HOST}" "test -r '$SIEM_CLIENT_KEYS'" 2>>"$LOGFILE"; then
+  elif "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "test -r '$SIEM_CLIENT_KEYS'" 2>>"$LOGFILE"; then
     # Pull the registry and render agents.json. Counting the agents is not
     # enough: the dashboard reads agents.json to turn agent ids into endpoint
     # NAMES, and without it every endpoint at the customer shows as a bare IP.
     mkdir -p "$BASE_DIR"
-    "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_SSH_HOST}" "cat '$SIEM_CLIENT_KEYS'" 2>>"$LOGFILE" \
+    "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "cat '$SIEM_CLIENT_KEYS'" 2>>"$LOGFILE" \
       >"$BASE_DIR/.client.keys.raw" || true
     AGENT_COUNT="$(python3 - "$BASE_DIR/.client.keys.raw" "$BASE_DIR/agents.json" <<'PYEOF'
 import json, os, sys
@@ -1142,15 +428,11 @@ print(', '.join(x['name'] for x in a[:5]) + (' ...' if len(a) > 5 else ''))" 2>/
     warn "cannot read $SIEM_CLIENT_KEYS — endpoint names will be blank until fixed"
   fi
 
-  if "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_SSH_HOST}" "test -d '$SIEM_ENRICHED_DIR'" 2>>"$LOGFILE"; then
+  if "${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "test -d '$SIEM_ENRICHED_DIR'" 2>>"$LOGFILE"; then
     local n sz
-    n="$("${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_SSH_HOST}" "ls -1 '$SIEM_ENRICHED_DIR' 2>/dev/null | wc -l")"
-    sz="$("${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_SSH_HOST}" "du -sh '$SIEM_ENRICHED_DIR' 2>/dev/null | cut -f1")"
+    n="$("${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "ls -1 '$SIEM_ENRICHED_DIR' 2>/dev/null | wc -l")"
+    sz="$("${SSH_BASE[@]}" "${SIEM_USER}@${SIEM_HOST}" "du -sh '$SIEM_ENRICHED_DIR' 2>/dev/null | cut -f1")"
     ok "enriched logs found — ${B}${n}${R} files, ${B}${sz:-?}${R}"
-  elif [[ "${FEED_MODE:-files}" == "kafka" ]]; then
-    # The feed is the topic, not the directory. The directory is only a
-    # reference for backfill, so its absence is a note, not a stop.
-    warn "enriched directory $SIEM_ENRICHED_DIR not found — the feed is Kafka, so this only affects backfill"
   else
     die "enriched directory $SIEM_ENRICHED_DIR not found on the SIEM"
   fi
@@ -1169,23 +451,12 @@ render_config() {
 # Sourced by ueba_sync_bridge.sh and the systemd units.
 UEBA_BASE="$BASE_DIR"
 UEBA_DATA="$DATA_DIR"
-#
-# SOC_HOST/SOC_PORT are the EFFECTIVE endpoint, not the SIEM's own address. On
-# a reverse-tunnel install they are 127.0.0.1 and the tunnel's loopback port,
-# because that is where the SIEM is reachable from this host. The SIEM's real
-# address is recorded below for the record and for the runbook.
-SOC_HOST="${SIEM_USER}@${SIEM_SSH_HOST}"
-SOC_PORT="$SIEM_SSH_PORT"
+SOC_HOST="${SIEM_USER}@${SIEM_HOST}"
+SOC_PORT="$SIEM_PORT"
 SOC_SSH_KEY="$SSH_KEY"
 SOC_ENRICHED_DIR="$SIEM_ENRICHED_DIR"
 SOC_CLIENT_KEYS="$SIEM_CLIENT_KEYS"
 UEBA_SELF_IP="$SELF_IP"
-UEBA_HOST_ADDR="$UEBA_HOST"
-UEBA_DASH_PORT="$DASH_PORT"
-SIEM_ADDR="$SIEM_HOST"
-SIEM_SSH_PORT_REAL="$SIEM_PORT"
-UEBA_BRIDGE_MODE="${BRIDGE_MODE:-none}"
-UEBA_FEED_MODE="${FEED_MODE:-files}"
 EOF
   chmod 600 "$BASE_DIR/ueba_site.env"
   ok "wrote ueba_site.env"
@@ -1241,11 +512,8 @@ APYEOF
       ok "agent discovery will read the registry locally"
     fi
 
-    # Switch the engine off file-tailing and onto the topic. Keyed on the FEED,
-    # not on the topology: a separate host consuming the broker through an SSH
-    # local-forward wants exactly the same config, with brokers pointed at the
-    # forwarded loopback port instead of the SIEM's own.
-    if [[ "${FEED_MODE:-files}" == "kafka" ]]; then
+    # Co-located: switch the engine off file-tailing and onto the topic.
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
       python3 - "$BASE_DIR/ueba_config.yaml" \
         "$KAFKA_BROKERS" "$KAFKA_TOPIC" "$KAFKA_GROUP" >>"$LOGFILE" 2>&1 <<'KPYEOF'
 import re, sys
@@ -1303,13 +571,7 @@ PYEOF
     # Point the dashboard's agent poller at this customer's SIEM and switch it
     # on, so endpoints enrolled after install pick up their names automatically
     # instead of needing a re-install.
-    # Skipped when co-located: the local-mode block written above already tells
-    # the poller to read the registry with a local command, and this one would
-    # replace it with an SSH poll to localhost — which fails wherever
-    # root@localhost is not permitted, leaving endpoints as bare IPs with
-    # nothing in the UI to explain why.
-    if [[ "${CO_LOCATED:-0}" != "1" ]]; then
-    python3 - "$BASE_DIR/ueba_config.yaml" "${SIEM_USER}@${SIEM_SSH_HOST}" "$SIEM_SSH_PORT" \
+    python3 - "$BASE_DIR/ueba_config.yaml" "${SIEM_USER}@${SIEM_HOST}" "$SIEM_PORT" \
              "$SSH_KEY" "$SIEM_CLIENT_KEYS" >>"$LOGFILE" 2>&1 <<'PYEOF'
 import re, sys
 cfg, host, port, key, keys_path = sys.argv[1:6]
@@ -1329,7 +591,6 @@ text = pat.sub(block, text) if pat.search(text) else \
 open(cfg, "w", encoding="utf-8").write(text)
 print("agent_sync enabled")
 PYEOF
-    fi
     ok "rendered ueba_config.yaml for this site"
   else
     warn "template ueba_config.yaml not found beside the installer"
@@ -1347,18 +608,11 @@ PYEOF
            ueba_source.py ueba_identity.py ueba_watchlist.py ueba_notify.py \
            ueba_nicknames.py ueba_egress.py ueba_risk_history.py \
            ueba_privilege.py ueba_assets.py build_faiss_seed.py \
-           ueba_reports.py ueba_report_render.py ueba_report_store.py ueba_mailer.py \
+           ueba_reports.py ueba_report_render.py ueba_report_store.py \
            ueba_housekeeping.py ueba_prune_corpus.py identity_diag.py \
            enrich_parallel.py retrain.py requirements.txt \
            ueba_sync_bridge.sh ueba_rotate.sh ueba_weekly_retrain.sh \
-           ueba_bootstrap_training.sh \
-           ueba-engine-watchdog.sh pipeline_status.sh preflight_probe.sh \
-           check_dependencies.sh; do
-    # check_dependencies.sh travels with the install, not just with the media:
-    # after the venv exists it is the verifier for it —
-    #     /opt/ueba/check_dependencies.sh --venv /opt/ueba/venv --strict
-    # which is the one command that proves every declared requirement is
-    # present at a version it is allowed to be.
+           ueba_bootstrap_training.sh; do
     [[ -f "$SELF_DIR/$f" ]] && cp "$SELF_DIR/$f" "$BASE_DIR/$f"
   done
   [[ -d "$SELF_DIR/ueba_models" ]] && cp -r "$SELF_DIR/ueba_models" "$BASE_DIR/"
@@ -1435,12 +689,10 @@ EOF
 install_units() {
   local py="$BASE_DIR/venv/bin/python3"
 
-  # A Kafka feed has no bridge: the engine reads the topic, so a sync bridge
-  # would be a second copy of data the engine is already consuming. That is
-  # true of a co-located install and equally true of a separate install reading
-  # the broker through the forward tunnel.
+  # Co-located installs have no bridge: the engine reads Kafka directly, so a
+  # sync bridge would be a second copy of data already on this disk.
   local services="engine dashboard bridge"
-  if [[ "${FEED_MODE:-files}" == "kafka" ]]; then
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
     services="engine dashboard"
     rm -f /etc/systemd/system/ueba-bridge.service
   fi
@@ -1565,7 +817,7 @@ EOF
 bring_up() {
   step "Bring-up"
   if (( DRY_RUN )); then
-    if [[ "${FEED_MODE:-files}" == "kafka" ]]; then
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
       note "${DIM}[dry-run]${R} would: start dashboard + engine (no bridge; engine reads Kafka)"
     else
       note "${DIM}[dry-run]${R} would: start ueba-bridge, optionally train, start dashboard + engine"
@@ -1573,21 +825,12 @@ bring_up() {
     return 0
   fi
 
-  # The forward tunnel carries the feed, so it comes up before anything that
-  # depends on it.
-  if [[ -f /etc/systemd/system/ueba-tunnel.service ]]; then
-    spin "starting the Kafka forward tunnel" systemctl enable --now ueba-tunnel \
-      || warn "ueba-tunnel did not start — the engine will have no source until it does"
-  fi
-
-  if [[ "${FEED_MODE:-files}" == "kafka" ]]; then
-    say "  ${DIM}feed is the Kafka topic — no sync bridge (it would duplicate data)${R}"
-  elif [[ "${SSH_READY:-1}" == "0" ]]; then
-    warn "not starting the sync bridge — there is no route to the SIEM yet"
-    say "${DIM}Start it once the reverse tunnel is up on ${SIEM_HOST}:${R}"
-    say "    ${CYA}systemctl enable --now ueba-bridge${R}"
-  elif ask_yn "Pull an initial batch of logs from the SIEM now?" y; then
-    spin "starting sync bridge" systemctl enable --now ueba-bridge || warn "bridge did not start"
+  if ask_yn "Pull an initial batch of logs from the SIEM now?" y; then
+    if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+      say "  ${DIM}co-located: no sync bridge (engine reads Kafka directly)${R}"
+    else
+      spin "starting sync bridge" systemctl enable --now ueba-bridge || warn "bridge did not start"
+    fi
   fi
 
   blank
@@ -1652,46 +895,24 @@ summary() {
   fi
   say "${B}Install dir${R}  $BASE_DIR"
   say "${B}Data dir${R}     $DATA_DIR"
-  say "${B}SIEM${R}         ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT}"
   if [[ "${CO_LOCATED:-0}" == "1" ]]; then
-    say "${B}Topology${R}     same server as the SIEM ${GRY}(derived from the addresses given)${R}"
+    say "${B}Source${R}       kafka ${KAFKA_BROKERS}/${KAFKA_TOPIC} as group ${KAFKA_GROUP}"
   else
-    say "${B}Topology${R}     separate servers — bridge transport: ${B}${BRIDGE_MODE:-direct}${R}"
-    [[ "${BRIDGE_MODE:-}" == "reverse" ]] && \
-      say "${B}Tunnel${R}       SIEM → ${UEBA_HOST}:${TUNNEL_SSHD_PORT}, appears here as 127.0.0.1:${TUNNEL_LOCAL_PORT}"
-  fi
-  if [[ "${FEED_MODE:-files}" == "kafka" ]]; then
-    say "${B}Feed${R}         kafka ${KAFKA_BROKERS}/${KAFKA_TOPIC} as group ${KAFKA_GROUP}"
-  else
-    say "${B}Feed${R}         rotated enriched chunks over SSH ${GRY}(ueba-bridge)${R}"
+    say "${B}SIEM${R}         ${SIEM_USER}@${SIEM_HOST}:${SIEM_PORT}"
   fi
   [[ -n "${AGENT_COUNT:-}" ]] && say "${B}Endpoints${R}    ${AGENT_COUNT} discovered"
   blank
   rule
   say "${B}Service control${R}"
-  local units="ueba-engine ueba-dashboard"
-  [[ "${FEED_MODE:-files}" == "files" ]] && units+=" ueba-bridge"
-  [[ -f /etc/systemd/system/ueba-tunnel.service ]] && units+=" ueba-tunnel"
-  [[ "${BRIDGE_MODE:-}" == "reverse" ]] && units+=" sshd-ueba-tunnel"
-  say "  systemctl status $units"
-  say "  journalctl -u ueba-engine -f"
-
-  # The one outstanding action, printed where it cannot be missed: a
-  # reverse-tunnel install is not finished until a change lands on the SIEM.
-  if [[ "${BRIDGE_MODE:-}" == "reverse" ]]; then
-    blank
-    rule
-    say "${B}${YEL}Outstanding — the SIEM side${R}"
-    say "  Nothing flows until the tunnel unit is running on ${B}${SIEM_HOST}${R}."
-    say "  Hand this bundle to whoever owns that host:"
-    say "    ${CYA}$BASE_DIR/handover/siem-reverse-tunnel/${R}"
-    say "  ${DIM}It contains the key, the systemd unit, the three commands and the${R}"
-    say "  ${DIM}firewall request (outbound SIEM → ${UEBA_HOST}:${TUNNEL_SSHD_PORT}, nothing inbound).${R}"
-    say "  Then, back here:  ${CYA}systemctl enable --now ueba-bridge${R}"
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
+    say "  systemctl status ueba-engine ueba-dashboard"
+  else
+    say "  systemctl status ueba-engine ueba-dashboard ueba-bridge"
   fi
+  say "  journalctl -u ueba-engine -f"
   blank
   say "${B}Next${R}"
-  if [[ "${FEED_MODE:-files}" == "kafka" ]]; then
+  if [[ "${CO_LOCATED:-0}" == "1" ]]; then
     # No bridge to wait on: events arrive from Kafka the moment the engine
     # starts. What there is to wait for is enough history to train on.
     say "  1. Confirm intake:  docker exec siem-kafka kafka-consumer-groups \\"
@@ -1705,11 +926,6 @@ summary() {
   fi
   blank
   say "${DIM}Install log: $LOGFILE${R}"
-  # Both of these are acceptance evidence: the stage-1 report is what shows the
-  # host met its prerequisites at install time, and it is a file, not a scroll
-  # of terminal output someone has to remember to copy.
-  [[ -n "${DEPCHECK_REPORT:-}" ]] && say "${DIM}Dependency report: $DEPCHECK_REPORT${R}"
-  say "${DIM}Re-verify the venv any time: $BASE_DIR/check_dependencies.sh --venv $BASE_DIR/venv --strict${R}"
   blank
 }
 
@@ -1718,47 +934,21 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)    DRY_RUN=1; shift ;;
     --unattended) UNATTENDED="${2:-}"; [[ -f "$UNATTENDED" ]] && . "$UNATTENDED"; shift 2 ;;
-    # The install directory, named on the command line. Recorded in PRESET so
-    # collect_local states it instead of offering to change it.
-    --dir|--install-dir)
-                  BASE_DIR="${2:?--dir needs an absolute path}"
-                  PRESET[BASE_DIR]=1; shift 2 ;;
-    --data-dir)   DATA_DIR="${2:?--data-dir needs an absolute path}"
-                  PRESET[DATA_DIR]=1; shift 2 ;;
-    --siem)       _v="${2:?--siem needs host[:port]}"
-                  if [[ "$_v" == *:* ]]; then SIEM_HOST="${_v%:*}"; SIEM_PORT="${_v##*:}"
-                  else SIEM_HOST="$_v"; fi
-                  PRESET[SIEM_HOST]=1; shift 2 ;;
-    --dash)       _v="${2:?--dash needs addr[:port]}"
-                  if [[ "$_v" == *:* ]]; then UEBA_HOST="${_v%:*}"; DASH_PORT="${_v##*:}"
-                  else UEBA_HOST="$_v"; fi
-                  PRESET[UEBA_HOST]=1; PRESET[DASH_PORT]=1; shift 2 ;;
-    --bridge)     BRIDGE_MODE_PRESET="${2:?--bridge needs direct|reverse}"; shift 2 ;;
-    --wheelhouse) WHEELHOUSE="${2:?--wheelhouse needs a directory}"; shift 2 ;;
-    --skip-depcheck) SKIP_DEPCHECK=1; shift ;;
-    -h|--help)    sed -n '2,41p' "$0"; exit 0 ;;
-    *) echo "unknown option: $1" >&2; echo "try --help" >&2; exit 2 ;;
+    -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
-done
-
-# An absolute path is a precondition of everything downstream, and finding out
-# at mkdir time produces a half-made tree relative to the current directory.
-for _d in BASE_DIR DATA_DIR; do
-  [[ -n "${!_d:-}" && "${!_d}" != /* ]] && { echo "$_d must be an absolute path: ${!_d}" >&2; exit 2; }
 done
 
 banner
 (( DRY_RUN )) && { warn "DRY RUN — nothing will be changed"; blank; }
 say "${DIM}Logging to $LOGFILE${R}"
 
-preflight           # 1  dependencies (stage 1)
-collect_endpoints   # 2  SIEM + UEBA addresses, topology derived from them
-collect_site        # 3  client, feed source, SIEM paths
-collect_local       # 4  install dir, data dir, caps
-configure_bridge    # 5  transport: none / direct / reverse tunnel
-setup_ssh           # 6
-discover            # 7
-render_config       # 8
-setup_runtime       # 9
-bring_up            # 10
+preflight
+collect_site
+collect_local
+setup_ssh
+discover
+render_config
+setup_runtime
+bring_up
 summary
