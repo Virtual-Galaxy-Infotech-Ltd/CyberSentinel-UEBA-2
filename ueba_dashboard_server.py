@@ -28,6 +28,7 @@ import os
 import math
 import re
 import sqlite3
+import sys
 import time
 import uuid
 import zipfile
@@ -1876,8 +1877,17 @@ def _warm_results_loop() -> None:
         try:
             time.sleep(_WARM_TICK)
             now = time.time()
-            active = {w for w, seen in list(_active_windows.items())
-                      if (now - seen) < _ACTIVE_WINDOW_TTL}
+            # Expired entries are DELETED, not merely filtered out. Every
+            # distinct ?hours= an analyst ever requests adds a key here and
+            # nothing removed it, so the dict grew for the life of the
+            # process. Small per entry, but it also meant the warmer's
+            # bookkeeping never shrank back after a wide ad-hoc window.
+            active = set()
+            for w, seen in list(_active_windows.items()):
+                if (now - seen) < _ACTIVE_WINDOW_TTL:
+                    active.add(w)
+                else:
+                    _active_windows.pop(w, None)
             windows = list(active)
             # Always keep the fixed timeline windows hot, even when idle, so
             # switching between them never pays a cold build — but refresh the
@@ -7173,6 +7183,210 @@ def compliance_residency():
     return jsonify(_residency_facts())
 
 
+# ── Memory diagnostics ──────────────────────────────────────────────────────
+#
+# WHY THIS EXISTS
+#
+# ueba-dashboard was OOM-killed on 17-Nov-2026 against MemoryMax=3G, having
+# peaked at 3.056 GB. Steady state measured 2.53 GB, which is 83% of the cap,
+# so there was no headroom for a transient. The obvious suspect was
+# _archive_cache, but measuring it put it at only ~0.75 GB (232,373 slim
+# alerts at ~3.2 KB each), leaving most of the process unattributed.
+#
+# Guessing at the rest would mean changing the hottest path in the dashboard
+# on a hunch, and the comments around _window_cache record what that costs:
+# wide windows once took 13-60s per endpoint. So this reports what each cache
+# actually holds, and the fix comes after the number.
+#
+# Sizes are SAMPLED, not walked: deep-sizing 230k dicts allocates a large
+# visited set and takes seconds, which is not something a diagnostic should do
+# to a live service. Sampling a few entries and multiplying is accurate enough
+# to attribute GBs and cheap enough to be safe.
+
+_DIAG_SAMPLE = 25
+
+
+def _deep_size(o, seen=None, depth=0):
+    """Approximate retained size of a nested structure, following dicts/lists."""
+    if seen is None:
+        seen = set()
+    i = id(o)
+    if i in seen or depth > 12:
+        return 0
+    seen.add(i)
+    try:
+        size = sys.getsizeof(o)
+    except Exception:
+        return 0
+    if isinstance(o, dict):
+        for k, v in list(o.items()):
+            size += _deep_size(k, seen, depth + 1) + _deep_size(v, seen, depth + 1)
+    elif isinstance(o, (list, tuple, set, frozenset)):
+        for v in list(o):
+            size += _deep_size(v, seen, depth + 1)
+    return size
+
+
+def _sampled_bytes(items: list) -> int:
+    """Estimate the total retained bytes of `items` from a sample of them."""
+    n = len(items)
+    if not n:
+        return 0
+    step = max(1, n // _DIAG_SAMPLE)
+    sample = items[::step][:_DIAG_SAMPLE]
+    if not sample:
+        return 0
+    per = _deep_size(sample) / len(sample)
+    return int(per * n)
+
+
+def _rss_bytes() -> int:
+    try:
+        with open("/proc/self/statm") as fh:
+            return int(fh.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except Exception:
+        return 0
+
+
+def _cache_report() -> dict:
+    """Per-cache entry counts and estimated retained bytes."""
+    out: dict = {}
+
+    # Deliberately WITHOUT _archive_lock / _window_cache_lock.
+    #
+    # The window build holds _window_cache_lock for the whole build on purpose
+    # (callers should wait rather than pile up), and a wide window takes ~16s.
+    # The first version of this report took those locks for consistency and
+    # was still blocked five minutes after a restart — a diagnostic that waits
+    # on the hot path is worse than one that is slightly stale, and it would
+    # have added its own latency to every analyst request behind the lock.
+    #
+    # dict.items() is snapshotted into a list in one bytecode step, so the
+    # worst case here is a torn count: a file that arrives or leaves mid-read.
+    # For attributing gigabytes that does not matter.
+    arch_alerts = 0
+    arch_bytes = 0
+    entries = list(_archive_cache.items())
+    for _path, (_mtime, alerts) in entries:
+        arch_alerts += len(alerts)
+        arch_bytes += _sampled_bytes(alerts)
+    out["archive_cache"] = {"files": len(entries), "alerts": arch_alerts,
+                            "est_bytes": arch_bytes}
+
+    wins = list(_window_cache.items())
+    # The lists hold REFERENCES to alerts already counted under archive_cache,
+    # so only the pointer arrays are charged here — counting the alerts again
+    # would double-count the same objects and overstate the total.
+    out["window_cache"] = {
+        "windows": len(wins),
+        "rows": sum(len(v[1]) for v in wins),
+        "est_bytes": sum(sys.getsizeof(v[1]) for v in wins),
+        "hours": sorted(k for k, _ in wins),
+    }
+
+    # NOT deep-sized, deliberately.
+    #
+    # The first version called _deep_size on these values and never returned.
+    # A single cached "feed" result holds thousands of alert objects, so
+    # walking 25 of them is tens of millions of getsizeof calls, and the
+    # visited-id set it builds is itself hundreds of megabytes — on a host
+    # with 856 MB free, a memory diagnostic that allocates that much to
+    # measure memory is worse than no diagnostic at all.
+    #
+    # Structure counts instead: entries, and how many rows each holds. Cheap,
+    # bounded, and enough to show whether the result cache is where the
+    # gigabytes went.
+    res = list(_result_cache.items())
+    rows = {}
+    for k, v in res:
+        val = v[1]
+        n = None
+        if isinstance(val, list):
+            n = len(val)
+        elif isinstance(val, dict):
+            n = sum(len(x) for x in val.values() if isinstance(x, (list, dict)))
+        if n:
+            rows["%s/%s/%s" % k] = n
+    out["result_cache"] = {
+        "entries": len(res),
+        "est_bytes": 0,          # not measured; see the note above
+        "rows_by_key": dict(sorted(rows.items(), key=lambda kv: -kv[1])[:12]),
+        "total_rows": sum(rows.values()),
+    }
+
+    out["active_windows"] = {"entries": len(_active_windows)}
+    out["misc"] = {
+        "geo_cache": len(_geo_cache),
+        "geofeed_cache": len(_geofeed_cache),
+        "static_gzip_cache": len(_static_gzip_cache),
+        "window_build_secs": {str(k): round(v, 1)
+                              for k, v in sorted(_window_build_secs.items())},
+    }
+
+    # result_cache is counted in rows, not bytes, so it is NOT in `attributed`
+    # and lands in `unattributed` instead. Said plainly because a total that
+    # silently omits a cache reads as "the memory is elsewhere" when it is not.
+    attributed = (out["archive_cache"]["est_bytes"]
+                  + out["window_cache"]["est_bytes"])
+    rss = _rss_bytes()
+    out["totals"] = {
+        "rss_bytes": rss,
+        "rss_mb": round(rss / 1048576, 1),
+        "attributed_bytes": attributed,
+        "attributed_mb": round(attributed / 1048576, 1),
+        # Interpreter, imported modules, Flask, thread stacks and the per-alert
+        # "__ts"/"__user" memos land here. A large unattributed figure is
+        # itself the finding: it says the caches are not where the memory went.
+        "unattributed_mb": round(max(rss - attributed, 0) / 1048576, 1),
+    }
+    return out
+
+
+_MEM_LOG_EVERY = 900.0          # seconds between memory attribution log lines
+
+
+def _mem_log_loop() -> None:
+    """Log the cache attribution periodically.
+
+    The /api/diagnostics/memory route is correctly gated behind users.manage,
+    which means the figure is not reachable from a terminal during an
+    incident. Logging it costs nothing, needs no session, and gives the
+    capacity model something to read back over time — which SN 31 asks for
+    and which nothing currently records.
+    """
+    # First line early, so a restart reports its settled footprint within
+    # minutes rather than after a quarter of an hour.
+    delay = 180.0
+    while True:
+        try:
+            time.sleep(delay)
+            delay = _MEM_LOG_EVERY
+            m = _cache_report()
+            t = m["totals"]
+            print("[dashboard] memory: rss=%.0fMB attributed=%.0fMB "
+                  "unattributed=%.0fMB | archive=%.0fMB(%d files, %d alerts) "
+                  "results=%d entries/%s rows windows=%d active=%d"
+                  % (t["rss_mb"], t["attributed_mb"], t["unattributed_mb"],
+                     m["archive_cache"]["est_bytes"] / 1048576,
+                     m["archive_cache"]["files"], m["archive_cache"]["alerts"],
+                     m["result_cache"]["entries"],
+                     format(m["result_cache"]["total_rows"], ","),
+                     m["window_cache"]["windows"],
+                     m["active_windows"]["entries"]), flush=True)
+        except Exception as e:
+            print("[dashboard] memory report failed: %s" % e, flush=True)
+
+
+@app.route("/api/diagnostics/memory")
+@_require_cap("users.manage")
+def api_diag_memory():
+    """Attribute the dashboard's resident memory across its caches."""
+    try:
+        return jsonify({"ok": True, "memory": _cache_report()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/health")
 def health():
     """Engine + dashboard health snapshot for the Overview health card."""
@@ -7921,6 +8135,7 @@ def _warm_archive_cache() -> None:
 def _start_archive_warm_thread() -> None:
     import threading
     threading.Thread(target=_warm_archive_cache, name="archive-warm", daemon=True).start()
+    threading.Thread(target=_mem_log_loop, name="mem-log", daemon=True).start()
 
 
 def _start_result_warm_thread() -> None:
