@@ -103,27 +103,27 @@
       </span>
     </button>
     <nav class="side-nav" aria-label="Primary">
-      <div class="tab active" data-tab="overview"        title="Overview">
+      <div class="tab active" data-tab="overview"        data-panel-id="tab-overview"        title="Overview">
         <span class="tab-icon" aria-hidden="true">▚</span><span class="tab-label">Overview</span></div>
-      <div class="tab" data-tab="incidents"              title="Incidents">
+      <div class="tab" data-tab="incidents"              data-panel-id="tab-incidents"       title="Incidents">
         <span class="tab-icon" aria-hidden="true">⚠</span><span class="tab-label">Incidents</span><span class="nav-pill" id="inc-badge">0</span></div>
-      <div class="tab" data-tab="feed"                   title="Alert Feed">
+      <div class="tab" data-tab="feed"                   data-panel-id="tab-feed"            title="Alert Feed">
         <span class="tab-icon" aria-hidden="true">≣</span><span class="tab-label">Alert Feed</span></div>
-      <div class="tab" data-tab="users"                  title="User Risk">
+      <div class="tab" data-tab="users"                  data-panel-id="tab-users"           title="User Risk">
         <span class="tab-icon" aria-hidden="true">⦿</span><span class="tab-label">User Risk</span></div>
-      <div class="tab" data-tab="campaigns"              title="Campaigns">
+      <div class="tab" data-tab="campaigns"              data-panel-id="tab-campaigns"       title="Campaigns">
         <span class="tab-icon" aria-hidden="true">⧉</span><span class="tab-label">Campaigns</span></div>
-      <div class="tab" data-tab="endpoints"              title="Endpoints">
+      <div class="tab" data-tab="endpoints"              data-panel-id="tab-endpoints"       title="Endpoints">
         <span class="tab-icon" aria-hidden="true">◫</span><span class="tab-label">Endpoints</span></div>
-      <div class="tab" data-tab="false-positives"        title="False Positives">
+      <div class="tab" data-tab="false-positives"        data-panel-id="tab-false-positives" title="False Positives">
         <span class="tab-icon" aria-hidden="true">⚑</span><span class="tab-label">False Positives</span><span class="nav-pill" id="fp-nav-badge">0</span></div>
-      <div class="tab" data-tab="alerting" data-cap="notify.edit"               title="Alerting">
+      <div class="tab" data-tab="alerting" data-cap="notify.edit" data-panel-id="tab-alerting" title="Alerting">
         <span class="tab-icon" aria-hidden="true">◈</span><span class="tab-label">Alerting</span><span class="nav-pill" id="ntf-nav-badge">0</span></div>
-      <div class="tab" data-tab="reports"                title="Reports">
+      <div class="tab" data-tab="reports"                data-panel-id="tab-reports"         title="Reports">
         <span class="tab-icon" aria-hidden="true">▤</span><span class="tab-label">Reports</span></div>
-      <div class="tab" data-tab="watchlist"              title="Watch List">
+      <div class="tab" data-tab="watchlist"              data-panel-id="tab-watchlist"       title="Watch List">
         <span class="tab-icon" aria-hidden="true">◎</span><span class="tab-label">Watch List</span><span class="nav-pill" id="wl-nav-badge">0</span></div>
-      <div class="tab" data-tab="threatmap"              title="Threat Map">
+      <div class="tab" data-tab="threatmap"              data-panel-id="tab-threatmap"       title="Threat Map">
         <span class="tab-icon" aria-hidden="true">◍</span><span class="tab-label">Threat Map</span><span class="tm-live-pill">● LIVE</span></div>
     </nav>
   </aside>
@@ -143,6 +143,7 @@
         <button class="tl-btn active" data-hours="0">ALL</button>
         <span class="tl-showing" id="tl-showing"></span>
       </div>
+      <button id="customise-btn" class="customise-btn" title="Customise which panels are visible and their order">⚙ Customise</button>
     </div>
 
 <main>
@@ -151,6 +152,7 @@
   <div class="page active" id="page-overview">
 
     <!-- ══ ROW A: Unified Alert Metrics Banner ══ -->
+    <div data-panel-id="ov-banner">
     <div class="unified-banner-header">
       <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
         <path d="M11 2L3 5.5V10C3 14 6.5 17.7 11 19C15.5 17.7 19 14 19 10V5.5L11 2Z" stroke="#9b5de5" stroke-width="1.5" fill="none"/>
@@ -216,12 +218,13 @@
         <div class="reasons-list" id="reasons-list"></div>
       </div>
     </div>
+    </div><!-- /ov-banner -->
 
     <!-- ══ ROW B: Risk Gauge + Radar + Timeline (3-col) ══ -->
-    <div class="row-gauge-radar-timeline">
+    <div class="row-gauge-radar-timeline" data-panel-id="ov-row-gauge">
 
       <!-- Gauge Panel -->
-      <div class="panel" style="display:flex;flex-direction:column;">
+      <div class="panel" data-panel-id="ov-gauge" style="display:flex;flex-direction:column;">
         <div class="panel-header">
           <span class="panel-title">⬡ Behavioural Risk Meter</span>
           <span id="risk-gauge-agent-label" style="font-family:var(--mono2);font-size:11.5px;color:var(--accent);letter-spacing:1px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);padding:1px 6px;line-height:1.35;border-radius:3px;">GLOBAL</span>
@@ -280,7 +283,7 @@
       </div>
 
       <!-- Radar Panel -->
-      <div class="panel" style="display:flex;flex-direction:column;">
+      <div class="panel" data-panel-id="ov-radar" style="display:flex;flex-direction:column;">
         <div class="panel-header"><span class="panel-title">⬡ Security Activity Pattern</span></div>
         <div style="padding:8px;display:flex;align-items:center;justify-content:center;flex:1;min-height:clamp(150px,calc(20 * var(--svh)),250px);overflow:visible;">
           <canvas id="radar-chart" style="width:100%;height:100%;display:block;"></canvas>
@@ -288,7 +291,7 @@
       </div>
 
       <!-- Timeline Panel -->
-      <div class="panel" style="display:flex;flex-direction:column;">
+      <div class="panel" data-panel-id="ov-timeline" style="display:flex;flex-direction:column;">
         <div class="panel-header">
           <span class="panel-title">↗ Alert Timeline</span>
           <span class="panel-badge" id="timeline-range">Loading...</span>
@@ -300,8 +303,8 @@
     </div>
 
     <!-- ══ ROW C: Recent Alerts + Top Risk Users + Endpoints ══ -->
-    <div class="overview-3col">
-      <div class="panel">
+    <div class="overview-3col" data-panel-id="ov-row-recent">
+      <div class="panel" data-panel-id="ov-recent-alerts">
         <div class="panel-header">
           <div class="panel-header-left">
             <span class="panel-title">Recent Alerts</span>
@@ -330,7 +333,7 @@
           </table>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel" data-panel-id="ov-top-users">
         <div class="panel-header">
           <div class="panel-header-left">
             <span class="panel-title">Top Risk Users</span>
@@ -349,7 +352,7 @@
         </div>
         <div id="overview-users"></div>
       </div>
-      <div class="panel">
+      <div class="panel" data-panel-id="ov-endpoints-widget">
         <div class="panel-header">
           <div class="panel-header-left">
             <span class="panel-title">Endpoints</span>
@@ -371,9 +374,9 @@
     </div>
 
     <!-- ══ ROW D: Score Distribution + Hourly Activity Heatmap ══ -->
-    <div class="row-dist-heatmap">
+    <div class="row-dist-heatmap" data-panel-id="ov-row-dist">
       <!-- Score Distribution histogram -->
-      <div class="panel">
+      <div class="panel" data-panel-id="ov-score-dist">
         <div class="panel-header">
           <span class="panel-title">⬡ Alert Score Distribution</span>
           <span class="panel-badge" id="score-dist-badge">0</span>
@@ -383,7 +386,7 @@
         </div>
       </div>
       <!-- Hourly activity heatmap -->
-      <div class="panel">
+      <div class="panel" data-panel-id="ov-heatmap">
         <div class="panel-header">
           <span class="panel-title">⬡ Hourly Alert Heatmap</span>
           <span style="font-family:var(--mono2);font-size:12.5px;color:var(--text3);">Alert density by day × hour</span>
@@ -395,7 +398,7 @@
     </div>
 
     <!-- ══ ROW E: AI Security Analyst ══ -->
-    <div class="panel" id="ai-analyst-panel" style="margin-bottom:12px;">
+    <div class="panel" id="ai-analyst-panel" data-panel-id="ov-ai-analyst" style="margin-bottom:12px;">
       <div class="panel-header">
         <div style="display:flex;align-items:center;gap:10px;">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -413,8 +416,8 @@
     </div>
 
     <!-- ══ ROW E: TOP SIGNATURES + RECOMMENDED ACTIONS ══ -->
-    <div class="row-sigs-actions">
-      <div class="panel">
+    <div class="row-sigs-actions" data-panel-id="ov-row-sigs">
+      <div class="panel" data-panel-id="ov-top-sigs">
         <div class="panel-header">
           <span class="panel-title">⬦ Top Rule Descriptions</span>
           <span class="panel-badge" id="top-sigs-badge">0</span>
@@ -423,7 +426,7 @@
           <div class="loading"><div class="spinner"></div></div>
         </div>
       </div>
-      <div class="panel" id="rec-actions-panel">
+      <div class="panel" id="rec-actions-panel" data-panel-id="ov-rec-actions">
         <div class="panel-header">
           <div style="display:flex;align-items:center;gap:8px;">
             <span style="color:var(--yellow);">⚠</span>
@@ -438,8 +441,8 @@
     </div>
 
     <!-- ══ ROW F: MITRE ATT&CK Coverage + Engine Health ══ -->
-    <div class="row-mitre-health">
-      <div class="panel">
+    <div class="row-mitre-health" data-panel-id="ov-row-mitre">
+      <div class="panel" data-panel-id="ov-mitre">
         <div class="panel-header">
           <div class="panel-header-left">
             <span class="panel-title">⌬ MITRE ATT&amp;CK Coverage</span>
@@ -459,7 +462,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" data-panel-id="ov-health">
         <div class="panel-header">
           <div class="panel-header-left">
             <span class="panel-title">◉ Engine Health</span>
@@ -587,6 +590,12 @@
         <span class="panel-title">User Risk Leaderboard</span>
         <span class="panel-badge" id="users-badge">0</span>
       </div>
+      <div class="panel-search">
+        <div class="psearch-wrap">
+          <input id="ur-search" type="text" class="psearch-input" placeholder="Search users…" autocomplete="off" spellcheck="false"/>
+          <div id="ur-suggestions" class="psearch-dropdown" hidden></div>
+        </div>
+      </div>
       <div class="leaderboard">
         <div class="user-row header-row">
           <span>#</span><span>User</span><span>Risk Index</span>
@@ -639,6 +648,12 @@
           <span class="panel-title">Endpoints</span>
           <span class="panel-badge" id="agents-badge">0</span>
         </div>
+        <div class="panel-search">
+          <div class="psearch-wrap">
+            <input id="ep-search" type="text" class="psearch-input" placeholder="Search endpoints, IPs…" autocomplete="off" spellcheck="false"/>
+            <div id="ep-suggestions" class="psearch-dropdown" hidden></div>
+          </div>
+        </div>
         <div id="agents-list"></div>
       </div>
       <div class="panel">
@@ -664,7 +679,7 @@
   <div class="page" id="page-false-positives">
 
     <!-- Pattern FPs — fingerprint-based auto-suppression rules -->
-    <div class="panel">
+    <div class="panel" data-panel-id="fp-patterns">
       <div class="panel-header">
         <div class="panel-header-left">
           <span class="panel-title">⌁ Auto-Suppression Patterns</span>
@@ -693,7 +708,7 @@
     </div>
 
     <!-- Per-event FPs — alerts marked individually -->
-    <div class="panel">
+    <div class="panel" data-panel-id="fp-list">
       <div class="panel-header">
         <div class="panel-header-left">
           <span class="panel-title">⚑ False Positives</span>

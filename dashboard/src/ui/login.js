@@ -124,15 +124,6 @@ function overlay() {
                     aria-label="Show password" title="Show password">${ICON.eye}</button>
           </div>
 
-          <div class="lg-row">
-            <label class="lg-check">
-              <input type="checkbox" id="login-remember"/>
-              <span class="lg-box" aria-hidden="true"></span>
-              <span>Remember me</span>
-            </label>
-            <button type="button" id="login-forgot" class="lg-forgot">Forgot password?</button>
-          </div>
-
           <button id="login-btn" type="submit" class="lg-submit">
             <span class="lg-submit-ico">${ICON.signin}</span>
             <span class="lg-submit-text">Sign in securely</span>
@@ -163,22 +154,6 @@ function overlay() {
     pass.focus();
   });
 
-  el.querySelector("#login-forgot").addEventListener("click", () => {
-    showToast("There is no self-service reset here. Ask an administrator to set a "
-              + "new password from Settings → User Management.", "info");
-  });
-
-  // Pre-fill a remembered username. Only the username is ever stored: a password
-  // in localStorage would be readable by any script running on this origin.
-  try {
-    const saved = localStorage.getItem(REMEMBER_KEY);
-    if (saved) {
-      el.querySelector("#login-user").value = saved;
-      el.querySelector("#login-remember").checked = true;
-      setTimeout(() => el.querySelector("#login-pass").focus(), 0);
-    }
-  } catch (e) { /* storage blocked — just start with an empty form */ }
-
   return el;
 }
 
@@ -187,7 +162,6 @@ async function submit() {
   const p = document.getElementById("login-pass");
   const err = document.getElementById("login-error");
   const btn = document.getElementById("login-btn");
-  const remember = document.getElementById("login-remember");
   const username = (u && u.value || "").trim();
   const password = (p && p.value) || "";
   if (!username || !password) {
@@ -206,10 +180,6 @@ async function submit() {
     });
     const d = await r.json();
     if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
-    try {
-      if (remember && remember.checked) localStorage.setItem(REMEMBER_KEY, username);
-      else localStorage.removeItem(REMEMBER_KEY);
-    } catch (e) { /* storage blocked — the sign-in itself still succeeded */ }
     // Reload rather than patching state in place: capabilities, role chip and
     // every panel's data all have to be re-fetched as the new user, and a reload
     // is the one path guaranteed to leave nothing behind from the signed-out

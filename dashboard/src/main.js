@@ -36,10 +36,14 @@ import {
   saveSchedule, runScheduleNow, deleteSchedule, deleteReport, downloadReportAs,
 } from "./panels/reports.js";
 import { jumpToAlert, toggleEvidence } from "./panels/feed.js";
-import { goToAgent, loadAgentDetail, switchAgentTab, goToFeedWithFilter } from "./panels/agents.js";
+import { goToAgent, loadAgentDetail, switchAgentTab, goToFeedWithFilter, initEndpointSearch } from "./panels/agents.js";
 import { loadUserDetail, closeUserDetail, initUserDetail } from "./panels/user-detail.js";
+import { initUserSearch } from "./panels/users.js";
 import { drawTimeline } from "./charts/timeline.js";
 import { drawRadar } from "./charts/radar.js";
+import { applyDashboardLayout } from "./panels/dashboard-layout.js";
+import { initCustomise } from "./panels/dashboard-customise.js";
+import { fetchDashboardLayout } from "./api.js";
 
 // Submit an FP mark from the form inside an expanded evidence panel.
 function __markFpFromForm(eventId, alertId) {
@@ -164,6 +168,8 @@ initWatchlist();
 initReports();
 initAlerting();
 initUserDetail();
+initEndpointSearch();
+initUserSearch();
 initShortcuts();
 initThreatMap();   // live firewall geoIP globe (lazy — builds on first tab open)
 
@@ -175,6 +181,17 @@ if (fpToggle) {
     fetchAll().catch(() => {});
   });
 }
+
+// ── Initialise dashboard customisation ───────────────────────────────────────
+initCustomise();
+
+// ── Load saved layout before first paint ─────────────────────────────────────
+// If the server has no preference (auth off, new user, or first visit) the
+// function returns null and applyDashboardLayout(null) is a no-op, so the
+// shipped default is preserved exactly as-is.
+fetchDashboardLayout()
+  .then((data) => applyDashboardLayout(data && data.layout ? data.layout : null))
+  .catch(() => { /* non-fatal — ship the default */ });
 
 // ── First paint + initial fetch, then attach the live SSE stream ────────────
 showSkeletons();
