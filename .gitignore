@@ -119,7 +119,20 @@ site/
 dashboard_dist_backup_*/
 
 # ── not source: build output, installed deps, site state and real data ──
-.local-backup-*/       # local pre-change snapshots
-ueba_site.env          # per-site settings, including paths that carry account names
-entities.json          # operator register — site state
-rules.json             # operator rules — site state
+# NOTE: git has no inline comments in .gitignore — a trailing "# ..." becomes
+# part of the pattern. All four entries below carried one, so none of them
+# matched anything, and `git clean -fd` on the deployed host deleted
+# ueba_site.env and ueba_runtime.env: the dashboard then could not load its
+# EnvironmentFiles, restart-looped, and nginx served 502. The only surviving
+# copy of UEBA_SSO_SECRET was the running engine's /proc environ.
+
+# local pre-change snapshots
+.local-backup-*/
+# per-site settings, including paths that carry account names
+ueba_site.env
+# BLAS/torch thread pinning, written by the installer per host
+ueba_runtime.env
+# operator register — site state
+entities.json
+# operator rules — site state
+rules.json
