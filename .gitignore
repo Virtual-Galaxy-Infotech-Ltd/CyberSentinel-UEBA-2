@@ -128,6 +128,17 @@ dashboard_dist_backup_*/
 
 # local pre-change snapshots
 .local-backup-*/
+# on-host rollback snapshots and pre-change copies. These were NOT ignored,
+# so the 18-Nov `git clean -fd` on the deployed host deleted every rollback
+# copy we had — including the ones taken minutes earlier that same day.
+.deploy-rollback/
+.deploy-backup-*/
+.rollback-*/
+.snapshots/
+# reconstructed/clobbered config copies kept beside the live one
+ueba_config.yaml.bak-*
+ueba_config.yaml.pre-*
+ueba_site.env.bak-*
 # per-site settings, including paths that carry account names
 ueba_site.env
 # BLAS/torch thread pinning, written by the installer per host

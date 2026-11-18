@@ -7315,10 +7315,28 @@ def _cache_report() -> dict:
     }
 
     out["active_windows"] = {"entries": len(_active_windows)}
+
+    # The live cache was missing from the first version of this report, which
+    # is why `unattributed` was the largest number in it. It holds slim records
+    # like the archive cache, capped at max_feed_alerts, so it should be small
+    # — but "should be" is what this function exists to stop us saying.
+    live = list(_alert_cache)
+    out["live_cache"] = {"alerts": len(live), "est_bytes": _sampled_bytes(live)}
+
+    # Geolocation results accumulate one entry per distinct external address
+    # seen on the firewall feed, and nothing evicts them. Individually tiny,
+    # unbounded in count.
+    geo = list(_geo_cache.values())
+    out["geo_cache"] = {"entries": len(geo), "est_bytes": _sampled_bytes(geo)}
+    gz = [v for v in _static_gzip_cache.values()]
+    out["static_gzip"] = {
+        "entries": len(gz),
+        "est_bytes": sum(len(v) if isinstance(v, (bytes, bytearray))
+                         else sys.getsizeof(v) for v in gz),
+    }
+
     out["misc"] = {
-        "geo_cache": len(_geo_cache),
         "geofeed_cache": len(_geofeed_cache),
-        "static_gzip_cache": len(_static_gzip_cache),
         "window_build_secs": {str(k): round(v, 1)
                               for k, v in sorted(_window_build_secs.items())},
     }
@@ -7327,7 +7345,10 @@ def _cache_report() -> dict:
     # and lands in `unattributed` instead. Said plainly because a total that
     # silently omits a cache reads as "the memory is elsewhere" when it is not.
     attributed = (out["archive_cache"]["est_bytes"]
-                  + out["window_cache"]["est_bytes"])
+                  + out["window_cache"]["est_bytes"]
+                  + out["live_cache"]["est_bytes"]
+                  + out["geo_cache"]["est_bytes"]
+                  + out["static_gzip"]["est_bytes"])
     rss = _rss_bytes()
     out["totals"] = {
         "rss_bytes": rss,
@@ -7365,14 +7386,20 @@ def _mem_log_loop() -> None:
             t = m["totals"]
             print("[dashboard] memory: rss=%.0fMB attributed=%.0fMB "
                   "unattributed=%.0fMB | archive=%.0fMB(%d files, %d alerts) "
-                  "results=%d entries/%s rows windows=%d active=%d"
+                  "results=%d entries/%s rows windows=%d active=%d "
+                  "live=%.0fMB(%d) geo=%.0fMB(%d) gz=%.0fMB"
                   % (t["rss_mb"], t["attributed_mb"], t["unattributed_mb"],
                      m["archive_cache"]["est_bytes"] / 1048576,
                      m["archive_cache"]["files"], m["archive_cache"]["alerts"],
                      m["result_cache"]["entries"],
                      format(m["result_cache"]["total_rows"], ","),
                      m["window_cache"]["windows"],
-                     m["active_windows"]["entries"]), flush=True)
+                     m["active_windows"]["entries"],
+                     m["live_cache"]["est_bytes"] / 1048576,
+                     m["live_cache"]["alerts"],
+                     m["geo_cache"]["est_bytes"] / 1048576,
+                     m["geo_cache"]["entries"],
+                     m["static_gzip"]["est_bytes"] / 1048576), flush=True)
         except Exception as e:
             print("[dashboard] memory report failed: %s" % e, flush=True)
 
