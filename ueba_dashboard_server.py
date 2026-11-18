@@ -1639,6 +1639,8 @@ def _read_alerts_windowed(hours: int, n: int | None = None) -> list:
     every API caller uses the default (max_alerts), so it never varies."""
     global _last_window_total
 
+    hours = _canonical_hours(hours)
+
     def _fresh():
         hit = _window_cache.get(hours)
         if hit is not None and (time.time() - hit[0]) < _window_ttl(hours):
@@ -1668,16 +1670,26 @@ def _read_alerts_windowed(hours: int, n: int | None = None) -> list:
                         else timedelta(days=history_days))
 
         combined = _read_archived_alerts(cutoff) + _read_live_alerts(n)
-        decorated = []
-        for a in combined:
-            ts = _alert_ts(a)
-            if ts is None or ts >= cutoff:
-                decorated.append((ts or _MIN_DT, a))
-        decorated.sort(key=lambda t: t[0])
-        window_total = len(decorated)
-        if len(decorated) > cap:
-            decorated = decorated[-cap:]
-        result = [a for _, a in decorated]
+        # Sort the alerts themselves rather than building a (timestamp, alert)
+        # pair for each one.
+        #
+        # The pairs existed only to carry the sort key. For the "All" window
+        # that is a tuple per alert — 232k of them on this store — plus the
+        # list holding them, plus a second full list to strip them back off
+        # again afterwards. Three structures the size of the window, built and
+        # discarded on every build, when list.sort(key=...) does the same job
+        # with none of them.
+        #
+        # _alert_ts memoises its result on the alert dict, so using it as the
+        # sort key does not re-parse anything: the filter pass below has
+        # already populated the memo for every record the sort will touch.
+        result = [a for a in combined
+                  if (_alert_ts(a) is None or _alert_ts(a) >= cutoff)]
+        del combined
+        result.sort(key=lambda a: _alert_ts(a) or _MIN_DT)
+        window_total = len(result)
+        if window_total > cap:
+            del result[:window_total - cap]
 
         _set_window_total(window_total)
         _window_build_secs[hours] = time.time() - _build_started
@@ -1804,6 +1816,10 @@ _ACTIVE_WINDOW_TTL = 180.0          # keep warming a window seen within this lon
 # touched for 3 minutes fell out of _active_windows and went cold, so the next
 # click on it paid a full cold aggregation — measured at 6.7s (3D), 11.9s (60D)
 # and 9.1s (90D). Seven windows is a small, fixed set, so just hold them all.
+# 24h, 7d, All, 3d, 30d, 60d, 90d. The wide ones collapse into All via
+# _canonical_hours whenever the archive is shorter than they are, so warming
+# them costs one entry rather than four on a store with less history than
+# history_days.
 _STANDARD_WINDOWS = (24, 168, 0, 72, 720, 1440, 2160)
 _ENDPOINT_BUILDERS: dict = {}       # name -> builder(alerts) -> JSON value
 
@@ -1830,6 +1846,11 @@ def _build_and_store(name: str, builder, hours: int, include_fp: bool):
     """(Re)build one cache entry under its per-key lock and store it. Returns the
     fresh value. If another thread built it while we waited for the lock, reuse
     that instead of rebuilding."""
+    # Canonicalised here too, not only in _endpoint_result: the warmer calls
+    # this directly for every entry in _STANDARD_WINDOWS, so without it the
+    # background warm would keep recreating the four duplicate wide windows
+    # that _canonical_hours exists to collapse.
+    hours = _canonical_hours(hours)
     key = (name, hours, include_fp)
     with _build_lock_for(key):
         hit = _result_cache.get(key)
@@ -1841,12 +1862,68 @@ def _build_and_store(name: str, builder, hours: int, include_fp: bool):
         return value
 
 
+_data_span = {"at": 0.0, "hours": 0}
+
+
+def _data_span_hours() -> int:
+    """How many hours of history actually exist on disk. 0 if unknown."""
+    now = time.time()
+    if _data_span["hours"] and (now - _data_span["at"]) < 3600:
+        return _data_span["hours"]
+    oldest = None
+    try:
+        adir = Path(CFG.get("archive_dir") or "")
+        if not adir.is_dir():
+            return 0
+        for path in adir.glob("ueba_alerts_*.jsonl.zip"):
+            m = _ARCHIVE_RE.search(path.name)
+            if not m:
+                continue
+            try:
+                d = datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if oldest is None or d < oldest:
+                oldest = d
+    except Exception:
+        return 0
+    if oldest is None:
+        return 0
+    hrs = int((datetime.now(timezone.utc) - oldest).total_seconds() // 3600) + 24
+    _data_span.update({"at": now, "hours": hrs})
+    return hrs
+
+
+def _canonical_hours(hours: int) -> int:
+    """Collapse any window at least as wide as the data into the "All" window.
+
+    history_days is 95 and _STANDARD_WINDOWS warms 30d, 60d and 90d alongside
+    "All". This store holds 22 days, so all four select exactly the same
+    alerts — and each one was getting its own set of cached endpoint results.
+    Measured: 54 cache entries at roughly 31 MB each, and three of the seven
+    warmed windows were duplicates of a fourth.
+
+    Collapsing the KEY only. The data returned is identical by definition (a
+    90-day window over 22 days of history is those 22 days), so no caller sees
+    a different answer; they just stop paying for four copies of it. As the
+    archive grows past 30 days the 30d window stops matching and separates
+    again on its own.
+    """
+    if not hours or hours <= 0:
+        return 0
+    span = _data_span_hours()
+    if span and hours >= span:
+        return 0
+    return hours
+
+
 def _endpoint_result(name: str, builder, hours: int, include_fp: bool):
     """Return the cached value for (name, hours, include_fp). Fresh hits return
     instantly with no lock. A slightly-stale value is also returned immediately
     (the warmer keeps active windows fresh in the background); we only block to
     build when there is no usable cached value at all (first-ever request for the
     window, or right after a cache invalidation)."""
+    hours = _canonical_hours(hours)
     key = (name, hours, include_fp)
     now = time.time()
     _active_windows[(hours, include_fp)] = now
@@ -1893,8 +1970,9 @@ def _warm_results_loop() -> None:
             # switching between them never pays a cold build — but refresh the
             # idle ones far less often (see _IDLE_REFRESH_AGE).
             for _h in _STANDARD_WINDOWS:
-                if (_h, False) not in windows:
-                    windows.append((_h, False))
+                _c = (_canonical_hours(_h), False)
+                if _c not in windows:
+                    windows.append(_c)
             for (hours, include_fp) in windows:
                 # Only rebuild entries that are getting stale — skip ones still
                 # fresh so the warmer doesn't peg a core recomputing the heavy
@@ -7298,6 +7376,7 @@ def _cache_report() -> dict:
     # gigabytes went.
     res = list(_result_cache.items())
     rows = {}
+    row_sample = []
     for k, v in res:
         val = v[1]
         n = None
@@ -7307,18 +7386,50 @@ def _cache_report() -> dict:
             n = sum(len(x) for x in val.values() if isinstance(x, (list, dict)))
         if n:
             rows["%s/%s/%s" % k] = n
+            # One row per entry, deep-sized. Bounded work (at most a few dozen
+            # rows total) and it turns "54 entries" into a megabyte figure,
+            # which is what the entry count could never tell us.
+            if len(row_sample) < 12:
+                if isinstance(val, list) and val:
+                    row_sample.append(val[0])
+                elif isinstance(val, dict):
+                    for x in val.values():
+                        if isinstance(x, list) and x:
+                            row_sample.append(x[0])
+                            break
+    total_rows = sum(rows.values())
+    per_row = (_deep_size(row_sample) / len(row_sample)) if row_sample else 0
     out["result_cache"] = {
         "entries": len(res),
-        "est_bytes": 0,          # not measured; see the note above
+        "est_bytes": int(per_row * total_rows),
+        "per_row_bytes": int(per_row),
         "rows_by_key": dict(sorted(rows.items(), key=lambda kv: -kv[1])[:12]),
-        "total_rows": sum(rows.values()),
+        "total_rows": total_rows,
     }
 
     out["active_windows"] = {"entries": len(_active_windows)}
+
+    # The live cache was missing from the first version of this report, which
+    # is why `unattributed` was the largest number in it. It holds slim records
+    # like the archive cache, capped at max_feed_alerts, so it should be small
+    # — but "should be" is what this function exists to stop us saying.
+    live = list(_alert_cache)
+    out["live_cache"] = {"alerts": len(live), "est_bytes": _sampled_bytes(live)}
+
+    # Geolocation results accumulate one entry per distinct external address
+    # seen on the firewall feed, and nothing evicts them. Individually tiny,
+    # unbounded in count.
+    geo = list(_geo_cache.values())
+    out["geo_cache"] = {"entries": len(geo), "est_bytes": _sampled_bytes(geo)}
+    gz = [v for v in _static_gzip_cache.values()]
+    out["static_gzip"] = {
+        "entries": len(gz),
+        "est_bytes": sum(len(v) if isinstance(v, (bytes, bytearray))
+                         else sys.getsizeof(v) for v in gz),
+    }
+
     out["misc"] = {
-        "geo_cache": len(_geo_cache),
         "geofeed_cache": len(_geofeed_cache),
-        "static_gzip_cache": len(_static_gzip_cache),
         "window_build_secs": {str(k): round(v, 1)
                               for k, v in sorted(_window_build_secs.items())},
     }
@@ -7327,7 +7438,11 @@ def _cache_report() -> dict:
     # and lands in `unattributed` instead. Said plainly because a total that
     # silently omits a cache reads as "the memory is elsewhere" when it is not.
     attributed = (out["archive_cache"]["est_bytes"]
-                  + out["window_cache"]["est_bytes"])
+                  + out["result_cache"]["est_bytes"]
+                  + out["window_cache"]["est_bytes"]
+                  + out["live_cache"]["est_bytes"]
+                  + out["geo_cache"]["est_bytes"]
+                  + out["static_gzip"]["est_bytes"])
     rss = _rss_bytes()
     out["totals"] = {
         "rss_bytes": rss,
@@ -7340,6 +7455,37 @@ def _cache_report() -> dict:
         "unattributed_mb": round(max(rss - attributed, 0) / 1048576, 1),
     }
     return out
+
+
+def _malloc_trim(why: str = "") -> int:
+    """Return freed heap to the OS. Returns MB released, or -1 if unavailable.
+
+    Python frees objects back to its own allocator, which hands whole arenas
+    back to glibc only when they are entirely empty. After the startup warm
+    builds and discards several window-sized structures the heap is heavily
+    fragmented, so a large amount of memory is free from Python's point of
+    view and still resident from the kernel's. RSS stays at the high-water
+    mark, which on this host is a quarter of a gigabyte from MemoryMax.
+
+    malloc_trim(0) walks glibc's free lists and releases what it can. It is a
+    no-op on a musl or non-glibc libc, hence the guarded import rather than an
+    assumption.
+    """
+    try:
+        import ctypes
+        before = _rss_bytes()
+        libc = ctypes.CDLL("libc.so.6")
+        if not hasattr(libc, "malloc_trim"):
+            return -1
+        libc.malloc_trim(ctypes.c_size_t(0))
+        gained = (before - _rss_bytes()) / 1048576
+        print("[dashboard] malloc_trim%s: released %.0f MB (rss %.0f -> %.0f MB)"
+              % ((" after " + why) if why else "", gained,
+                 before / 1048576, _rss_bytes() / 1048576), flush=True)
+        return int(gained)
+    except Exception as e:
+        print("[dashboard] malloc_trim unavailable: %s" % e, flush=True)
+        return -1
 
 
 _MEM_LOG_EVERY = 900.0          # seconds between memory attribution log lines
@@ -7365,14 +7511,22 @@ def _mem_log_loop() -> None:
             t = m["totals"]
             print("[dashboard] memory: rss=%.0fMB attributed=%.0fMB "
                   "unattributed=%.0fMB | archive=%.0fMB(%d files, %d alerts) "
-                  "results=%d entries/%s rows windows=%d active=%d"
+                  "results=%.0fMB(%d entries/%s rows) windows=%d active=%d "
+                  "live=%.0fMB(%d) geo=%.0fMB(%d) gz=%.0fMB"
                   % (t["rss_mb"], t["attributed_mb"], t["unattributed_mb"],
                      m["archive_cache"]["est_bytes"] / 1048576,
                      m["archive_cache"]["files"], m["archive_cache"]["alerts"],
+                     m["result_cache"]["est_bytes"] / 1048576,
                      m["result_cache"]["entries"],
                      format(m["result_cache"]["total_rows"], ","),
                      m["window_cache"]["windows"],
-                     m["active_windows"]["entries"]), flush=True)
+                     m["active_windows"]["entries"],
+                     m["live_cache"]["est_bytes"] / 1048576,
+                     m["live_cache"]["alerts"],
+                     m["geo_cache"]["est_bytes"] / 1048576,
+                     m["geo_cache"]["entries"],
+                     m["static_gzip"]["est_bytes"] / 1048576), flush=True)
+            _malloc_trim()
         except Exception as e:
             print("[dashboard] memory report failed: %s" % e, flush=True)
 
@@ -8128,6 +8282,9 @@ def _warm_archive_cache() -> None:
                     pass
         print(f"[dashboard] result cache pre-warmed ({len(_STANDARD_WINDOWS)} windows) "
               f"in {time.time() - t:.1f}s")
+        # The warm is where the fragmentation comes from, so trim right after
+        # it rather than waiting for the first periodic report.
+        _malloc_trim("warm")
     except Exception as e:
         print(f"[dashboard] result cache pre-warm failed ({e}) — building lazily")
 
