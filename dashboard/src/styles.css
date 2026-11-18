@@ -4616,8 +4616,42 @@ body.cust-modal-open { overflow: hidden; }
   line-height: 1;
   flex-shrink: 0;
   cursor: grab;
+  /* Keep the grip vertically aligned with the first line of content */
+  margin-top: 1px;
+  align-self: flex-start;
 }
 .cust-drag-noop { cursor: default; opacity: 0.3; }
+
+/* Content column to the right of the drag handle — fills remaining width */
+.cust-row-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Parent row items that contain a sublist: anchor the drag handle to the top
+   so it stays beside the section label, not floating mid-way through the sublist */
+.cust-item:has(.cust-sublist) {
+  align-items: flex-start;
+}
+
+/* Nested sub-panel list — strip browser defaults, add clean indentation */
+.cust-sublist {
+  list-style: none;
+  margin: 6px 0 2px 8px;
+  padding: 0 0 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-left: 1px solid rgba(0, 212, 255, 0.14);
+}
+
+/* Each sub-panel row */
+.cust-subitem {
+  display: flex;
+  align-items: center;
+}
 
 .cust-label {
   display: flex;
@@ -4632,6 +4666,11 @@ body.cust-modal-open { overflow: hidden; }
   font-size: 13px;
   color: var(--text);
   letter-spacing: 0.3px;
+}
+/* Sub-panel names are slightly smaller to show hierarchy without changing colour */
+.cust-subname {
+  font-size: 12.5px;
+  color: var(--text2);
 }
 
 .cust-footer {
