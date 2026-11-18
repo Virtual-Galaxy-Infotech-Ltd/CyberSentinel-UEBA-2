@@ -29,6 +29,7 @@ THREE LAYERS, because they fail differently
 from __future__ import annotations
 
 import os
+import smtplib
 import socket
 import sys
 import threading
@@ -621,6 +622,52 @@ def main() -> int:
        rd3["ready"] is False)
     ok("and the summary is the callback problem, not the doc",
        "private IP" in rd3["summary"], rd3["summary"][:70])
+
+    # ── what the failure MESSAGE says, which is the whole value of the test
+    #    button ───────────────────────────────────────────────────────────────
+    # Measured against the real Gmail on 18-Nov-2026: a wrong password does NOT
+    # produce SMTPAuthenticationError. The server hangs up part-way through
+    # AUTH and smtplib raises SMTPServerDisconnected. We used to explain that
+    # as "the SSL/STARTTLS setting does not match the port", which sent an
+    # administrator to change settings that were already correct — a real
+    # ssl/port mismatch raises ssl.SSLError instead, and always did.
+    import ssl as _ssl
+    E = RS._explain_smtp_error
+
+    m = E(smtplib.SMTPServerDisconnected("Connection unexpectedly closed"),
+          "smtp.gmail.com", 587, has_user=True)
+    ok("a disconnect WITH a login blames the password, not the port",
+       "password was rejected" in m and "does not match the port" not in m, m)
+    ok("and tells a Gmail user they need an app password",
+       "app password" in m.lower(), m)
+    ok("while still mentioning a network filter as the alternative",
+       "filter" in m.lower(), m)
+
+    m = E(smtplib.SMTPServerDisconnected("closed"), "mail.internal", 25,
+          has_user=False)
+    ok("a disconnect with NO login does not blame a password",
+       "password" not in m.lower(), m)
+    ok("an internal relay is not told about app passwords",
+       "app password" not in m.lower(), m)
+
+    m = E(_ssl.SSLError("[SSL: WRONG_VERSION_NUMBER] wrong version number"),
+          "smtp.gmail.com", 587)
+    ok("the port/TLS advice lives on the error that can actually mean it",
+       "465 needs ssl: true" in m, m)
+
+    # A 530 arrives as SMTPSenderRefused because the server rejects MAIL FROM
+    # until the session is encrypted. The sender address is not the problem,
+    # and the old text told the admin to go and edit from_addr.
+    m = E(smtplib.SMTPSenderRefused(
+              530, b"5.7.0 Must issue a STARTTLS command first", "a@b.com"),
+          "smtp.gmail.com", 587)
+    ok("a 530 is explained as 'encrypt first', not as a bad sender",
+       "encrypted session" in m and "from_addr" not in m, m)
+
+    m = E(smtplib.SMTPSenderRefused(553, b"5.7.1 Sender address rejected",
+                                    "a@b.com"), "mail.internal", 587)
+    ok("a genuine sender refusal still points at from_addr",
+       "from_addr" in m, m)
 
     total = len(_checks)
     if _failures:

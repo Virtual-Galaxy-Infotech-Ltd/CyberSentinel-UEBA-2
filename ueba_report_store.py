@@ -413,14 +413,35 @@ def _sender(cfg):
     return frm or user or "ueba@localhost"
 
 
-def _explain_smtp_error(e, host, port):
-    """Turn a socket/smtplib exception into something an administrator can act on."""
+def _needs_app_password(host) -> bool:
+    """Providers that require an app-specific password rather than the account one."""
+    h = str(host or "").strip().lower()
+    return h.endswith(("smtp.gmail.com", "googlemail.com", "smtp.yahoo.com"))
+
+
+def _explain_smtp_error(e, host, port, has_user=False):
+    """Turn a socket/smtplib exception into something an administrator can act on.
+
+    `has_user` matters because the same exception means different things with
+    and without a login configured — see the SMTPServerDisconnected branch.
+    """
     where = f"{host}:{port}"
+    app_pw = (" Gmail and Yahoo reject the normal account password over SMTP: "
+              "generate a 16-character app password and use that."
+              if _needs_app_password(host) else "")
     if isinstance(e, smtplib.SMTPAuthenticationError):
         return (f"Mail server {where} rejected the username/password "
                 f"(check reporting.smtp.username and the password or "
-                f"UEBA_SMTP_PASSWORD).")
+                f"UEBA_SMTP_PASSWORD).{app_pw}")
     if isinstance(e, smtplib.SMTPSenderRefused):
+        # A 530 here is not about the sender at all — it is the server telling
+        # us to encrypt first, and the old text sent admins to edit from_addr.
+        code = getattr(e, "smtp_code", None)
+        detail = str(getattr(e, "smtp_error", b"") or b"")
+        if code == 530 or "STARTTLS" in detail.upper():
+            return (f"Mail server {where} requires an encrypted session and the "
+                    f"connection was still in the clear — set starttls: true "
+                    f"for port 587, or ssl: true for port 465.")
         return (f"Mail server {where} refused the sender address "
                 f"{e.sender!r} — set reporting.smtp.from_addr to a mailbox "
                 f"this account may send as.")
@@ -438,9 +459,23 @@ def _explain_smtp_error(e, host, port):
         return (f"TLS handshake with {where} failed ({e}). Port 465 needs "
                 f"ssl: true; port 587 needs ssl: false with starttls: true.")
     if isinstance(e, smtplib.SMTPServerDisconnected):
-        return (f"Mail server {where} closed the connection. This usually means "
-                f"the SSL/STARTTLS setting does not match the port "
-                f"(465 = ssl, 587 = starttls).")
+        # Measured against Gmail: a WRONG PASSWORD does not come back as
+        # SMTPAuthenticationError. The server hangs up mid-AUTH and smtplib
+        # reports a disconnect, so with a login configured that is the first
+        # thing to check — not the TLS settings. A genuine ssl/port mismatch
+        # raises ssl.SSLError (WRONG_VERSION_NUMBER), handled below, so the
+        # old advice here was pointing at a cause that cannot produce it.
+        if has_user:
+            return (f"Mail server {where} closed the connection while signing "
+                    f"in, which almost always means the password was "
+                    f"rejected.{app_pw} A network filter between this host and "
+                    f"the mail server can also cut the session — if the "
+                    f"password is definitely right, check outbound port "
+                    f"{port}.")
+        return (f"Mail server {where} closed the connection. Either the mail "
+                f"server does not accept unauthenticated mail from this host, "
+                f"or a network filter is cutting the session — check outbound "
+                f"port {port}.")
     if isinstance(e, OSError):
         return f"Could not connect to mail server {where}: {e}"
     return f"Email via {where} failed: {e}"
@@ -495,7 +530,8 @@ def send_email(cfg, *, to, subject, body, attachment=None, filename=None,
     except RuntimeError:
         raise
     except Exception as e:
-        raise RuntimeError(_explain_smtp_error(e, host, port)) from e
+        raise RuntimeError(_explain_smtp_error(
+            e, host, port, has_user=bool(cfg.get("username")))) from e
     finally:
         if smtp is not None:
             try:
