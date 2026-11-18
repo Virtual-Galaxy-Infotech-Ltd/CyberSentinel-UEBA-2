@@ -38,8 +38,31 @@ def load_cfg(cfg_path: str, store_path: str | None) -> dict:
         print("  ! could not read %s: %s" % (cfg_path, e))
     # The console's saved settings override the YAML, which is the precedence
     # ueba_dashboard_server._smtp_cfg() applies.
-    for cand in ([store_path] if store_path else
-                 ["profiles/smtp.json", ".state/smtp.json", "smtp.json"]):
+    #
+    # Resolving the path the way _smtp_store_path() does matters more than it
+    # looks. That function places the file beside an operator-state file the
+    # site has actually configured, so it is NOT at a fixed location — on this
+    # deployment it is /opt/ueba/smtp_settings.json, derived from the alert
+    # store. A guessed list of names found nothing and this tool reported "no
+    # mail server configured" while the console had one saved all along.
+    cands = [store_path] if store_path else []
+    if not store_path:
+        try:
+            c = yaml.safe_load(open(cfg_path)) or {}
+            paths = c.get("paths") or {}
+            explicit = ((c.get("reporting") or {}).get("smtp_file"))
+            if explicit:
+                cands.append(explicit)
+            for key in ("false_positives_file", "watchlist_file",
+                        "nicknames_file", "ueba_output"):
+                sib = paths.get(key) or c.get(key)
+                if sib:
+                    cands.append(str(Path(sib).parent / "smtp_settings.json"))
+        except Exception:
+            pass
+        cands += ["smtp_settings.json", "profiles/smtp.json", ".state/smtp.json"]
+    seen = set()
+    for cand in [c for c in cands if c and not (c in seen or seen.add(c))]:
         p = Path(cand)
         if p.exists():
             try:
