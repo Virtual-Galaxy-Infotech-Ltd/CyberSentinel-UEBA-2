@@ -21,6 +21,13 @@ models_staging/
 vector_db/
 vector_db_staging/
 profiles/
+# the indexed alert store, wherever it is pointed: it holds real
+# alert records — account names and internal addresses
+alerts.db
+alerts.db-wal
+alerts.db-shm
+*.db-wal
+*.db-shm
 data/
 training_zips/
 archive/
