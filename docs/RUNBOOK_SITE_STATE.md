@@ -87,14 +87,71 @@ In order of preference:
 4. Regenerating `UEBA_SSO_SECRET` is a last resort: it invalidates every token
    the SIEM team has minted and needs coordinating with them.
 
+## Deploying (phase 0.4)
+
+`ops/deploy.sh` snapshots, applies, health-checks and rolls itself back when
+the check fails. `ops/rollback.sh` restores a snapshot later, when a problem
+shows up after the deploy passed.
+
+```bash
+ops/deploy.sh --from /tmp/staging ueba_engine.py ueba_peers.py
+ops/deploy.sh --check-only          # health check on its own
+ops/rollback.sh --list              # what can be rolled back to
+ops/rollback.sh                     # restore the most recent snapshot
+```
+
+Snapshots go to `/var/backups/ueba/<timestamp>/`, **outside the install
+tree** — the 18-Nov `git clean` deleted `.deploy-rollback/` along with every
+snapshot in it, including ones taken minutes earlier the same day.
+
+The health check asks the console over HTTP rather than asking systemd whether
+a process exists, because a process can be up and serving 502s — which is
+precisely what happened on 18-Nov.
+
+**Drilled 19-Nov-2026.** A deliberately broken `ueba_dashboard_server.py` was
+deployed: the console went to 502, deploy.sh restored the previous file,
+restarted, and reported `rolled back and healthy` with the console back on
+200. An untested rollback is not a rollback.
+
+This supersedes `rollback_deploy.sh`, which restored a fixed seven-file list
+captured on 09-Nov regardless of what had been deployed since.
+
 ## Still open in phase 0
 
 - **0.2** `/opt/ueba` is still simultaneously the production install, a git
   working tree, and where a teammate commits from. Production should be a
   deploy target, not a workspace. Not fixed by this change — only defused.
-- **0.4** A deploy that snapshots, applies, health-checks and rolls back on
-  failure. `rollback_deploy.sh` exists but restores a fixed file list from
-  09-Nov, and the `git clean` deleted its snapshot directory.
-- `install_ueba.sh` still writes both env files into the install tree, so a
-  fresh install starts in the old shape. It needs to create `/etc/ueba` and
-  the drop-ins instead.
+- **0.4 — done.** See *Deploying* above.
+- `install_ueba.sh` — **done.** It now writes site state to `$SITE_DIR`
+  (`/etc/ueba`, overridable with `UEBA_SITE_DIR`), symlinks the env files back
+  into the install directory for the six scripts that look beside themselves,
+  and points every unit at the site directory. A fresh install now starts in
+  the right shape.
+- **0.2 is bigger than first described** — see below.
+
+## What 0.2 actually involves (found 19-Nov)
+
+The production install is not merely a working tree; it is a working tree
+**on a feature branch with a second remote**:
+
+- `/opt/ueba` is checked out on branch **`aishwarya`**, not `main`, and is
+  **5 commits ahead and 5 behind** `origin/main`.
+- It has **two remotes**: `origin` (GitHub) and `forgejo` (a self-hosted
+  Forgejo). The branch carries a merge from `forgejo/aishwarya`.
+- Three commits exist **twice** under different hashes — once on `main`, once
+  rebased onto this branch:
+
+  | Subject | on `main` | on the box's branch |
+  |---|---|---|
+  | collapse duplicate wide windows | `8d78d88` | `ebcfdd5` |
+  | attribute the live, geo and static caches | `6a13162` | `c785515` |
+  | gitignore: an inline comment is part of the pattern | `d7124fa` | `12e8b63` |
+
+So production runs code that is not on `main`, `main` has code that is not in
+production, and a future merge has to cope with the same changes arriving
+twice. None of that is a thing to fix quietly in someone else's absence — it
+needs agreeing with whoever owns that branch before anything is reconciled.
+
+Phase 0 has made the *runtime* survivable regardless: configuration, secrets
+and snapshots now live outside the tree, so whatever happens to the branch
+cannot take the service down the way it did on 18-Nov.

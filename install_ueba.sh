@@ -31,6 +31,15 @@ VERSION="1.0.0"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGFILE="/tmp/ueba-install-$(date +%Y%m%d-%H%M%S).log"
 DRY_RUN=0
+# Site state lives OUTSIDE the install directory.
+#
+# The install directory is a git working tree on at least one site. On
+# 18-Nov-2026 a git pull there deleted both EnvironmentFiles and reverted the
+# config to shipped defaults; the console served 502 for ~25 minutes, and the
+# SSO secret survived only because a running process still held it in its
+# environment. Nothing under /etc/ueba is inside a git tree, so no pull,
+# checkout or clean can reach it. See docs/RUNBOOK_SITE_STATE.md.
+SITE_DIR="${UEBA_SITE_DIR:-/etc/ueba}"
 UNATTENDED=""
 
 # ── Styling ───────────────────────────────────────────────────────────────────
@@ -446,7 +455,8 @@ render_config() {
 
   # Bridge settings live in their own env file so the shipped bridge script stays
   # generic — no per-site edits to versioned code.
-  cat >"$BASE_DIR/ueba_site.env" <<EOF
+  install -d -m 0750 "$SITE_DIR"
+  cat >"$SITE_DIR/ueba_site.env" <<EOF
 # Site-specific settings for $CLIENT_NAME — generated $(date '+%F %T')
 # Sourced by ueba_sync_bridge.sh and the systemd units.
 UEBA_BASE="$BASE_DIR"
@@ -458,8 +468,16 @@ SOC_ENRICHED_DIR="$SIEM_ENRICHED_DIR"
 SOC_CLIENT_KEYS="$SIEM_CLIENT_KEYS"
 UEBA_SELF_IP="$SELF_IP"
 EOF
-  chmod 600 "$BASE_DIR/ueba_site.env"
-  ok "wrote ueba_site.env"
+  chmod 600 "$SITE_DIR/ueba_site.env"
+  # Six scripts (weekly retrain, rotate, sync bridge, watchdog, bootstrap and
+  # this installer) resolve the site env as
+  #     ${UEBA_SITE_ENV:-$(dirname "$0")/ueba_site.env}
+  # and cron runs them with that variable unset, so they look beside
+  # themselves. A symlink keeps every one of those callers working while the
+  # secret itself sits outside the install tree: a clean there destroys a
+  # recreatable link, not the 64-character SSO secret behind it.
+  ln -sfn "$SITE_DIR/ueba_site.env" "$BASE_DIR/ueba_site.env"
+  ok "wrote $SITE_DIR/ueba_site.env (linked into $BASE_DIR)"
 
   if [[ -f "$SELF_DIR/ueba_config.yaml" ]]; then
     cp "$SELF_DIR/ueba_config.yaml" "$BASE_DIR/ueba_config.yaml"
@@ -591,7 +609,13 @@ text = pat.sub(block, text) if pat.search(text) else \
 open(cfg, "w", encoding="utf-8").write(text)
 print("agent_sync enabled")
 PYEOF
-    ok "rendered ueba_config.yaml for this site"
+    # The rendered config is the SITE's, so it belongs outside the install
+    # tree with the rest of the site state. The copy left in $BASE_DIR is
+    # inert — no unit reads it — and is kept only so the sed pipeline above
+    # stays unchanged and an operator can diff what was generated.
+    install -d -m 0750 "$SITE_DIR"
+    install -m 0640 "$BASE_DIR/ueba_config.yaml" "$SITE_DIR/ueba_config.yaml"
+    ok "rendered ueba_config.yaml for this site (live copy: $SITE_DIR)"
   else
     warn "template ueba_config.yaml not found beside the installer"
   fi
@@ -675,12 +699,15 @@ setup_runtime() {
   # Torch defaults to one thread per core. On a 60-core box that made the tiny
   # 35->24->12 autoencoder 200x SLOWER (29s per entity vs 0.14s) purely from
   # thread contention, so pin it low for every UEBA process.
-  cat >"$BASE_DIR/ueba_runtime.env" <<'EOF'
+  install -d -m 0750 "$SITE_DIR"
+  cat >"$SITE_DIR/ueba_runtime.env" <<'EOF'
 OMP_NUM_THREADS=2
 MKL_NUM_THREADS=2
 OPENBLAS_NUM_THREADS=2
 TORCH_NUM_THREADS=2
 EOF
+  chmod 600 "$SITE_DIR/ueba_runtime.env"
+  ln -sfn "$SITE_DIR/ueba_runtime.env" "$BASE_DIR/ueba_runtime.env"
   ok "pinned BLAS/torch threads (prevents the 200x thread-thrash)"
 
   install_units
@@ -700,9 +727,9 @@ install_units() {
   for svc in $services; do
     local exec desc mem cpu
     case "$svc" in
-      engine)    desc="CyberSentinel UEBA Engine";    exec="$py $BASE_DIR/ueba_engine.py --config $BASE_DIR/ueba_config.yaml"
+      engine)    desc="CyberSentinel UEBA Engine";    exec="$py $BASE_DIR/ueba_engine.py --config $SITE_DIR/ueba_config.yaml"
                  mem="$MEM_ENGINE";    cpu="400%" ;;
-      dashboard) desc="CyberSentinel UEBA Dashboard"; exec="$py $BASE_DIR/ueba_dashboard_server.py --config $BASE_DIR/ueba_config.yaml"
+      dashboard) desc="CyberSentinel UEBA Dashboard"; exec="$py $BASE_DIR/ueba_dashboard_server.py --config $SITE_DIR/ueba_config.yaml"
                  mem="$MEM_DASHBOARD"; cpu="200%" ;;
       bridge)    desc="CyberSentinel UEBA Sync Bridge"; exec="/bin/bash $BASE_DIR/ueba_sync_bridge.sh"
                  mem="2G";             cpu="100%" ;;
@@ -716,8 +743,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$BASE_DIR
-EnvironmentFile=$BASE_DIR/ueba_site.env
-EnvironmentFile=$BASE_DIR/ueba_runtime.env
+EnvironmentFile=$SITE_DIR/ueba_site.env
+EnvironmentFile=$SITE_DIR/ueba_runtime.env
 ExecStart=$exec
 Restart=always
 RestartSec=10
@@ -762,7 +789,7 @@ After=ueba-engine.service
 
 [Service]
 Type=oneshot
-Environment=UEBA_SITE_ENV=$BASE_DIR/ueba_site.env
+Environment=UEBA_SITE_ENV=$SITE_DIR/ueba_site.env
 ExecStart=/usr/local/bin/ueba-engine-watchdog.sh
 StandardOutput=null
 StandardError=journal
