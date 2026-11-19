@@ -2054,6 +2054,69 @@ class UEBAEngine:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
+# ── Single-instance guard (HA phase 1.3) ────────────────────────────────────
+#
+# Nothing stopped two engines running. There is no flock, no pidfile, nothing
+# — and the consequence is not a noisy log, it is silent corruption: two
+# engines both update the same entity's profile, risk history and device
+# trail, and the loser's writes are simply lost.
+#
+# Kafka does not save us from this, which is the surprising part. Partition
+# assignment does mean each EVENT is handled by exactly one consumer, so two
+# engines would not double-score a single event. But the `enriched` topic is
+# partitioned by SOURCE IP, not by entity, and ~12% of its messages carry no
+# key at all and spread round-robin. One entity's events therefore land on
+# several partitions, so two engines race on that entity's state.
+#
+# flock, not a pidfile. A pidfile goes stale when a process is killed with
+# SIGKILL — which is exactly how this engine died on 15-Nov, OOM-killed
+# mid-retrain — and the next start then has to guess whether the recorded pid
+# is a live engine or a recycled number. The kernel releases an flock when the
+# holding process dies, however it dies, so there is no stale state to reason
+# about.
+#
+# This is the single-node form of what phase 2 does across nodes. It is
+# deliberately NOT leader election: it refuses, rather than waiting to be
+# promoted, because on one host a second engine is a mistake and not a standby.
+
+# Module-level on purpose: the lock lives as long as this handle is open, so
+# letting it fall out of scope at the end of the function would release the
+# lock while the engine carried on running.
+_INSTANCE_LOCK_FH = None
+
+
+def acquire_single_instance(lock_path: str):
+    """Take the engine's exclusive lock. Returns (ok, holder_description)."""
+    global _INSTANCE_LOCK_FH
+    import fcntl
+    import socket
+
+    d = os.path.dirname(os.path.abspath(lock_path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    # "a+" so the file is created if absent and NOT truncated if another engine
+    # holds it — truncating first would erase the holder's details before
+    # discovering we are not allowed to have the lock.
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        holder = (fh.read() or "").strip() or "an unidentified process"
+        fh.close()
+        return False, holder
+
+    fh.seek(0)
+    fh.truncate()
+    fh.write("pid=%d host=%s started=%s\n"
+             % (os.getpid(), socket.gethostname(),
+                datetime.now(timezone.utc).isoformat()))
+    fh.flush()
+    _INSTANCE_LOCK_FH = fh
+    return True, ""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="CyberSentinel UEBA Engine — real-time behavioral anomaly detection",
@@ -2070,6 +2133,19 @@ def main():
 
     for d in ["logs", ".state", "profiles"]:
         os.makedirs(d, exist_ok=True)
+
+    # Refuse to be the second engine. Checked after the config is loaded so the
+    # lock can live beside the rest of this site's state, and before any store
+    # is opened so a rejected start has touched nothing.
+    lock_path = (config.get("paths") or {}).get("engine_lock") or ".state/ueba-engine.lock"
+    ok, holder = acquire_single_instance(lock_path)
+    if not ok:
+        log.error("Another UEBA engine already holds %s (%s). Refusing to "
+                  "start: two engines would both write the same profiles and "
+                  "risk history, and the loser's updates would be lost "
+                  "silently.", lock_path, holder)
+        sys.exit(3)
+    log.info("Single-instance lock acquired: %s", lock_path)
 
     input_path  = args.input  or config["paths"]["enriched_input"]
     output_path = args.output or config["paths"]["ueba_output"]

@@ -6743,6 +6743,29 @@ def api_watchlist_remove(eid):
     return jsonify({"ok": True, "id": eid})
 
 
+@app.route("/api/watchlist/<eid>", methods=["PATCH"])
+@_require_cap("watchlist.edit")
+def api_watchlist_update(eid):
+    if not WATCHLIST_AVAILABLE:
+        return _watchlist_unavailable()
+    body = request.get_json(silent=True) or {}
+    allowed = {f: body[f] for f in ("reason", "boost", "type", "value") if f in body}
+    if not allowed:
+        return jsonify({"ok": False, "error": "no updatable fields provided"}), 400
+    if "type" in allowed and allowed["type"] not in ueba_watchlist.TYPES:
+        return jsonify({"ok": False,
+                        "error": f"type must be one of {list(ueba_watchlist.TYPES)}"}), 400
+    try:
+        entry = ueba_watchlist.update(WATCHLIST_FILE, eid, **allowed)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if entry is None:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return jsonify({"ok": True, "entry": entry})
+
+
 @app.route("/api/audit")
 @_require_cap("audit.view")
 def api_audit():
@@ -7541,6 +7564,47 @@ def api_diag_memory():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── Readiness (HA phase 1.4) ────────────────────────────────────────────────
+#
+# /api/health answers "is the platform healthy", which the Overview card
+# renders and which stays useful while this process is still warming. A load
+# balancer needs a different question: "should I send this node traffic YET".
+#
+# They are not the same, and conflating them is how a node that is up but
+# still building its caches gets put into rotation and answers slowly or not
+# at all. Phase 4 puts two consoles behind HAProxy, so this has to exist
+# before that, not after.
+#
+# Unauthenticated ON PURPOSE, and deliberately empty of data: a load balancer
+# cannot hold a session, and this returns four booleans and an integer. No
+# counts, no entity names, nothing from the store — there is nothing here to
+# protect. /api/diagnostics/memory, which does expose sizes, stays behind
+# users.manage.
+_READY = {"archive": False, "results": False, "live": False,
+          "started_at": time.time()}
+
+
+def _mark_ready(stage: str) -> None:
+    _READY[stage] = True
+
+
+@app.route("/api/ready")
+def api_ready():
+    """200 once this node can serve; 503 while it is still warming."""
+    pending = [k for k in ("live", "archive", "results") if not _READY.get(k)]
+    body = {
+        "ready": not pending,
+        "live_cache": bool(_READY.get("live")),
+        "archive_cache": bool(_READY.get("archive")),
+        "result_cache": bool(_READY.get("results")),
+        "uptime_secs": int(time.time() - _READY["started_at"]),
+    }
+    if pending:
+        body["waiting_on"] = pending
+        return jsonify(body), 503
+    return jsonify(body), 200
+
+
 @app.route("/api/health")
 def health():
     """Engine + dashboard health snapshot for the Overview health card."""
@@ -8254,6 +8318,7 @@ def _warm_archive_cache() -> None:
         t = time.time()
         n = len(_read_live_alerts())
         print(f"[dashboard] live cache warmed: {n} alerts in {time.time() - t:.1f}s")
+        _mark_ready("live")
     except Exception as e:
         print(f"[dashboard] live cache warm-up failed ({e}) — loading lazily")
     # Then the archives (wide 'All'/30D/90D windows) in the background.
@@ -8261,6 +8326,7 @@ def _warm_archive_cache() -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=int(CFG.get("history_days", 95) or 95))
         t = time.time()
         n = len(_read_archived_alerts(cutoff))
+        _mark_ready("archive")
         print(f"[dashboard] archive cache warmed: {n} alerts in {time.time() - t:.1f}s "
               f"from {CFG.get('archive_dir')}")
     except Exception as e:  # never let warm-up crash startup
@@ -8280,6 +8346,7 @@ def _warm_archive_cache() -> None:
                     _build_and_store(name, builder, hours, include_fp)
                 except Exception:
                     pass
+        _mark_ready("results")
         print(f"[dashboard] result cache pre-warmed ({len(_STANDARD_WINDOWS)} windows) "
               f"in {time.time() - t:.1f}s")
         # The warm is where the fragmentation comes from, so trim right after

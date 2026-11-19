@@ -997,6 +997,14 @@ def require_role(minimum: str = "viewer"):
 # could make login unreachable and lock everyone out of their own console.
 ALWAYS_PUBLIC = (
     "/api/health",
+    # Readiness, for the load balancer phase 4 puts in front of two consoles.
+    # A balancer cannot hold a session, so a gated readiness probe would mark
+    # every node permanently unhealthy and take the console offline — the exact
+    # opposite of what it is for. The endpoint answers with four booleans and
+    # an uptime integer and reads nothing from the store, so there is nothing
+    # here to protect. /api/diagnostics/memory, which does report sizes, stays
+    # behind users.manage.
+    "/api/ready",
     "/api/auth/login",       # you cannot log in through a gate that needs a login
     "/api/auth/me",          # lets the SPA discover it is unauthenticated
     "/api/auth/capabilities",
