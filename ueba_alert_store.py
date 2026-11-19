@@ -66,7 +66,7 @@ except ImportError:                                   # pragma: no cover
         return json.dumps(o, separators=(",", ":"))
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Epoch INTEGER for `ts`, not an ISO string. Every window query is a range scan
 # on it, and comparing integers needs no per-row parsing or collation — which is
@@ -103,6 +103,18 @@ CREATE INDEX IF NOT EXISTS ix_alerts_host_ts    ON alerts(host_name, ts);
 CREATE INDEX IF NOT EXISTS ix_alerts_sig_ts     ON alerts(signature, ts);
 CREATE INDEX IF NOT EXISTS ix_alerts_verdict_ts ON alerts(verdict, ts);
 CREATE INDEX IF NOT EXISTS ix_alerts_campaign   ON alerts(campaign_id);
+
+-- One row per (alert, reason). A child table rather than a JSON column so the
+-- "top reasons in this window" aggregate is an indexed GROUP BY rather than a
+-- scan with per-row JSON parsing, and so it ports to PostgreSQL unchanged —
+-- json_each is SQLite-only and jsonb_array_elements is its Postgres spelling,
+-- whereas a join is a join.
+CREATE TABLE IF NOT EXISTS alert_reasons (
+    event_id TEXT NOT NULL,
+    reason   TEXT NOT NULL,
+    PRIMARY KEY (event_id, reason)
+);
+CREATE INDEX IF NOT EXISTS ix_reasons_reason ON alert_reasons(reason);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -282,6 +294,28 @@ def upsert_many(con: sqlite3.Connection, alerts, *, fp_ids=(), src: str = "") ->
     if not rows:
         return 0
     con.executemany(_UPSERT, rows)
+
+    # Reasons are rewritten per alert rather than merged: a re-import carries
+    # the current truth, and leaving a reason behind that the engine no longer
+    # emits would quietly inflate every "top reasons" aggregate afterwards.
+    ids = [r[0] for r in rows]
+    con.executemany("DELETE FROM alert_reasons WHERE event_id = ?",
+                    [(i,) for i in ids])
+    pairs = []
+    for a in alerts:
+        if not isinstance(a, dict):
+            continue
+        eid = str(a.get("event_id") or "")
+        if not eid:
+            continue
+        for r in ((a.get("ueba") or {}).get("anomaly_reasons") or []):
+            r = str(r).strip()
+            if r:
+                pairs.append((eid, r))
+    if pairs:
+        con.executemany(
+            "INSERT INTO alert_reasons (event_id, reason) VALUES (?, ?) "
+            "ON CONFLICT(event_id, reason) DO NOTHING", pairs)
     return len(rows)
 
 
@@ -420,6 +454,127 @@ def tier_coverage(con, hours: int = 0, *, include_fp: bool = False, now=None) ->
         "FROM alerts WHERE ts >= ?" + _fp_clause(include_fp) +
         " GROUP BY tier ORDER BY n DESC", (lo,)).fetchall()
     return {r["tier"]: r["n"] for r in rows}
+
+
+def backfill_reasons(con, *, batch: int = 5000) -> int:
+    """Populate alert_reasons for rows imported before schema v2.
+
+    Reads the reasons back out of each row's stored slim record rather than
+    re-reading the source files: the data is already here, and a re-import
+    would re-parse 400 MB to recover something we kept.
+    """
+    done = 0
+    while True:
+        rows = con.execute(
+            "SELECT a.event_id, a.slim FROM alerts a "
+            "WHERE NOT EXISTS (SELECT 1 FROM alert_reasons r "
+            "                  WHERE r.event_id = a.event_id) "
+            "LIMIT ?", (int(batch),)).fetchall()
+        if not rows:
+            break
+        pairs = []
+        marks = []
+        for r in rows:
+            try:
+                rec = _loads(r["slim"])
+            except Exception:
+                rec = {}
+            rs = ((rec.get("ueba") or {}).get("anomaly_reasons") or [])
+            got = False
+            for x in rs:
+                x = str(x).strip()
+                if x:
+                    pairs.append((r["event_id"], x))
+                    got = True
+            if not got:
+                # An alert with no reasons would be re-selected forever by the
+                # NOT EXISTS above, so it gets a sentinel row that the queries
+                # ignore. Without this the loop never terminates.
+                marks.append((r["event_id"], ""))
+        if pairs:
+            con.executemany(
+                "INSERT INTO alert_reasons (event_id, reason) VALUES (?, ?) "
+                "ON CONFLICT(event_id, reason) DO NOTHING", pairs)
+        if marks:
+            con.executemany(
+                "INSERT INTO alert_reasons (event_id, reason) VALUES (?, ?) "
+                "ON CONFLICT(event_id, reason) DO NOTHING", marks)
+        con.commit()
+        done += len(rows)
+    # The sentinel must never reach an aggregate.
+    con.execute("DELETE FROM alert_reasons WHERE reason = ''")
+    con.commit()
+    return done
+
+
+def top_reasons(con, hours: int = 0, *, limit: int = 5,
+                include_fp: bool = False, now=None) -> list:
+    """Most common anomaly reasons in the window."""
+    lo = _window(hours, now)
+    rows = con.execute(
+        "SELECT r.reason AS reason, COUNT(*) AS n "
+        "FROM alert_reasons r JOIN alerts a ON a.event_id = r.event_id "
+        "WHERE a.ts >= ?" + (" AND a.is_fp = 0" if not include_fp else "") +
+        " GROUP BY r.reason ORDER BY n DESC, r.reason ASC LIMIT ?",
+        (lo, int(limit))).fetchall()
+    return [{"reason": r["reason"], "count": r["n"]} for r in rows]
+
+
+def stats_window(con, hours: int = 0, *, include_fp: bool = False,
+                 now=None, cap: int = 0) -> dict:
+    """The /api/stats payload, computed in SQL.
+
+    Reproduces _build_stats exactly, including two behaviours that a naive
+    translation gets wrong:
+
+      unique_users counts a bucket for alerts with NO user. The in-memory
+      version does `users_seen.add(get_user(a))`, and get_user returns None
+      for an unattributed alert — so None is a member of that set.
+      COUNT(DISTINCT entity) excludes NULLs, which would report one fewer.
+
+      alert_rate_1h is relative to NOW, not to the window. A 24-hour window
+      and a 90-day window report the same last-hour count.
+    """
+    lo = _window(hours, now)
+    fp = _fp_clause(include_fp)
+    t_now = now if now is not None else time.time()
+
+    r = con.execute(
+        "SELECT COUNT(*) AS total, "
+        "COUNT(DISTINCT entity) AS named_users, "
+        "SUM(CASE WHEN entity IS NULL OR entity = '' THEN 1 ELSE 0 END) AS unnamed, "
+        "COUNT(DISTINCT CASE WHEN campaign_id IS NOT NULL AND campaign_id <> '' "
+        "                    THEN campaign_id END) AS campaigns, "
+        "SUM(CASE WHEN verdict = 'highly_anomalous' THEN 1 ELSE 0 END) AS highly, "
+        "SUM(CASE WHEN verdict = 'anomalous' THEN 1 ELSE 0 END) AS anomalous, "
+        "SUM(CASE WHEN verdict = 'suspicious' THEN 1 ELSE 0 END) AS suspicious, "
+        "SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS rate_1h "
+        "FROM alerts WHERE ts >= ?" + fp,
+        (int(t_now - 3600), lo)).fetchone()
+
+    total = int(r["total"] or 0)
+    if not total:
+        return {"total_alerts": 0, "highly_anomalous": 0, "anomalous": 0,
+                "suspicious": 0, "campaigns": 0, "suppressed_noise": 0,
+                "unique_users": 0, "alert_rate_1h": 0, "top_reasons": []}
+
+    unique_users = int(r["named_users"] or 0) + (1 if int(r["unnamed"] or 0) else 0)
+    out = {
+        "total_alerts":     total,
+        "highly_anomalous": int(r["highly"] or 0),
+        "anomalous":        int(r["anomalous"] or 0),
+        "suspicious":       int(r["suspicious"] or 0),
+        "campaigns":        int(r["campaigns"] or 0),
+        "unique_users":     unique_users,
+        "alert_rate_1h":    int(r["rate_1h"] or 0),
+        "top_reasons":      top_reasons(con, hours, limit=5,
+                                        include_fp=include_fp, now=now),
+    }
+    if cap:
+        out["window_total"] = total
+        out["window_cap"] = int(cap)
+        out["window_capped"] = total > int(cap)
+    return out
 
 
 def recent(con, hours: int = 0, *, limit: int = 200, offset: int = 0,

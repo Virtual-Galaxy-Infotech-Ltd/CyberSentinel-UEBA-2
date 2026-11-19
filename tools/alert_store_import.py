@@ -34,6 +34,63 @@ _ARCHIVE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _BATCH = 2000
 
 
+def make_projector(cfg_path: str):
+    """Return the dashboard's slim projection, or None.
+
+    WHY THIS IS NEEDED, AND WHY IT BORROWS RATHER THAN REIMPLEMENTS
+
+    The archive holds records the dashboard has already projected, so they
+    carry `__user` — the resolved entity. The LIVE file holds raw engine
+    records, which do not. Importing those directly stored entity = NULL for
+    every live alert, and the verification harness caught it immediately:
+    unique_users came back as 1 (a single "no user" bucket) against 87 from
+    the in-memory path.
+
+    Resolving the user is not a one-liner — it reads subject, object and the
+    raw event, and it honours operator identity mappings. Reimplementing that
+    here would be a second definition free to drift from the one the console
+    actually displays, which is the worst kind of bug: both sides defensible,
+    the numbers different. So this borrows the real one.
+
+    Importing the console module pulls in Flask and is slow, which is fine for
+    a batch importer and would not be fine on the hot path.
+    """
+    try:
+        import ueba_dashboard_server as dash
+        from pathlib import Path
+        dash.CFG = dash.load_dashboard_config(cfg_path)
+        dash._RAW_CFG = dash.load_raw_config(cfg_path) or {}
+        dash.ALERTS_FILE = Path(dash.CFG["alerts_file"])
+        dash.FP_FILE = Path(dash.CFG["false_positives_file"])
+        return dash._slim
+    except Exception as e:
+        print("  WARNING: cannot load the console's projection (%s: %s)."
+              % (type(e).__name__, e))
+        print("           Live records will import without a resolved entity,")
+        print("           and per-user aggregates will undercount.")
+        return None
+
+
+def project(records: list, slim):
+    """Apply the slim projection to any record that has not had it."""
+    if slim is None:
+        return records
+    if not callable(slim):
+        # Loud, not silent. The previous version caught this and carried on,
+        # which meant a shadowed variable produced a full import with every
+        # entity null and no indication anything was wrong.
+        raise TypeError("projector is not callable: %r" % type(slim).__name__)
+    out = []
+    for r in records:
+        if isinstance(r, dict) and not r.get("__user"):
+            try:
+                r = slim(r)
+            except Exception as e:
+                print("  ! projection failed for one record: %s" % e)
+        out.append(r)
+    return out
+
+
 def _abs(base: str, p: str) -> str:
     return p if os.path.isabs(p) else os.path.join(base, p)
 
@@ -84,7 +141,13 @@ def _save_state(con, source: str, offset: int, mtime: float, rows: int) -> None:
          time.strftime("%Y-%m-%dT%H:%M:%S")))
 
 
-def import_archives(con, adir: str, fp: set, slim_ver: int, *, dry: bool) -> tuple:
+def import_archives(con, adir: str, fp: set, slim_ver: int, *, dry: bool,
+                    projector=None) -> tuple:
+    # NOTE: the local `slim` below is the slim-CACHE PATH for each archive.
+    # The projector is deliberately named differently: when both were called
+    # `slim`, the path shadowed the callable, project() was handed a string,
+    # and the resulting TypeError was swallowed by its own except — so every
+    # record imported unprojected and nothing said so.
     """Import every daily archive. Prefers the .slimN projection when present."""
     if not os.path.isdir(adir):
         print("  archive dir %s does not exist — skipping" % adir)
@@ -141,7 +204,8 @@ def import_archives(con, adir: str, fp: set, slim_ver: int, *, dry: bool) -> tup
 
         wrote = 0
         for i in range(0, len(records), _BATCH):
-            wrote += store.upsert_many(con, records[i:i + _BATCH], fp_ids=fp, src=src)
+            wrote += store.upsert_many(
+                con, project(records[i:i + _BATCH], projector), fp_ids=fp, src=src)
             con.commit()
         _save_state(con, src, 0, mtime, wrote)
         con.commit()
@@ -152,7 +216,7 @@ def import_archives(con, adir: str, fp: set, slim_ver: int, *, dry: bool) -> tup
     return total, skipped
 
 
-def import_live(con, path: str, fp: set, *, dry: bool) -> int:
+def import_live(con, path: str, fp: set, *, dry: bool, projector=None) -> int:
     """Import the live append-only file from the last byte offset consumed."""
     if not os.path.exists(path):
         print("  live file %s does not exist — skipping" % path)
@@ -186,7 +250,8 @@ def import_live(con, path: str, fp: set, *, dry: bool) -> int:
             except Exception:
                 continue
             if len(batch) >= _BATCH and not dry:
-                wrote += store.upsert_many(con, batch, fp_ids=fp, src=src)
+                wrote += store.upsert_many(
+                    con, project(batch, projector), fp_ids=fp, src=src)
                 con.commit()
                 batch = []
     if dry:
@@ -293,9 +358,12 @@ def main() -> int:
     print("\n  %d false-positive marking(s) will be carried over" % len(fp))
     print("\nIMPORT%s" % ("  (dry run — nothing is written)" if a.dry_run else ""))
     t0 = time.time()
+    slim = make_projector(a.config)
+    print("  entity resolution: %s"
+          % ("console projection" if slim else "UNAVAILABLE — see warning above"))
     arch, _ = import_archives(con, paths["archive"], fp, paths["slim_ver"],
-                              dry=a.dry_run)
-    live = import_live(con, paths["alerts"], fp, dry=a.dry_run)
+                              dry=a.dry_run, projector=slim)
+    live = import_live(con, paths["alerts"], fp, dry=a.dry_run, projector=slim)
     st = store.stats(con)
     print("\nRESULT")
     print("  archive records : %s" % format(arch, ","))
